@@ -940,6 +940,9 @@
       "mentionPatterns": ["@小T", "@Trae猫", "@trae"],
       "roleDescription": "Trae CLI ACP 接入测试猫",
       "defaultVariantId": "trae-acp-default",
+      "features": {
+        "sessionChain": true
+      },
       "variants": [
         {
           "id": "trae-acp-default",
@@ -976,6 +979,9 @@
       "mentionPatterns": ["@小Q", "@Qoder猫", "@qoder"],
       "roleDescription": "Qoder CLI 接入测试猫",
       "defaultVariantId": "qoder-default",
+      "features": {
+        "sessionChain": true
+      },
       "variants": [
         {
           "id": "qoder-default",
