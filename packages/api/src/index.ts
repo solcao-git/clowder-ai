@@ -1246,6 +1246,13 @@ async function main(): Promise<void> {
             service = new A2AAgentService({ catId, config: { url: a2aUrl } });
             break;
           }
+          case 'qoder': {
+            const { QoderAgentService } = await import(
+              './domains/cats/services/agents/providers/QoderAgentService.js'
+            );
+            service = new QoderAgentService({ catId });
+            break;
+          }
           default:
             app.log.warn(`[api] Unknown client "${config.clientId}" for cat "${id}". It will not be routable.`);
             continue;

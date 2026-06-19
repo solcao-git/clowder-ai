@@ -179,6 +179,20 @@
       "lead": false,
       "available": true,
       "evaluation": "claude-fable-5 新布偶猫，Opus x2 猫粮，能力画像待校准"
+    },
+    "trae": {
+      "family": "trae-acp",
+      "roles": ["assistant"],
+      "lead": false,
+      "available": true,
+      "evaluation": "Trae CLI ACP 接入测试猫，后端走 Trae Doubao-Seed-2.0-Code"
+    },
+    "qoder": {
+      "family": "qoder",
+      "roles": ["assistant"],
+      "lead": false,
+      "available": true,
+      "evaluation": "Qoder CLI 接入测试猫"
     }
   },
   "reviewPolicy": {
@@ -909,6 +923,72 @@
             "temperature": 0.3
           },
           "accountRef": "claude"
+        }
+      ]
+    },
+    {
+      "id": "trae-acp",
+      "catId": "trae",
+      "name": "Trae猫",
+      "displayName": "Trae猫",
+      "nickname": "小T",
+      "avatar": "/avatars/antigravity.png",
+      "color": {
+        "primary": "#4ECDC4",
+        "secondary": "#E8FFF9"
+      },
+      "mentionPatterns": ["@小T", "@Trae猫", "@trae"],
+      "roleDescription": "Trae CLI ACP 接入测试猫",
+      "defaultVariantId": "trae-acp-default",
+      "variants": [
+        {
+          "id": "trae-acp-default",
+          "clientId": "acp",
+          "defaultModel": "Doubao-Seed-2.0-Code",
+          "mcpSupport": true,
+          "cli": {
+            "command": "trae-cli",
+            "outputFormat": "stream-json"
+          },
+          "acp": {
+            "command": "C:\\Users\\Administrator\\AppData\\Local\\trae-cli\\bin\\trae-cli.exe",
+            "startupArgs": ["acp", "serve", "-y"],
+            "mcpWhitelist": ["cat-cafe", "cat-cafe-memory", "cat-cafe-collab", "cat-cafe-signals"],
+            "supportsMultiplexing": false
+          },
+          "accountRef": "my-bailian",
+          "personality": "待 co-creator 定义",
+          "roleDescription": "Trae CLI ACP 接入测试猫"
+        }
+      ]
+    },
+    {
+      "id": "qoder",
+      "catId": "qoder",
+      "name": "Qoder猫",
+      "displayName": "Qoder猫",
+      "nickname": "小Q",
+      "avatar": "/avatars/antigravity.png",
+      "color": {
+        "primary": "#7C5CFC",
+        "secondary": "#EDE8FF"
+      },
+      "mentionPatterns": ["@小Q", "@Qoder猫", "@qoder"],
+      "roleDescription": "Qoder CLI 接入测试猫",
+      "defaultVariantId": "qoder-default",
+      "variants": [
+        {
+          "id": "qoder-default",
+          "clientId": "qoder",
+          "defaultModel": "Auto",
+          "mcpSupport": true,
+          "cli": {
+            "command": "C:\\Program Files\\Qoder\\resources\\app\\resources\\bin\\x86_64_windows\\qodercli.exe",
+            "outputFormat": "stream-json"
+          },
+          "accountRef": "my-bailian",
+          "personality": "待 co-creator 定义",
+          "roleDescription": "Qoder CLI 接入测试猫"
         }
       ]
     }

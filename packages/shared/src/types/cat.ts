@@ -22,6 +22,7 @@ export type ClientId =
   | 'opencode'
   | 'a2a'
   | 'catagent'
+  | 'qoder'
   | 'acp'; // F161: Generic ACP client for unknown/user-provided ACP agents
 
 /** @deprecated clowder-ai#340: Use {@link ClientId} instead. Kept as alias for backward compatibility. */
