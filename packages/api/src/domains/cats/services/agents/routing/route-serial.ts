@@ -2364,7 +2364,10 @@ export async function* routeSerial(
             }
             // F088-P3: Stash rich blocks for outbound delivery
             if (options.persistenceContext && allRichBlocks.length > 0) {
-              options.persistenceContext.richBlocks = allRichBlocks;
+              options.persistenceContext.richBlocks = [
+                ...(options.persistenceContext.richBlocks ?? []),
+                ...allRichBlocks,
+              ];
             }
           } else {
             log.info(
