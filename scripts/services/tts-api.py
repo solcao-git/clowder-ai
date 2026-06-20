@@ -5,21 +5,26 @@ OpenAI-compatible endpoint: POST /v1/audio/speech
 
 Supports multiple backends via TtsAdapter:
   - qwen3-clone (default): Qwen3-TTS Base + ref_audio voice cloning (三猫声线)
+  - cosyvoice: Dashscope CosyVoice-v3.5-plus cloud TTS + voice cloning (Windows/cross-platform)
   - mlx-audio: Apple Silicon native, Kokoro-82M (legacy)
   - edge-tts: Microsoft cloud TTS (fallback, no GPU needed)
 
 Usage:
   source ~/.cat-cafe/tts-venv/bin/activate
   python scripts/tts-api.py                                     # default: qwen3-clone (Qwen3-TTS Base)
+  TTS_PROVIDER=cosyvoice python scripts/tts-api.py               # Dashscope CosyVoice (needs DASHSCOPE_API_KEY)
   TTS_PROVIDER=mlx-audio python scripts/tts-api.py              # Kokoro-82M (legacy)
   TTS_PROVIDER=edge-tts python scripts/tts-api.py               # edge-tts fallback
   python scripts/tts-api.py --port 9879
 
 Env vars:
-  TTS_PROVIDER  — "qwen3-clone" (default), "mlx-audio", or "edge-tts"
-  TTS_PORT      — server port (default: 9879)
+  TTS_PROVIDER      — "qwen3-clone" (default), "cosyvoice", "mlx-audio", or "edge-tts"
+  TTS_PORT          — server port (default: 9879)
+  DASHSCOPE_API_KEY — required for cosyvoice provider (百炼平台 API Key)
+  COSYVOICE_MODEL   — optional, default "cosyvoice-v3.5-plus"
 
 Requires (qwen3-clone/mlx-audio): pip install mlx-audio "misaki[zh]"
+Requires (cosyvoice):             pip install httpx (already installed)
 Requires (edge-tts):               pip install edge-tts
 """
 
@@ -335,6 +340,115 @@ class PiperAdapter(TtsAdapter):
         return audio_bytes, "wav"
 
 
+# ─── CosyVoice (Dashscope) Clone Adapter ─────────────────────────────
+
+
+class CosyVoiceAdapter(TtsAdapter):
+    """Dashscope CosyVoice-v3.5-plus with zero-shot voice cloning.
+
+    Calls the Dashscope REST API for TTS with reference audio voice cloning.
+    Works on any platform (cloud-based, no GPU required).
+
+    Env vars:
+      DASHSCOPE_API_KEY — required, from 百炼平台
+      COSYVOICE_MODEL   — optional, default 'cosyvoice-v3.5-plus'
+    """
+
+    DEFAULT_MODEL = "cosyvoice-v3.5-plus"
+    API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/generation"
+
+    def __init__(self, model: str | None = None):
+        self._model = model or os.environ.get("COSYVOICE_MODEL", self.DEFAULT_MODEL)
+        self._api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        if not self._api_key:
+            log.warning("DASHSCOPE_API_KEY not set — CosyVoice adapter will fail until configured")
+
+    @property
+    def name(self) -> str:
+        return "cosyvoice"
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    async def synthesize(
+        self,
+        text: str,
+        voice: str,
+        lang_code: str,
+        speed: float,
+        audio_format: str,
+        *,
+        ref_audio: str | None = None,
+        ref_text: str | None = None,
+        instruct: str | None = None,
+        temperature: float = 0.3,
+    ) -> tuple[bytes, str]:
+        import base64
+        import httpx
+
+        if not self._api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY not set — configure it in environment or .env")
+
+        # Build the voice parameter — use ref_audio for cloning, fallback to voice ID
+        voice_param = voice
+        if ref_audio and Path(ref_audio).exists():
+            # Read and base64-encode the reference audio for inline voice cloning
+            audio_data = Path(ref_audio).read_bytes()
+            audio_b64 = base64.b64encode(audio_data).decode("utf-8")
+            # CosyVoice accepts data URI for zero-shot cloning
+            voice_param = f"data:audio/wav;base64,{audio_b64}"
+            log.debug("Using ref_audio for voice cloning: %s (%d bytes)", ref_audio, len(audio_data))
+        elif ref_audio:
+            log.warning("ref_audio file not found: %s — falling back to voice ID '%s'", ref_audio, voice)
+
+        # Build request payload
+        payload = {
+            "model": self._model,
+            "input": {
+                "text": text,
+            },
+            "parameters": {
+                "voice": voice_param,
+                "format": audio_format if audio_format in ("mp3", "wav", "pcm") else "mp3",
+                "sample_rate": 22050,
+                "speed": speed,
+            },
+        }
+
+        # Add ref_text if available (helps with cloning quality)
+        if ref_text and ref_audio and Path(ref_audio).exists():
+            payload["parameters"]["ref_text"] = ref_text
+
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(self.API_URL, json=payload, headers=headers)
+
+        if resp.status_code != 200:
+            error_text = resp.text[:500]
+            log.error("CosyVoice API error %d: %s", resp.status_code, error_text)
+            raise RuntimeError(f"CosyVoice API error {resp.status_code}: {error_text}")
+
+        # CosyVoice returns audio in the response body (binary) or JSON with URL
+        content_type = resp.headers.get("content-type", "")
+        if "audio" in content_type or "octet-stream" in content_type:
+            # Direct binary audio response
+            return resp.content, audio_format if audio_format in ("mp3", "wav") else "mp3"
+        else:
+            # JSON response with audio URL
+            data = resp.json()
+            audio_url = data.get("output", {}).get("audio", "")
+            if audio_url:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    audio_resp = await client.get(audio_url)
+                return audio_resp.content, audio_format if audio_format in ("mp3", "wav") else "mp3"
+            raise RuntimeError(f"CosyVoice API returned unexpected response: {str(data)[:200]}")
+
+
 # ─── Qwen3 Clone Adapter ────────────────────────────────────────────
 
 
@@ -444,6 +558,8 @@ def create_adapter(provider: str, model: str) -> TtsAdapter:
         # it's not a valid HF model path — fall through to adapter's built-in default.
         effective = model if (model and model != provider and model != Qwen3CloneAdapter.DEFAULT_MODEL) else None
         return Qwen3CloneAdapter(model=effective)
+    if provider == "cosyvoice":
+        return CosyVoiceAdapter(model=model if (model and model != provider) else None)
     if provider == "mlx-audio":
         return MlxAudioAdapter(model=model)
     if provider == "edge-tts":
@@ -453,7 +569,7 @@ def create_adapter(provider: str, model: str) -> TtsAdapter:
     if provider == "piper":
         return PiperAdapter(model=model if (model and model != provider) else None)
     raise ValueError(
-        f"Unknown TTS provider: '{provider}'. Supported: qwen3-clone, mlx-audio, edge-tts, sapi, piper"
+        f"Unknown TTS provider: '{provider}'. Supported: qwen3-clone, cosyvoice, mlx-audio, edge-tts, sapi, piper"
     )
 
 
@@ -495,8 +611,8 @@ async def synthesize_endpoint(req: SpeechRequest):
             "speed": req.speed,
             "audio_format": req.response_format,
         }
-        # Pass clone params if adapter supports them (Qwen3CloneAdapter)
-        if isinstance(adapter, Qwen3CloneAdapter):
+        # Pass clone params if adapter supports them (Qwen3CloneAdapter or CosyVoiceAdapter)
+        if isinstance(adapter, (Qwen3CloneAdapter, CosyVoiceAdapter)):
             synth_kwargs["ref_audio"] = req.ref_audio
             synth_kwargs["ref_text"] = req.ref_text
             synth_kwargs["instruct"] = req.instruct
