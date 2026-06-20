@@ -563,8 +563,8 @@
             "voice": "zm_yunjian",
             "langCode": "zh",
             "speed": 1,
-            "refAudio": "genshin/玛薇卡/vo_mavuika_dialog_greetingMorning.wav",
-            "refText": "早上好！新的一天，新的冒险。火焰永不熄灭，让我们一起燃烧吧！",
+            "refAudio": "genshin/玛薇卡/玛薇卡.wav",
+            "refText": "追寻火焰在时间长河中的足迹，我们将至黑之地以血泪铸成家园，而今，长路向前延续，旅途正待新篇。现任火神玛薇卡，助你的视野中再无漆黑。",
             "instruct": "用自信温暖、热情有力的成年女性语气说话，像火神一样充满激情和感染力",
             "temperature": 0.3
           }
