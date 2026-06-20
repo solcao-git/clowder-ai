@@ -134,6 +134,32 @@ import { buildVoteTally, checkVoteCompletion, extractVoteFromText, VOTE_RESULT_S
 const log = createModuleLogger('route-serial');
 
 /**
+ * Detect voice intent in the user's message.
+ * Returns true when co-creator explicitly requests voice/audio output.
+ * Used to auto-wrap CLI text responses into audio blocks for TTS synthesis.
+ */
+const VOICE_INTENT_PATTERNS = [
+  /用语音/,
+  /发语音/,
+  /说给我听/,
+  /用声音/,
+  /语音回答/,
+  /用你的声音/,
+  /讲给我听/,
+  /说两句话/,
+  /讲两句/,
+  /打个招呼.*语音/,
+  /语音.*打招呼/,
+  /voice/i,
+  /speak/i,
+  /say.*aloud/i,
+];
+
+function hasVoiceIntent(userMessage: string): boolean {
+  return VOICE_INTENT_PATTERNS.some((p) => p.test(userMessage));
+}
+
+/**
  * F233 Phase B (B2): fire-and-forget 旁路写 ball.handed（行首 @ 路由投递 → holder 变更，球继续）。
  * 紧贴现有 A2A_HANDOFF 审计旁路点调用；失败仅 log、不阻塞路由；无 messageId 则 skip
  * （best-effort observability，漏写由后续动作 / 简报 rebuild 兜底）。
@@ -1766,6 +1792,24 @@ export async function* routeSerial(
         const { cleanText, blocks: textBlocks } = extractRichFromText(sanitized);
         let storedContent = cleanText;
         let allRichBlocks = [...bufferedBlocks, ...textBlocks, ...streamRichBlocks];
+
+        // Voice intent detection: if co-creator explicitly asks for voice and the
+        // CLI didn't produce an audio block, auto-wrap the response text into one.
+        // This bridges the gap where most CLI models don't construct audio rich blocks
+        // even when told "用语音回答".
+        if (!voiceMode && storedContent && !allRichBlocks.some((b) => b.kind === 'audio')) {
+          if (hasVoiceIntent(message)) {
+            const audioBlock: RichBlock = {
+              id: `auto-voice-${Date.now()}`,
+              kind: 'audio' as const,
+              v: 1 as const,
+              url: '',
+              text: storedContent.slice(0, 2000), // Cap at 2000 chars for TTS
+            };
+            allRichBlocks.push(audioBlock);
+            log.info({ catId: catId as string }, 'Auto-wrapped text into audio block (voice intent detected)');
+          }
+        }
 
         // F34-b: Resolve voice blocks (audio with text, no url) — Route B path.
         // Route A blocks were already resolved in the callback handler.
