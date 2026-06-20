@@ -184,7 +184,8 @@ export class VoiceBlockSynthesizer {
 
     // Resolve per-cat voice
     const catVoice = getCatVoice(catId);
-    const voice = catVoice.voice;
+    // F103: Prefer CosyVoice voice_id when available (pre-registered on 百炼平台)
+    const voice = catVoice.cosyvoiceVoice ?? catVoice.voice;
     const langCode = catVoice.langCode;
     const speed = catVoice.speed ?? 1.0;
     const format = 'wav' as const;

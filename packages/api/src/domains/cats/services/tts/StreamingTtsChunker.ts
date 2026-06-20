@@ -15,6 +15,11 @@ const BOOST_COUNT = 2;
 const NORMAL_THRESHOLD = 4;
 const BOOST_THRESHOLD = 2;
 
+// Dashscope CosyVoice API rate limit: max concurrent synthesis requests
+const MAX_CONCURRENT_TTS = 2;
+const RATE_LIMIT_RETRY_DELAY_MS = 1_000;
+const RATE_LIMIT_MAX_RETRIES = 2;
+
 export interface StreamingTtsChunkerConfig {
   readonly catId: string;
   readonly invocationId: string;
@@ -32,6 +37,10 @@ export class StreamingTtsChunker {
   private aborted = false;
   private startBroadcasted = false;
   private readonly config: StreamingTtsChunkerConfig;
+
+  // Semaphore: limits concurrent TTS API calls to avoid rate limiting (Dashscope 429)
+  private activeSyntheses = 0;
+  private readonly queue: Array<() => void> = [];
 
   constructor(config: StreamingTtsChunkerConfig) {
     this.config = config;
@@ -68,8 +77,25 @@ export class StreamingTtsChunker {
     if (!text || this.aborted) return;
 
     const index = this.chunkIndex++;
-    const promise = this.synthesizeAndBroadcast(text, index);
+    const promise = this.acquireAndSynthesize(text, index);
     this.pendingSyntheses.push(promise);
+  }
+
+  /** Acquire semaphore slot, synthesize, then release. */
+  private async acquireAndSynthesize(text: string, index: number): Promise<void> {
+    // Wait for a slot
+    if (this.activeSyntheses >= MAX_CONCURRENT_TTS) {
+      await new Promise<void>((resolve) => this.queue.push(resolve));
+    }
+    this.activeSyntheses++;
+    try {
+      await this.synthesizeAndBroadcast(text, index);
+    } finally {
+      this.activeSyntheses--;
+      // Release next waiter
+      const next = this.queue.shift();
+      if (next) next();
+    }
   }
 
   private async synthesizeAndBroadcast(text: string, index: number): Promise<void> {
@@ -87,7 +113,8 @@ export class StreamingTtsChunker {
 
     const synthRequest: TtsSynthesizeRequest = {
       text,
-      voice: voiceConfig.voice,
+      // F103: Prefer CosyVoice voice_id when available (pre-registered on 百炼平台)
+      voice: voiceConfig.cosyvoiceVoice ?? voiceConfig.voice,
       langCode: voiceConfig.langCode,
       speed: voiceConfig.speed ?? 1.0,
       format: 'wav',
@@ -98,8 +125,24 @@ export class StreamingTtsChunker {
     };
 
     try {
-      const result = await provider.synthesize(synthRequest);
-      if (this.aborted) return;
+      let result;
+      for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+        try {
+          result = await provider.synthesize(synthRequest);
+          break;
+        } catch (synthErr) {
+          const msg = synthErr instanceof Error ? synthErr.message : String(synthErr);
+          const isRateLimit = msg.includes('429') || msg.includes('RateQuota');
+          if (isRateLimit && attempt < RATE_LIMIT_MAX_RETRIES) {
+            const delay = RATE_LIMIT_RETRY_DELAY_MS * (attempt + 1);
+            log.warn({ index, attempt, delay }, 'Rate limited, retrying');
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+          throw synthErr;
+        }
+      }
+      if (!result || this.aborted) return;
 
       const audioBase64 = Buffer.from(result.audio).toString('base64');
 
@@ -128,7 +171,8 @@ export class StreamingTtsChunker {
 
       broadcaster.broadcastToRoom(`thread:${threadId}`, 'voice_chunk', event);
     } catch (err) {
-      log.error({ index, error: err }, 'Synthesis failed for chunk');
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error({ index, error: errMsg }, 'Synthesis failed for chunk');
     }
   }
 

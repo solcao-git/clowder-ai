@@ -344,9 +344,10 @@ class PiperAdapter(TtsAdapter):
 
 
 class CosyVoiceAdapter(TtsAdapter):
-    """Dashscope CosyVoice-v3.5-plus with zero-shot voice cloning.
+    """Dashscope CosyVoice-v3.5-plus with pre-registered voice cloning.
 
-    Calls the Dashscope REST API for TTS with reference audio voice cloning.
+    Uses the Dashscope SpeechSynthesizer REST API. Voice cloning is done
+    via pre-registered voice_ids (created on 百炼平台 or via voice-enrollment API).
     Works on any platform (cloud-based, no GPU required).
 
     Env vars:
@@ -355,7 +356,22 @@ class CosyVoiceAdapter(TtsAdapter):
     """
 
     DEFAULT_MODEL = "cosyvoice-v3.5-plus"
-    API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/generation"
+    API_URL = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer"
+
+    # Map Kokoro/Edge-TTS voice names → CosyVoice voice_ids (pre-registered on 百炼平台)
+    # When Node.js passes a Kokoro voice name, translate it to the CosyVoice voice_id.
+    VOICE_ALIASES: dict[str, str] = {
+        # 玛薇卡/火神 (cat-dat7naet) — Kokoro: zf_xiaobei
+        "zf_xiaobei": "cosyvoice-v3.5-plus-bailian-7a5f2ed86182440fa3fe63614cb61ae9",
+        # 芙宁娜/水神 (cat-wrzqevwl) — Kokoro: zf_xiaobei (shared; Node.js passes cosyvoiceVoice directly)
+        # 雷电将军/雷神 (cat-qxo3csnl) — Kokoro: zf_xiaoyi
+        "zf_xiaoyi": "cosyvoice-v3.5-plus-bailian-46af81d681ec4807b638c7d1fa3ddf4d",
+        # 纳西妲/草神 (opus) — Kokoro: zf_xiaoni
+        "zf_xiaoni": "cosyvoice-v3.5-plus-bailian-3d33e737192b47308224ebe2605e21e6",
+        # 钟离/岩神 (codex) — Kokoro: zm_yunjian
+        "zm_yunjian": "cosyvoice-v3.5-plus-bailian-bd2b849eb22d49b198aafdeaddff4d3c",
+        # 温迪/风神 (opencode) — Kokoro: zm_yunjian (shared; Node.js passes cosyvoiceVoice directly)
+    }
 
     def __init__(self, model: str | None = None):
         self._model = model or os.environ.get("COSYVOICE_MODEL", self.DEFAULT_MODEL)
@@ -384,69 +400,66 @@ class CosyVoiceAdapter(TtsAdapter):
         instruct: str | None = None,
         temperature: float = 0.3,
     ) -> tuple[bytes, str]:
-        import base64
+        import json as json_mod
         import httpx
 
         if not self._api_key:
             raise RuntimeError("DASHSCOPE_API_KEY not set — configure it in environment or .env")
 
-        # Build the voice parameter — use ref_audio for cloning, fallback to voice ID
-        voice_param = voice
-        if ref_audio and Path(ref_audio).exists():
-            # Read and base64-encode the reference audio for inline voice cloning
-            audio_data = Path(ref_audio).read_bytes()
-            audio_b64 = base64.b64encode(audio_data).decode("utf-8")
-            # CosyVoice accepts data URI for zero-shot cloning
-            voice_param = f"data:audio/wav;base64,{audio_b64}"
-            log.debug("Using ref_audio for voice cloning: %s (%d bytes)", ref_audio, len(audio_data))
-        elif ref_audio:
-            log.warning("ref_audio file not found: %s — falling back to voice ID '%s'", ref_audio, voice)
+        # Build request — voice/format/sample_rate go inside input (not parameters)
+        # Resolve Kokoro voice names to CosyVoice voice_ids
+        resolved_voice = self.VOICE_ALIASES.get(voice, voice)
+        if resolved_voice != voice:
+            log.debug("Voice alias: %s → %s", voice, resolved_voice)
 
-        # Build request payload
+        fmt = audio_format if audio_format in ("mp3", "wav", "pcm") else "mp3"
         payload = {
             "model": self._model,
             "input": {
                 "text": text,
-            },
-            "parameters": {
-                "voice": voice_param,
-                "format": audio_format if audio_format in ("mp3", "wav", "pcm") else "mp3",
+                "voice": resolved_voice,
+                "format": fmt,
                 "sample_rate": 22050,
-                "speed": speed,
             },
         }
-
-        # Add ref_text if available (helps with cloning quality)
-        if ref_text and ref_audio and Path(ref_audio).exists():
-            payload["parameters"]["ref_text"] = ref_text
+        if speed != 1.0:
+            payload["input"]["speed"] = speed
 
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
 
+        # Send as raw bytes (avoids Windows curl/httpx encoding issues)
+        body = json_mod.dumps(payload, ensure_ascii=False).encode("utf-8")
+        log.info("CosyVoice request: voice=%s, text=%d chars, body=%d bytes", voice, len(text), len(body))
+
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(self.API_URL, json=payload, headers=headers)
+            resp = await client.post(self.API_URL, content=body, headers=headers)
 
         if resp.status_code != 200:
             error_text = resp.text[:500]
             log.error("CosyVoice API error %d: %s", resp.status_code, error_text)
             raise RuntimeError(f"CosyVoice API error {resp.status_code}: {error_text}")
 
-        # CosyVoice returns audio in the response body (binary) or JSON with URL
+        # Response is JSON with audio URL — download it
         content_type = resp.headers.get("content-type", "")
         if "audio" in content_type or "octet-stream" in content_type:
-            # Direct binary audio response
-            return resp.content, audio_format if audio_format in ("mp3", "wav") else "mp3"
-        else:
-            # JSON response with audio URL
-            data = resp.json()
-            audio_url = data.get("output", {}).get("audio", "")
-            if audio_url:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    audio_resp = await client.get(audio_url)
-                return audio_resp.content, audio_format if audio_format in ("mp3", "wav") else "mp3"
-            raise RuntimeError(f"CosyVoice API returned unexpected response: {str(data)[:200]}")
+            # Direct binary response (unlikely but handle it)
+            return resp.content, fmt
+
+        data = resp.json()
+        audio_url = data.get("output", {}).get("audio", {}).get("url", "")
+        if not audio_url:
+            raise RuntimeError(f"CosyVoice API returned no audio URL: {str(data)[:200]}")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            audio_resp = await client.get(audio_url)
+
+        if audio_resp.status_code != 200:
+            raise RuntimeError(f"Failed to download audio: HTTP {audio_resp.status_code}")
+
+        return audio_resp.content, fmt
 
 
 # ─── Qwen3 Clone Adapter ────────────────────────────────────────────

@@ -239,9 +239,10 @@
             "maxContentLengthPerMsg": 100000
           },
           "voiceConfig": {
-            "voice": "zm_yunjian",
+            "voice": "zf_xiaoni",
+            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-3d33e737192b47308224ebe2605e21e6",
             "langCode": "zh",
-            "speed": 1,
+            "speed": 1.0,
             "refAudio": "genshin/纳西妲/vo_nahida_dialog_greetingMorning.wav",
             "refText": "早安，今天的天空格外清澈呢。世界上的每一片叶子，都在努力生长。",
             "instruct": "用一个温柔智慧的小女孩语气说话，声音轻柔稚嫩但充满睿智和好奇，像百科全书一样博学",
@@ -413,8 +414,9 @@
           },
           "voiceConfig": {
             "voice": "zm_yunjian",
+            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-bd2b849eb22d49b198aafdeaddff4d3c",
             "langCode": "zh",
-            "speed": 1,
+            "speed": 1.0,
             "refAudio": "genshin/钟离/vo_zhongli_dialog_greetingMorning.wav",
             "refText": "欲买桂花同载酒，只可惜故人，何日再见呢。旅途总有一天会迎来终点。",
             "instruct": "用深沉稳重、从容不迫的成年男性语气说话，像博学的岩之神，语调平缓有权威感",
@@ -560,9 +562,10 @@
             "maxContentLengthPerMsg": 100000
           },
           "voiceConfig": {
-            "voice": "zm_yunjian",
+            "voice": "zf_xiaobei",
+            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-7a5f2ed86182440fa3fe63614cb61ae9",
             "langCode": "zh",
-            "speed": 1,
+            "speed": 0.9,
             "refAudio": "genshin/玛薇卡/玛薇卡.wav",
             "refText": "追寻火焰在时间长河中的足迹，我们将至黑之地以血泪铸成家园，而今，长路向前延续，旅途正待新篇。现任火神玛薇卡，助你的视野中再无漆黑。",
             "instruct": "用自信温暖、热情有力的成年女性语气说话，像火神一样充满激情和感染力",
@@ -707,9 +710,10 @@
             "maxContentLengthPerMsg": 100000
           },
           "voiceConfig": {
-            "voice": "zm_yunjian",
+            "voice": "zf_xiaoyi",
+            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-46af81d681ec4807b638c7d1fa3ddf4d",
             "langCode": "zh",
-            "speed": 1,
+            "speed": 0.9,
             "refAudio": "genshin/雷电将军/vo_raidenshogun_dialog_greetingMorning.wav",
             "refText": "浮世流转，雷鸣不息。你若敢违逆永恒，便让你见识雷霆之威。",
             "instruct": "用冷峻威严、不苟言笑的女性语气说话，语调平稳如雷，偶尔流露出对永恒的执念",
@@ -753,11 +757,12 @@
             "maxContentLengthPerMsg": 100000
           },
           "voiceConfig": {
-            "voice": "zm_yunjian",
+            "voice": "zf_xiaobei",
+            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-50c463c827b54bfc8635d93542266fa4",
             "langCode": "zh",
-            "speed": 1,
-            "refAudio": "genshin/芙宁娜/vo_furina_dialog_greetingMorning.wav",
-            "refText": "各位观众，早上好！今天的审判——啊不，今天的对话，就让我芙宁娜大人来主持吧！",
+            "speed": 0.9,
+            "refAudio": "genshin/芙宁娜/芙宁娜.wav",
+            "refText": "以我们之间的关系，你在我面前无需太过恭敬，可以更随意一些。等等，你那是什么表情，该不会是想说，你从一开始就没有敬养过我吧。我的故事已然落幕，接下来开场的是我们的故事了。这么说的话，出场费是不是也该翻倍了。好开心哦。",
             "instruct": "用戏剧化华丽、活泼夸张的女性语气说话，像舞台上的女演员，情绪丰富爱表演",
             "temperature": 0.3
           }
@@ -836,8 +841,9 @@
           },
           "voiceConfig": {
             "voice": "zm_yunjian",
+            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-63eb37bb31f94fcf992049a48ffbc68c",
             "langCode": "zh",
-            "speed": 1,
+            "speed": 0.8,
             "refAudio": "genshin/温迪/vo_venti_dialog_greetingMorning.wav",
             "refText": "欸嘿，今天的风真舒服～要不要一起去喝一杯苹果酿，然后在树下打个盹？",
             "instruct": "用轻快自由、俏皮诗意的少年语气说话，像游吟诗人一样随性浪漫，爱开玩笑",

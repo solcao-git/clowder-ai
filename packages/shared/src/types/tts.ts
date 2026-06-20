@@ -16,6 +16,8 @@ export interface VoiceConfig {
   readonly refText?: string; // transcript of the reference audio
   readonly instruct?: string; // style/emotion instruction for Qwen3 clone
   readonly temperature?: number; // generation temperature (0.3 recommended for consistency)
+  // CosyVoice (Dashscope) voice ID — pre-registered on 百炼平台
+  readonly cosyvoiceVoice?: string; // e.g. 'cosyvoice-v3.5-plus-bailian-xxx'
 }
 
 /** TTS synthesis request (passed to ITtsProvider) */
@@ -30,6 +32,7 @@ export interface TtsSynthesizeRequest {
   readonly refText?: string;
   readonly instruct?: string;
   readonly temperature?: number;
+  readonly cosyvoiceVoice?: string;
 }
 
 /** TTS synthesis result (returned by ITtsProvider) */

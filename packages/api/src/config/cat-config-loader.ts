@@ -115,6 +115,8 @@ const catVariantSchema = z.object({
       refText: z.string().min(1).optional(),
       instruct: z.string().min(1).optional(),
       temperature: z.number().min(0).max(2).optional(),
+      // CosyVoice (Dashscope) pre-registered voice_id — takes priority over `voice`
+      cosyvoiceVoice: z.string().min(1).optional(),
     })
     .optional(),
   teamStrengths: z.string().optional(), // F-Ground-3: human-readable strengths
