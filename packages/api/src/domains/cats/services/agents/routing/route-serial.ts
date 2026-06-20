@@ -137,6 +137,9 @@ const log = createModuleLogger('route-serial');
  * Detect voice intent in the user's message.
  * Returns true when co-creator explicitly requests voice/audio output.
  * Used to auto-wrap CLI text responses into audio blocks for TTS synthesis.
+ *
+ * NOTE: When adding new patterns, also add a test case in
+ * test/route-serial-voice-intent.test.js to keep the test matrix in sync.
  */
 const VOICE_INTENT_PATTERNS = [
   /用语音/,
@@ -155,8 +158,9 @@ const VOICE_INTENT_PATTERNS = [
   /say.*aloud/i,
 ];
 
-function hasVoiceIntent(userMessage: string): boolean {
-  return VOICE_INTENT_PATTERNS.some((p) => p.test(userMessage));
+function hasVoiceIntent(userMessage: string): string | null {
+  const match = VOICE_INTENT_PATTERNS.find((p) => p.test(userMessage));
+  return match ? match.source : null;
 }
 
 /**
@@ -1798,7 +1802,8 @@ export async function* routeSerial(
         // This bridges the gap where most CLI models don't construct audio rich blocks
         // even when told "用语音回答".
         if (!voiceMode && storedContent && !allRichBlocks.some((b) => b.kind === 'audio')) {
-          if (hasVoiceIntent(message)) {
+          const matchedPattern = hasVoiceIntent(message);
+          if (matchedPattern) {
             const audioBlock: RichBlock = {
               id: `auto-voice-${Date.now()}`,
               kind: 'audio' as const,
@@ -1807,7 +1812,7 @@ export async function* routeSerial(
               text: storedContent.slice(0, 2000), // Cap at 2000 chars for TTS
             };
             allRichBlocks.push(audioBlock);
-            log.info({ catId: catId as string }, 'Auto-wrapped text into audio block (voice intent detected)');
+            log.info({ catId: catId as string, pattern: matchedPattern }, 'Auto-wrapped text into audio block (voice intent detected)');
           }
         }
 
