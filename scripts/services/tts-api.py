@@ -434,7 +434,7 @@ class CosyVoiceAdapter(TtsAdapter):
         body = json_mod.dumps(payload, ensure_ascii=False).encode("utf-8")
         log.info("CosyVoice request: voice=%s, text=%d chars, body=%d bytes", voice, len(text), len(body))
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(self.API_URL, content=body, headers=headers)
 
         if resp.status_code != 200:

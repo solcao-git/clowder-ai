@@ -1809,7 +1809,7 @@ export async function* routeSerial(
               kind: 'audio' as const,
               v: 1 as const,
               url: '',
-              text: storedContent.slice(0, 2000), // Cap at 2000 chars for TTS
+              text: storedContent.slice(0, 300), // Cap at 300 chars for TTS (avoid CosyVoice timeout)
             };
             allRichBlocks.push(audioBlock);
             log.info({ catId: catId as string, pattern: matchedPattern }, 'Auto-wrapped text into audio block (voice intent detected)');
