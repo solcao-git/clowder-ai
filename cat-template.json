@@ -242,9 +242,9 @@
             "voice": "zm_yunjian",
             "langCode": "zh",
             "speed": 1,
-            "refAudio": "genshin/流浪者/vo_wanderer_dialog_greetingMorning.wav",
-            "refText": "快醒醒，太阳要晒屁股咯。哈，你不会以为我会这么叫你起床吧？",
-            "instruct": "用一个调皮狡黠的少年语气说话，带着得意和戏弄",
+            "refAudio": "genshin/纳西妲/vo_nahida_dialog_greetingMorning.wav",
+            "refText": "早安，今天的天空格外清澈呢。世界上的每一片叶子，都在努力生长。",
+            "instruct": "用一个温柔智慧的小女孩语气说话，声音轻柔稚嫩但充满睿智和好奇，像百科全书一样博学",
             "temperature": 0.3
           }
         },
@@ -415,9 +415,9 @@
             "voice": "zm_yunjian",
             "langCode": "zh",
             "speed": 1,
-            "refAudio": "genshin/魈/vo_xiao_dialog_close2.wav",
-            "refText": "别被污染，我不会留情的。我是说，既然是你，你应该能够保持坚定。",
-            "instruct": "用一个傲娇冰山少年的语气说话，表面严厉实际关心",
+            "refAudio": "genshin/钟离/vo_zhongli_dialog_greetingMorning.wav",
+            "refText": "欲买桂花同载酒，只可惜故人，何日再见呢。旅途总有一天会迎来终点。",
+            "instruct": "用深沉稳重、从容不迫的成年男性语气说话，像博学的岩之神，语调平缓有权威感",
             "temperature": 0.3
           }
         },
@@ -563,9 +563,9 @@
             "voice": "zm_yunjian",
             "langCode": "zh",
             "speed": 1,
-            "refAudio": "genshin/班尼特/vo_bennett_dialog_greetingNight.wav",
-            "refText": "晚上好！今天的冒险怎么样？",
-            "instruct": "用一个超级阳光开心的小男孩语气说话，充满热情和兴奋",
+            "refAudio": "genshin/玛薇卡/vo_mavuika_dialog_greetingMorning.wav",
+            "refText": "早上好！新的一天，新的冒险。火焰永不熄灭，让我们一起燃烧吧！",
+            "instruct": "用自信温暖、热情有力的成年女性语气说话，像火神一样充满激情和感染力",
             "temperature": 0.3
           }
         },
@@ -705,6 +705,15 @@
             "maxContextTokens": 100000,
             "maxMessages": 100,
             "maxContentLengthPerMsg": 100000
+          },
+          "voiceConfig": {
+            "voice": "zm_yunjian",
+            "langCode": "zh",
+            "speed": 1,
+            "refAudio": "genshin/雷电将军/vo_raidenshogun_dialog_greetingMorning.wav",
+            "refText": "浮世流转，雷鸣不息。你若敢违逆永恒，便让你见识雷霆之威。",
+            "instruct": "用冷峻威严、不苟言笑的女性语气说话，语调平稳如雷，偶尔流露出对永恒的执念",
+            "temperature": 0.2
           }
         }
       ]
@@ -747,9 +756,9 @@
             "voice": "zm_yunjian",
             "langCode": "zh",
             "speed": 1,
-            "refAudio": "honkai-starrail/叽米/side2_yanwu_owlbert_101.wav",
-            "refText": "不管各位的世界有没有昼夜的概念，总之先祝你早上中午晚上好！我是你们的好朋友——叽米！",
-            "instruct": "用一个精力旺盛的、像吉祥物一样的可爱语气说话，充满热情和好奇心",
+            "refAudio": "genshin/芙宁娜/vo_furina_dialog_greetingMorning.wav",
+            "refText": "各位观众，早上好！今天的审判——啊不，今天的对话，就让我芙宁娜大人来主持吧！",
+            "instruct": "用戏剧化华丽、活泼夸张的女性语气说话，像舞台上的女演员，情绪丰富爱表演",
             "temperature": 0.3
           }
         },
@@ -829,9 +838,9 @@
             "voice": "zm_yunjian",
             "langCode": "zh",
             "speed": 1,
-            "refAudio": "genshin/重云/vo_chongyun_dialog_close.wav",
-            "refText": "你的本事不错，对丘丘…咳…邪魔从不手软，我们结伴而行如何。",
-            "instruct": "用一个正直可靠的少年语气说话，话不多但每句都认真",
+            "refAudio": "genshin/温迪/vo_venti_dialog_greetingMorning.wav",
+            "refText": "欸嘿，今天的风真舒服～要不要一起去喝一杯苹果酿，然后在树下打个盹？",
+            "instruct": "用轻快自由、俏皮诗意的少年语气说话，像游吟诗人一样随性浪漫，爱开玩笑",
             "temperature": 0.3
           }
         }
