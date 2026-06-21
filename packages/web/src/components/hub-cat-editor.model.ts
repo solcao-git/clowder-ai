@@ -20,7 +20,9 @@ export type ClientId =
   | 'opencode'
   | 'antigravity'
   | 'catagent'
-  | 'acp';
+  | 'acp'
+  | 'qoder'
+  | 'trae';
 /** @deprecated Use ClientId instead. */
 export type ClientValue = ClientId;
 export type SessionChainValue = 'true' | 'false';
@@ -111,6 +113,8 @@ export const CLIENT_OPTIONS: Array<{ value: ClientId; label: string }> = [
   { value: 'antigravity', label: 'Antigravity' },
   { value: 'catagent', label: 'CatAgent' },
   { value: 'acp', label: 'ACP Client' },
+  { value: 'qoder', label: 'Qoder' },
+  { value: 'trae', label: 'Trae' },
 ];
 
 export const SESSION_CHAIN_OPTIONS: Array<{ value: SessionChainValue; label: string }> = [
@@ -326,6 +330,8 @@ export function filterAccounts(client: ClientId, profiles: ProfileItem[]): Profi
   // F161: Generic ACP is a transport, not tied to any provider family.
   // Any account (oauth or api_key, any client family) can supply credentials to the ACP carrier.
   if (client === 'acp') return profiles;
+  // Trae and Qoder use custom API key accounts — allow any profile selection.
+  if (client === 'trae' || client === 'qoder') return profiles;
   const effective = resolveBuiltinClientFamily(client);
   if (!effective || !isBuiltinClient(effective)) return [];
   const builtinProfiles = profiles.filter(

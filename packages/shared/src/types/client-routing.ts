@@ -41,6 +41,7 @@ export function protocolForClient(client: ClientId): BuiltinAccountProtocol | nu
     case 'anthropic':
     case 'catagent':
     case 'opencode':
+    case 'trae':
       return 'anthropic';
     case 'openai':
     case 'dare':

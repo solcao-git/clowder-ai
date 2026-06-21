@@ -1253,6 +1253,13 @@ async function main(): Promise<void> {
             service = new QoderAgentService({ catId });
             break;
           }
+          case 'trae': {
+            const { TraeAgentService } = await import(
+              './domains/cats/services/agents/providers/TraeAgentService.js'
+            );
+            service = new TraeAgentService({ catId });
+            break;
+          }
           default:
             app.log.warn(`[api] Unknown client "${config.clientId}" for cat "${id}". It will not be routable.`);
             continue;

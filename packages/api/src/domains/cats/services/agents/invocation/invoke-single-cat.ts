@@ -1221,6 +1221,8 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
       dare: 'openai',
       opencode: 'anthropic',
       openrouter: 'openai',
+      trae: 'anthropic',
+      qoder: 'openai',
     };
     let effectiveProtocol: string | null = provider ? (protocolForProvider[provider] ?? null) : null;
     if (provider === 'opencode') {
@@ -1241,7 +1243,8 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
     // F161: ACP is a transport, not a provider. Derive credential protocol from the
     // bound account's client family so env injection branches (MOONSHOT_API_KEY,
     // GEMINI_API_KEY, etc.) fire correctly for ACP subprocesses.
-    if (provider === 'acp' && !effectiveProtocol && resolvedAccount?.client) {
+    // Also applies when protocol lookup returned null (e.g., unknown clientId).
+    if (!effectiveProtocol && resolvedAccount?.client) {
       effectiveProtocol = protocolForProvider[resolvedAccount.client] ?? null;
     }
 
@@ -1327,6 +1330,16 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
       } else {
         callbackEnv.CAT_CAFE_KIMI_PROFILE_MODE = 'subscription';
       }
+    } else if (provider === 'trae') {
+      // Trae CLI uses its own auth (login token via TRAECLI_PERSONAL_ACCESS_TOKEN env).
+      // Skip Anthropic protocol env injection — trae-cli doesn't use
+      // ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / profile mode.
+      // The login token flows through accounts.json envVars → accountEnv → buildEnv().
+      // If the account has a baseUrl (enterprise custom domain), map it to TRAECLI_HOST.
+      if (resolvedAccount?.authType === 'api_key' && resolvedAccount.baseUrl) {
+        callbackEnv.TRAECLI_HOST = resolvedAccount.baseUrl;
+      }
+      log.debug({ catId, provider: 'trae' }, 'Skipping Anthropic protocol env for trae provider');
     } else if (provider === 'anthropic' || provider === 'opencode') {
       // Fallback for unresolved accounts on anthropic/opencode providers
       callbackEnv.CAT_CAFE_ANTHROPIC_PROFILE_MODE = 'subscription';

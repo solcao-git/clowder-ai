@@ -23,7 +23,8 @@ export type ClientId =
   | 'a2a'
   | 'catagent'
   | 'qoder'
-  | 'acp'; // F161: Generic ACP client for unknown/user-provided ACP agents
+  | 'acp' // F161: Generic ACP client for unknown/user-provided ACP agents
+  | 'trae'; // Native Trae CLI client
 
 /** @deprecated clowder-ai#340: Use {@link ClientId} instead. Kept as alias for backward compatibility. */
 export type CatProvider = ClientId;
