@@ -1,0 +1,22 @@
+id: 185dcfc3-d6c
+status: captured
+source: callback:opus:bf4d0db6-c44e-464e-b32f-d327afdbf5f8
+created_at: 2026-06-21T07:16:19.051Z
+content: |
+  ## Hub 成员配置界面与系统参数一致性审视
+  
+  **来源**：co-creator 2026-06-21
+  
+  **问题**：Hub 成员配置界面上显示的参数与经过自定义调整后的实际系统参数存在不一致。具体表现：
+  
+  1. **ACP 模式猫的模型/账号显示**：雷电将军 catalog 里写 `智谱glm-5.1` + `my-zhipu`，但实际 Trae CLI 用自带模型，这些配置不生效
+  2. **voiceConfig 自定义字段**：虽然 UI 已覆盖全部 7 个字段，但某些通过代码添加的自定义值（如 cosyvoiceVoice）UI 上可能无法编辑
+  3. **CLI/模型/账号互换后**：Hub 显示的值需要确认是否与 cat-catalog.json 实际值一致
+  
+  **行动**：后续安排一次迭代，逐项审视 Hub 成员编辑器的每个字段，确保 UI 展示和写入的值与 cat-catalog.json 实际运行时配置完全对应。重点关注 ACP 模式下的特殊处理。
+  
+  **相关文件**：
+  - `packages/web/src/components/hub-cat-editor-voice.tsx` — 语音配置编辑器
+  - `packages/web/src/components/HubCatEditor.tsx` — 成员编辑器主组件
+  - `packages/api/src/config/runtime-cat-catalog.ts` — catalog 读写逻辑
+  - `.cat-cafe/cat-catalog.json` — 实际运行时配置
