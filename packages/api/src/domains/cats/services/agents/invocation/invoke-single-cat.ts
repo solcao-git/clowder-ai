@@ -1525,7 +1525,18 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
       // native auth instead of clearing it for the custom provider config path.
       if (isApiKey) {
         if (resolvedAccount.apiKey) callbackEnv[OC_API_KEY_ENV] = resolvedAccount.apiKey;
-        if (resolvedAccount.baseUrl) callbackEnv[OC_BASE_URL_ENV] = resolvedAccount.baseUrl;
+        if (resolvedAccount.baseUrl) {
+          // @ai-sdk/anthropic appends '/messages' to baseURL, assuming '/v1' is already
+          // included (default: 'https://api.anthropic.com/v1'). Third-party Anthropic-
+          // compatible endpoints (MiniMax, DashScope) often use paths like '/anthropic'
+          // without the '/v1' suffix. Append '/v1' if missing so the SDK builds the
+          // correct request URL (e.g. 'https://api.minimaxi.com/anthropic/v1/messages').
+          let ocBaseUrl = resolvedAccount.baseUrl;
+          if (apiType === 'anthropic' && !ocBaseUrl.endsWith('/v1')) {
+            ocBaseUrl = `${ocBaseUrl.replace(/\/+$/, '')}/v1`;
+          }
+          callbackEnv[OC_BASE_URL_ENV] = ocBaseUrl;
+        }
       } else {
         callbackEnv[OC_INSTRUCTIONS_ONLY_ENV] = '1';
       }

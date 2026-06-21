@@ -5965,15 +5965,15 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       );
       const runtimeConfig = seenRuntimeConfig;
       assert.ok(runtimeConfig, 'fake service must observe runtime config before cleanup');
-      assert.equal(runtimeConfig.model, 'anthropic/claude-opus-4-6', 'model routing must stay in runtime config');
-      assert.ok(runtimeConfig.provider?.anthropic, 'provider routing must stay in runtime config');
+      assert.equal(runtimeConfig.model, 'anthropic-compat/claude-opus-4-6', 'model routing must stay in runtime config');
+      assert.ok(runtimeConfig.provider?.['anthropic-compat'], 'provider routing must stay in runtime config');
       assert.equal(
-        runtimeConfig.provider.anthropic.options.apiKey,
+        runtimeConfig.provider['anthropic-compat'].options.apiKey,
         undefined,
         'non-api_key runtime config must not reference missing CAT_CAFE_OC_API_KEY',
       );
       assert.equal(
-        runtimeConfig.provider.anthropic.options.baseURL,
+        runtimeConfig.provider['anthropic-compat'].options.baseURL,
         undefined,
         'non-api_key runtime config must not reference missing CAT_CAFE_OC_BASE_URL',
       );
