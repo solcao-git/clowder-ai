@@ -253,10 +253,10 @@ describe('prepareOpenCodeAcpSpawnConfig', () => {
       assert.equal(prepared.env[OC_BASE_URL_ENV], 'https://proxy.example/v1');
 
       const config = JSON.parse(readFileSync(prepared.env.OPENCODE_CONFIG, 'utf8'));
-      assert.equal(config.model, 'anthropic/claude-opus-4-6');
-      assert.equal(config.small_model, 'anthropic/claude-opus-4-6');
-      assert.equal(config.provider.anthropic.options.apiKey, `{env:${OC_API_KEY_ENV}}`);
-      assert.equal(config.provider.anthropic.options.baseURL, `{env:${OC_BASE_URL_ENV}}`);
+      assert.equal(config.model, 'anthropic-compat/claude-opus-4-6');
+      assert.equal(config.small_model, 'anthropic-compat/claude-opus-4-6');
+      assert.equal(config.provider['anthropic-compat'].options.apiKey, `{env:${OC_API_KEY_ENV}}`);
+      assert.equal(config.provider['anthropic-compat'].options.baseURL, `{env:${OC_BASE_URL_ENV}}`);
       assert.ok(!JSON.stringify(config).includes('sk-test-secret'), 'runtime config must not write secrets');
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
@@ -370,6 +370,23 @@ describe('generateOpenCodeRuntimeConfig', () => {
     assert.equal(config.model, 'openai-compat/gpt-4o', 'model prefix must match remapped provider key');
   });
 
+  test('providerName "anthropic" is remapped to avoid OpenCode builtin collision', () => {
+    const config = generateOpenCodeRuntimeConfig({
+      providerName: 'anthropic',
+      models: ['anthropic/MiniMax-M3'],
+      defaultModel: 'anthropic/MiniMax-M3',
+      apiType: 'anthropic',
+      hasBaseUrl: true,
+    });
+    // Provider key must NOT be 'anthropic' — OpenCode's builtin has hardcoded
+    // baseURL (api.anthropic.com) that conflicts with third-party Anthropic-
+    // compatible endpoints (MiniMax, DashScope, etc.).
+    assert.equal(config.provider['anthropic'], undefined, 'must not use reserved "anthropic" key');
+    assert.ok(config.provider['anthropic-compat'], 'must use remapped "anthropic-compat" key');
+    assert.equal(config.provider['anthropic-compat'].npm, '@ai-sdk/anthropic');
+    assert.equal(config.model, 'anthropic-compat/MiniMax-M3', 'model prefix must match remapped provider key');
+  });
+
   test('registers defaultModel even when the account model list is stale', () => {
     const config = generateOpenCodeRuntimeConfig({
       providerName: 'openai',
@@ -443,15 +460,15 @@ describe('generateOpenCodeRuntimeConfig', () => {
       omitProviderAuth: true,
     });
 
-    assert.equal(config.model, 'anthropic/claude-opus-4-6');
-    assert.ok(config.provider.anthropic, 'model/provider routing must still be present');
+    assert.equal(config.model, 'anthropic-compat/claude-opus-4-6');
+    assert.ok(config.provider['anthropic-compat'], 'model/provider routing must still be present');
     assert.equal(
-      config.provider.anthropic.options.apiKey,
+      config.provider['anthropic-compat'].options.apiKey,
       undefined,
       'OAuth/native-auth runtime config must not reference missing CAT_CAFE_OC_API_KEY',
     );
     assert.equal(
-      config.provider.anthropic.options.baseURL,
+      config.provider['anthropic-compat'].options.baseURL,
       undefined,
       'OAuth/native-auth runtime config must not reference missing CAT_CAFE_OC_BASE_URL',
     );
@@ -495,11 +512,11 @@ describe('generateOpenCodeRuntimeConfig', () => {
       hasBaseUrl: true,
     });
 
-    assert.equal(summary.model, 'anthropic/minimax-m2.7');
-    assert.equal(summary.smallModel, 'anthropic/minimax-m2.7');
-    assert.deepStrictEqual(summary.providerKeys, ['anthropic']);
+    assert.equal(summary.model, 'anthropic-compat/minimax-m2.7');
+    assert.equal(summary.smallModel, 'anthropic-compat/minimax-m2.7');
+    assert.deepStrictEqual(summary.providerKeys, ['anthropic-compat']);
     assert.deepStrictEqual(summary.providerSummary, {
-      anthropic: {
+      'anthropic-compat': {
         npm: '@ai-sdk/anthropic',
         modelKeys: ['minimax-m2.7', 'minimax-text-01'],
         hasBaseUrl: true,

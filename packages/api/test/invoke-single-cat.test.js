@@ -5582,13 +5582,13 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     }
 
     const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
-    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'anthropic/MiniMax-M2.7');
+    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'anthropic-compat/MiniMax-M2.7');
     assert.ok(callbackEnv.OPENCODE_CONFIG, 'OPENCODE_CONFIG must be set for custom endpoint');
     assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-minimax-key');
     assert.equal(callbackEnv.CAT_CAFE_OC_BASE_URL, 'https://api.minimax.io/v1');
-    assert.equal(seenRuntimeConfig?.model, 'anthropic/MiniMax-M2.7');
-    assert.ok(seenRuntimeConfig?.provider?.anthropic);
-    assert.ok(seenRuntimeConfig?.provider?.anthropic?.models?.['MiniMax-M2.7']);
+    assert.equal(seenRuntimeConfig?.model, 'anthropic-compat/MiniMax-M2.7');
+    assert.ok(seenRuntimeConfig?.provider?.['anthropic-compat']);
+    assert.ok(seenRuntimeConfig?.provider?.['anthropic-compat']?.models?.['MiniMax-M2.7']);
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
   });
 
@@ -5663,11 +5663,11 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     }
 
     const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
-    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'anthropic/claude-opus-4-6');
+    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, 'anthropic-compat/claude-opus-4-6');
     assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-ant-test-key');
-    assert.equal(seenRuntimeConfig?.model, 'anthropic/claude-opus-4-6');
-    assert.equal(seenRuntimeConfig?.provider?.anthropic?.npm, '@ai-sdk/anthropic');
-    assert.ok(seenRuntimeConfig?.provider?.anthropic?.models?.['claude-opus-4-6']);
+    assert.equal(seenRuntimeConfig?.model, 'anthropic-compat/claude-opus-4-6');
+    assert.equal(seenRuntimeConfig?.provider?.['anthropic-compat']?.npm, '@ai-sdk/anthropic');
+    assert.ok(seenRuntimeConfig?.provider?.['anthropic-compat']?.models?.['claude-opus-4-6']);
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
   });
 

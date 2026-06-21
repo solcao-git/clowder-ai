@@ -153,15 +153,12 @@ function stripOwnProviderPrefix(modelName: string, providerName: string): string
 }
 
 /**
- * OpenCode treats certain provider names as built-in and forces its own SDK
- * handling (e.g. 'openai' → Responses API via sdk.responses()), ignoring the
- * npm adapter field.  Remap these names so the config's npm adapter is used.
- *
- * Only 'openai' needs remapping: its builtin forces Responses-style routing
- * that conflicts with Chat Completions proxies. 'anthropic' and 'google'
- * builtins already match the intended SDK adapter, so no remap needed.
+ * OpenCode builtins that force their own SDK handling, ignoring custom npm
+ * adapter / baseURL. Remap so the config's adapter + baseURL take precedence.
+ * - 'openai': builtin forces Responses API → 'openai-compat'
+ * - 'anthropic': builtin hardcodes api.anthropic.com → 'anthropic-compat'
  */
-const OPENCODE_BUILTIN_NAMES = new Set(['openai']);
+const OPENCODE_BUILTIN_NAMES = new Set(['openai', 'anthropic']);
 
 export function safeProviderName(name: string): string {
   return OPENCODE_BUILTIN_NAMES.has(name) ? `${name}-compat` : name;
