@@ -251,3 +251,43 @@ describe('trae-event-transform', () => {
     assert.equal(result[1].toolName, 'Read');
   });
 });
+
+describe('TraeAgentService buildArgs', () => {
+  it('builds args with stream-json output format', async () => {
+    const { TraeAgentService } = await import('../dist/domains/cats/services/agents/providers/TraeAgentService.js');
+    const svc = new TraeAgentService({ catId: 'test-cat', model: 'test-model' });
+    // Access private method via bracket notation for testing
+    const args = svc['buildArgs']('hello', undefined, 'test-model');
+    assert.ok(args.includes('--output-format'));
+    assert.ok(args.includes('stream-json'));
+    assert.ok(args.includes('-p'));
+    assert.ok(args.includes('hello'));
+    assert.ok(args.includes('-y'));
+  });
+
+  it('uses -c model.name= for model selection', async () => {
+    const { TraeAgentService } = await import('../dist/domains/cats/services/agents/providers/TraeAgentService.js');
+    const svc = new TraeAgentService({ catId: 'test-cat', model: '智谱glm-5.2' });
+    const args = svc['buildArgs']('test', undefined, '智谱glm-5.2');
+    assert.ok(args.includes('-c'));
+    const modelIdx = args.indexOf('-c');
+    assert.equal(args[modelIdx + 1], 'model.name=智谱glm-5.2');
+  });
+
+  it('includes --resume when sessionId provided', async () => {
+    const { TraeAgentService } = await import('../dist/domains/cats/services/agents/providers/TraeAgentService.js');
+    const svc = new TraeAgentService({ model: 'test-model' });
+    const args = svc['buildArgs']('test', 'sess-123', 'model');
+    assert.ok(args.includes('--resume'));
+    assert.ok(args.includes('sess-123'));
+  });
+
+  it('strips = from model name to prevent key=value parsing breakage', async () => {
+    const { TraeAgentService } = await import('../dist/domains/cats/services/agents/providers/TraeAgentService.js');
+    const svc = new TraeAgentService({ model: 'test-model' });
+    const args = svc['buildArgs']('test', undefined, 'model=with=equals');
+    const modelIdx = args.indexOf('-c');
+    // All = should be stripped from model name
+    assert.equal(args[modelIdx + 1], 'model.name=modelwithequals');
+  });
+});

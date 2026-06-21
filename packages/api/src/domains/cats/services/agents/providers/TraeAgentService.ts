@@ -51,6 +51,23 @@ const TRAE_WIN_PATHS = [
   'C:\\Users\\Administrator\\AppData\\Local\\trae-cli\\bin\\trae-cli.exe',
 ];
 
+/**
+ * Windows CreateProcess command-line limit is 32,767 UTF-16 code units.
+ * We use ~28K chars as the safe threshold (leaving room for the command itself,
+ * flags like --output-format, -c model.name=..., -y, etc.).
+ *
+ * Plan C: trae-cli v0.120.40 doesn't support stdin prompt (`-p -` treats `-`
+ * as a literal string, not stdin). It also has no prompt-file option. So when
+ * the effective prompt exceeds this threshold, we truncate the L0/system prompt
+ * portion while preserving the user message intact. The L0 is advisory context
+ * (the model still has its base training), but the user message is the actual
+ * task that must not be lost.
+ *
+ * Future: if trae-cli adds `-p @file` or proper stdin support, switch to
+ * stdinInput like ClaudeAgentService does.
+ */
+const PROMPT_ARGV_SAFE_LENGTH = 28_000;
+
 interface TraeAgentServiceOptions {
   catId?: CatId;
   model?: string;
@@ -101,13 +118,37 @@ export class TraeAgentService implements L0InjectableAgentService {
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
     const effectiveModel = options?.callbackEnv?.CAT_CAFE_TRAE_MODEL_OVERRIDE ?? this.model;
-    const effectivePrompt = options?.systemPrompt ? `${options.systemPrompt}\n\n${prompt}` : prompt;
+    let effectivePrompt = options?.systemPrompt ? `${options.systemPrompt}\n\n${prompt}` : prompt;
     const metadata: MessageMetadata = { provider: 'trae', model: effectiveModel };
     let sessionInitEmitted = false;
     let textEventCount = 0;
     let toolUseEmitted = false;
     let errorAlreadyYielded = false;
     const uniqueEventTypes = new Set<string>();
+
+    // Plan C: Truncate L0 when effectivePrompt exceeds Windows argv limit.
+    // trae-cli doesn't support stdin prompt or prompt-file, so we must keep
+    // the prompt under ~28K chars. Preserve user message intact; trim L0.
+    if (effectivePrompt.length > PROMPT_ARGV_SAFE_LENGTH) {
+      const userMsgLen = prompt.length;
+      const maxL0Len = PROMPT_ARGV_SAFE_LENGTH - userMsgLen - 4; // 4 for "\n\n" separator
+      if (maxL0Len > 500 && options?.systemPrompt) {
+        // Trim L0 to fit, keeping the most important beginning
+        const trimmedL0 = options.systemPrompt.slice(0, maxL0Len);
+        effectivePrompt = `${trimmedL0}\n\n[L0 truncated: ${options.systemPrompt.length - maxL0Len} chars omitted]\n\n${prompt}`;
+        log.warn(
+          { catId: this.catId, originalLen: options.systemPrompt.length + userMsgLen, truncatedLen: effectivePrompt.length },
+          'Trae prompt exceeds argv limit, truncated L0 to preserve user message',
+        );
+      } else {
+        // Even user message alone exceeds limit — truncate it too (last resort)
+        effectivePrompt = effectivePrompt.slice(0, PROMPT_ARGV_SAFE_LENGTH - 100) + '\n\n[... prompt truncated at argv limit]';
+        log.warn(
+          { catId: this.catId, originalLen: effectivePrompt.length },
+          'Trae prompt severely exceeds argv limit, truncated entire prompt',
+        );
+      }
+    }
 
     try {
       const traeCommand = resolveTraeCommand();
