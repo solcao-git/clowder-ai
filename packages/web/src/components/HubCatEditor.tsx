@@ -334,10 +334,12 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
       return;
     }
     setSelectedTemplateId(t.id);
-    const name = t.name;
+    // 优先用 nickname（角色名，如"提纳里"），fallback 到 name（猫种名）
+    const displayName = t.nickname ?? t.name;
+    const name = displayName;
     const catId = autoSlug(name);
     // Auto-suffix aliases that conflict with existing cats
-    const rawAliases = [t.nickname, name].filter((s): s is string => Boolean(s));
+    const rawAliases = [displayName, t.name].filter((s): s is string => Boolean(s) && s !== displayName);
     const deduped = rawAliases.map((alias) => {
       const normalized = normalizeMentionPattern(alias);
       if (!reservedPatterns.has(normalized.toLowerCase())) return normalized;
