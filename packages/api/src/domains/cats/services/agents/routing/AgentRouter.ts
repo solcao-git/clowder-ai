@@ -1003,26 +1003,28 @@ export class AgentRouter {
       });
     }
 
-    // Breed-scoped patterns: @全体{displayName} and @all-{breedId}
+    // Family-scoped patterns: @全体{familyDisplayName} and @all-{family}
+    // Falls back to breed-based grouping if family is not set.
     const allConfigs = catRegistry.getAllConfigs();
-    const breedMap = new Map<string, { displayName: string; catIds: CatId[] }>();
+    const familyMap = new Map<string, { displayName: string; catIds: CatId[] }>();
     for (const [catId, config] of Object.entries(allConfigs)) {
-      if (!config.breedId) continue;
       if (!Object.hasOwn(this.services, catId)) continue;
-      const existing = breedMap.get(config.breedId);
+      const groupKey = config.family ?? config.breedId;
+      if (!groupKey) continue;
+      const existing = familyMap.get(groupKey);
       if (existing) {
         existing.catIds.push(catId as CatId);
       } else {
-        breedMap.set(config.breedId, {
-          displayName: config.breedDisplayName ?? config.displayName,
+        familyMap.set(groupKey, {
+          displayName: config.familyDisplayName ?? config.breedDisplayName ?? config.displayName,
           catIds: [catId as CatId],
         });
       }
     }
-    for (const [breedId, info] of breedMap) {
+    for (const [groupKey, info] of familyMap) {
       const catIds = info.catIds;
       patterns.push({ pattern: `@全体${info.displayName}`, resolve: async () => this.filterRoutableCats(catIds) });
-      patterns.push({ pattern: `@all-${breedId}`, resolve: async () => this.filterRoutableCats(catIds) });
+      patterns.push({ pattern: `@all-${groupKey}`, resolve: async () => this.filterRoutableCats(catIds) });
     }
 
     // Global @all / @全体 (shortest — must be last)

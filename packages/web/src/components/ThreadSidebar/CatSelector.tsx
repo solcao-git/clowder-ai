@@ -37,12 +37,12 @@ export function CatSelector({ selectedCats, onSelectionChange }: CatSelectorProp
   return (
     <div className="space-y-2">
       <div className="text-xs text-cafe-secondary font-medium">默认猫猫 (可选)</div>
-      {[...groups.entries()].map(([breedId, cats]) => {
-        const breedName = cats[0].breedDisplayName ?? cats[0].displayName;
+      {[...groups.entries()].map(([groupKey, cats]) => {
+        const groupName = cats[0].familyDisplayName ?? cats[0].breedDisplayName ?? cats[0].displayName;
         return (
-          <div key={breedId}>
+          <div key={groupKey}>
             <div className="text-micro text-cafe-muted mb-1">
-              {breedName}家族 · {clientIdLabel(cats[0].clientId)}
+              {groupName}家族 · {clientIdLabel(cats[0].clientId)}
             </div>
             <div className="flex flex-wrap gap-1.5">
               {cats.map((cat) => {

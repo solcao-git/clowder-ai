@@ -461,6 +461,8 @@ async function toCatResponse(
     variantLabel: cat.variantLabel ?? undefined,
     isDefaultVariant: cat.isDefaultVariant ?? undefined,
     breedDisplayName: cat.breedDisplayName ?? undefined,
+    family: cat.family ?? undefined,
+    familyDisplayName: cat.familyDisplayName ?? undefined,
     mcpSupport: cat.mcpSupport,
     ...(acpConfig ? { acp: acpConfig } : {}),
     roster: metadata.roster

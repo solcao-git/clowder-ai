@@ -68,6 +68,10 @@ export interface CatData {
   isDefaultVariant?: boolean;
   /** F32-b P4: Breed-level display name (e.g. "布偶猫"), for group headings */
   breedDisplayName?: string;
+  /** Family/nation group (e.g. "Sumeru") for cross-breed grouping */
+  family?: string;
+  /** Human-readable family name (e.g. "须弥") for display in group mentions */
+  familyDisplayName?: string;
   voiceConfig?: {
     voice: string;
     langCode: string;
@@ -255,7 +259,8 @@ export function useCatData() {
     return () => {
       const groups = new Map<string, CatData[]>();
       for (const cat of cats) {
-        const key = cat.breedId ?? cat.id;
+        // Prefer family-based grouping (e.g. "Sumeru") over breed-based for cross-breed grouping
+        const key = cat.family ?? cat.breedId ?? cat.id;
         const arr = groups.get(key) ?? [];
         arr.push(cat);
         groups.set(key, arr);

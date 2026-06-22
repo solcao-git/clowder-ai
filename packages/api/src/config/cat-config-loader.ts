@@ -525,6 +525,8 @@ export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig
         personality: variant.personality ?? defaultVariant?.personality ?? '',
         breedId: breed.id,
         breedDisplayName: breed.displayName,
+        ...(breed.family != null ? { family: breed.family } : {}),
+        ...(breed.familyDisplayName != null ? { familyDisplayName: breed.familyDisplayName } : {}),
         ...(variant.variantLabel != null ? { variantLabel: variant.variantLabel } : {}),
         isDefaultVariant: isDefault,
         ...(teamStrengths != null ? { teamStrengths } : {}),

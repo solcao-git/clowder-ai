@@ -166,6 +166,10 @@ export interface CatBreed {
   /** F167 Phase E (KD-20): breed-level hard restrictions; variants may override.
    *  Natural-language bans (e.g. `["禁止生成图片"]`). */
   readonly restrictions?: readonly string[];
+  /** Family/nation group key (e.g. "Sumeru") for cross-breed grouping in @全体 mentions */
+  readonly family?: string;
+  /** Human-readable family name (e.g. "须弥") for display in group mention UI */
+  readonly familyDisplayName?: string;
 }
 
 // ── F032: Roster types for collaboration rules ─────────────────────────

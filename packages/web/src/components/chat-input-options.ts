@@ -36,27 +36,32 @@ const STATIC_GROUP_MENTIONS: CatOption[] = [
   },
 ];
 
-/** Build breed-scoped group mention options (e.g. @全体布偶猫) from cat data.
- *  Only generates options for breeds with 2+ available cats. */
+/** Build family-scoped group mention options (e.g. @全体须弥) from cat data.
+ *  Groups cats by family (nation) instead of breed, so "全体须弥" includes both 纳西妲 and 提纳里.
+ *  Falls back to breed-based grouping if family is not set.
+ *  Only generates options for families with 2+ available cats. */
 function buildBreedGroupOptions(cats: CatData[]): CatOption[] {
-  const breedMap = new Map<string, { displayName: string; color: string; count: number }>();
+  const familyMap = new Map<string, { displayName: string; color: string; count: number }>();
   for (const cat of cats) {
-    if (!cat.breedId || !isAvailable(cat)) continue;
-    const existing = breedMap.get(cat.breedId);
+    if (!isAvailable(cat)) continue;
+    // Prefer family-based grouping; fall back to breedId for legacy compatibility
+    const groupKey = cat.family ?? cat.breedId;
+    if (!groupKey) continue;
+    const existing = familyMap.get(groupKey);
     if (existing) {
       existing.count++;
     } else {
-      breedMap.set(cat.breedId, {
-        displayName: cat.breedDisplayName ?? cat.displayName,
+      familyMap.set(groupKey, {
+        displayName: cat.familyDisplayName ?? cat.breedDisplayName ?? cat.displayName,
         color: catColorVar(cat.id, 'primary'),
         count: 1,
       });
     }
   }
-  return [...breedMap.entries()]
+  return [...familyMap.entries()]
     .filter(([, info]) => info.count >= 2)
-    .map(([breedId, info]) => ({
-      id: `breed:${breedId}`,
+    .map(([groupKey, info]) => ({
+      id: `family:${groupKey}`,
       label: `@全体${info.displayName}`,
       desc: `${info.displayName}全体 (${info.count}只)`,
       insert: `@全体${info.displayName} `,
