@@ -7,7 +7,7 @@
  * :root CSS vars + generates full --color-{catId}-* derivation rules for
  * ALL cats dynamically. No static per-cat CSS rules needed.
  *
- * cat.id at runtime is the resolved catId (e.g. "opus", "codex", "sonnet"),
+ * cat.id at runtime is the resolved catId (e.g. "nahida", "zhongli", "mavuika"),
  * NOT the template variant id (e.g. "opus-default"). Resolution happens in
  * cat-config-loader.ts: `variant.catId ?? breed.catId`.
  *

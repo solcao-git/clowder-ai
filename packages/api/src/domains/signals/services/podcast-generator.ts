@@ -78,7 +78,7 @@ function buildScriptPrompt(request: PodcastRequest): string {
 ## 要求
 - 模式: ${request.mode === 'essence' ? '精华版' : '深度版'}（目标时长 ${durationLabel}，totalDuration ≈ ${targetDuration} 秒）
 - 段落数: ${range.min}-${range.max} 段
-- 说话人: 宪宪（主持，布偶猫）和 砚砚（嘉宾，缅因猫）
+- 说话人: 纳西妲（主持，草神）和 钟离（嘉宾，岩神）
 - 风格: 自然对话，像两只猫在茶几旁讨论文章。要有互动感和思考深度。
 - **每段文字量要求：每段至少 80-200 字**（不是大纲式一句话！要有具体分析、案例、数据引用）
 - 每段 durationEstimate 用秒（根据文字量估算，中文约 3 字/秒）
@@ -96,7 +96,7 @@ ${request.articleContent.slice(0, 12000)}${
 }
 
 ## 输出格式（严格 JSON，不要 markdown 代码块）
-{"segments":[{"speaker":"宪宪","text":"...","durationEstimate":30},{"speaker":"砚砚","text":"...","durationEstimate":25}],"totalDuration":${targetDuration}}`;
+{"segments":[{"speaker":"纳西妲","text":"...","durationEstimate":30},{"speaker":"钟离","text":"...","durationEstimate":25}],"totalDuration":${targetDuration}}`;
 }
 
 function parseScriptResponse(raw: string, mode: PodcastRequest['mode']): PodcastScript {
@@ -140,7 +140,7 @@ export async function generateScriptViaThread(
   deps: ThreadInvokeDeps,
 ): Promise<PodcastScript> {
   const prompt = buildScriptPrompt(request);
-  const targetCats: CatId[] = ['opus' as CatId];
+  const targetCats: CatId[] = ['nahida' as CatId];
 
   // ① Write user message into thread
   const userMsg = await deps.messageStore.append({
@@ -148,7 +148,7 @@ export async function generateScriptViaThread(
     catId: null,
     content: prompt,
     userId: request.requestedBy,
-    mentions: ['opus' as CatId],
+    mentions: ['nahida' as CatId],
     timestamp: Date.now(),
   });
 
@@ -167,7 +167,7 @@ export async function generateScriptViaThread(
   });
 
   // ③ Track invocation
-  const primaryCat = targetCats[0] ?? 'opus';
+  const primaryCat = targetCats[0] ?? 'nahida';
   const controller = deps.invocationTracker.start(threadId, primaryCat, request.requestedBy, targetCats);
 
   // ④ Route execution and collect text response
@@ -231,8 +231,8 @@ async function generateScriptViaLLM(request: PodcastRequest): Promise<PodcastScr
 }
 
 const SPEAKER_TO_CAT: Record<string, string> = {
-  宪宪: 'opus',
-  砚砚: 'codex',
+  纳西妲: 'nahida',
+  钟离: 'zhongli',
 };
 
 /**
@@ -269,7 +269,7 @@ async function synthesizeSegments(segments: readonly PodcastSegment[]): Promise<
 
   const results: PodcastSegment[] = [];
   for (const segment of segments) {
-    const catId = SPEAKER_TO_CAT[segment.speaker] ?? 'opus';
+    const catId = SPEAKER_TO_CAT[segment.speaker] ?? 'nahida';
     // Truncate text exceeding TTS MAX_INPUT_CHARS (5000) to avoid synthesis failure
     const text = segment.text.length > 4800 ? segment.text.slice(0, 4800) : segment.text;
     try {

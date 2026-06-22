@@ -3,10 +3,10 @@ import { parseDirection } from '../parse-direction';
 
 // Minimal mock: alias (lowercase, no @) → catId
 const mockToCat: Record<string, string> = {
-  opus: 'opus',
-  布偶猫: 'opus',
-  codex: 'codex',
-  缅因猫: 'codex',
+  nahida: 'nahida',
+  纳西妲: 'nahida',
+  zhongli: 'zhongli',
+  钟离: 'zhongli',
   gpt52: 'gpt52',
 };
 
@@ -18,33 +18,33 @@ const getMocks = () => ({ toCat: mockToCat, re: mockRe });
 
 describe('parseDirection', () => {
   it('returns null for stream origin messages', () => {
-    const msg = { origin: 'stream' as const, content: '@codex hi' };
+    const msg = { origin: 'stream' as const, content: '@zhongli hi' };
     expect(parseDirection(msg, getMocks)).toBeNull();
   });
 
   it('parses single @mention from callback content', () => {
-    const msg = { origin: 'callback' as const, content: 'R2 修复确认\n\n@codex' };
+    const msg = { origin: 'callback' as const, content: 'R2 修复确认\n\n@zhongli' };
     expect(parseDirection(msg, getMocks)).toEqual({
       type: 'mention',
-      targets: ['codex'],
+      targets: ['zhongli'],
       arrow: '→',
     });
   });
 
   it('parses multiple distinct @mentions', () => {
-    const msg = { origin: 'callback' as const, content: '通知\n@codex\n@gpt52' };
+    const msg = { origin: 'callback' as const, content: '通知\n@zhongli\n@gpt52' };
     const result = parseDirection(msg, getMocks);
     expect(result?.type).toBe('mention');
-    expect(result?.targets).toContain('codex');
+    expect(result?.targets).toContain('zhongli');
     expect(result?.targets).toContain('gpt52');
     expect(result?.targets).toHaveLength(2);
   });
 
   it('deduplicates same cat from different aliases', () => {
-    const msg = { origin: 'callback' as const, content: '@codex @缅因猫' };
+    const msg = { origin: 'callback' as const, content: '@zhongli @钟离' };
     expect(parseDirection(msg, getMocks)).toEqual({
       type: 'mention',
-      targets: ['codex'],
+      targets: ['zhongli'],
       arrow: '→',
     });
   });
@@ -65,12 +65,12 @@ describe('parseDirection', () => {
   it('parses whisper direction from whisperTo (highest priority)', () => {
     const msg = {
       visibility: 'whisper' as const,
-      whisperTo: ['codex', 'gpt52'],
-      content: '@opus secret',
+      whisperTo: ['zhongli', 'gpt52'],
+      content: '@nahida secret',
     };
     expect(parseDirection(msg, getMocks)).toEqual({
       type: 'whisper',
-      targets: ['codex', 'gpt52'],
+      targets: ['zhongli', 'gpt52'],
       arrow: '→',
     });
   });
@@ -90,13 +90,13 @@ describe('parseDirection', () => {
       content: '## Multi-Mention 结果汇总',
       source: {
         connector: 'multi-mention-result',
-        meta: { initiator: 'opus', targets: ['codex', 'gpt52', 'gemini'] },
+        meta: { initiator: 'nahida', targets: ['zhongli', 'gpt52', 'mavuika'] },
       },
     };
     const result = parseDirection(msg, getMocks);
     expect(result).toEqual({
       type: 'mention',
-      targets: ['codex', 'gpt52', 'gemini'],
+      targets: ['zhongli', 'gpt52', 'mavuika'],
       arrow: '→',
     });
   });
@@ -104,27 +104,27 @@ describe('parseDirection', () => {
   it('connector source.meta.targets takes priority over content @mention parsing', () => {
     const msg = {
       origin: 'callback' as const,
-      content: '@codex some content',
+      content: '@zhongli some content',
       source: {
         connector: 'multi-mention-result',
-        meta: { targets: ['codex', 'gpt52'] },
+        meta: { targets: ['zhongli', 'gpt52'] },
       },
     };
     const result = parseDirection(msg, getMocks);
     // Should use meta.targets, not content parsing
-    expect(result?.targets).toEqual(['codex', 'gpt52']);
+    expect(result?.targets).toEqual(['zhongli', 'gpt52']);
   });
 
   it('uses extra.targetCats when present (F098-C1)', () => {
     const msg = {
       origin: 'callback' as const,
       content: 'Review done',
-      extra: { targetCats: ['codex', 'gpt52'] },
+      extra: { targetCats: ['zhongli', 'gpt52'] },
     };
     const result = parseDirection(msg, getMocks);
     expect(result).toEqual({
       type: 'mention',
-      targets: ['codex', 'gpt52'],
+      targets: ['zhongli', 'gpt52'],
       arrow: '→',
     });
   });
@@ -132,7 +132,7 @@ describe('parseDirection', () => {
   it('extra.targetCats takes priority over content @mention parsing (F098-C1)', () => {
     const msg = {
       origin: 'callback' as const,
-      content: '@codex some content',
+      content: '@zhongli some content',
       extra: { targetCats: ['gpt52'] },
     };
     const result = parseDirection(msg, getMocks);
@@ -154,9 +154,9 @@ describe('parseDirection', () => {
     const msg1 = { origin: 'callback' as const, content: '通知co-creator\n@co-creator' };
     expect(parseDirection(msg1, getOwnerMocks)).toBeNull();
 
-    // @co-creator + @codex → only codex in targets
-    const msg2 = { origin: 'callback' as const, content: '@co-creator @codex' };
+    // @co-creator + @zhongli → only zhongli in targets
+    const msg2 = { origin: 'callback' as const, content: '@co-creator @zhongli' };
     const result = parseDirection(msg2, getOwnerMocks);
-    expect(result?.targets).toEqual(['codex']);
+    expect(result?.targets).toEqual(['zhongli']);
   });
 });

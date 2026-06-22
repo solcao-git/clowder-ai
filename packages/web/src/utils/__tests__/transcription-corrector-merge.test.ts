@@ -41,8 +41,8 @@ describe('mergeTermEntries', () => {
   });
 
   it('works end-to-end with correctTranscription', () => {
-    const entries = mergeTermEntries([{ from: '测试猫', to: '布偶猫' }]);
+    const entries = mergeTermEntries([{ from: '测试猫', to: '纳西妲' }]);
     const result = correctTranscription('嗯那个测试猫帮我看看', entries);
-    expect(result).toBe('布偶猫帮我看看');
+    expect(result).toBe('纳西妲帮我看看');
   });
 });

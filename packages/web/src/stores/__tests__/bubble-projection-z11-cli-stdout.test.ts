@@ -25,7 +25,7 @@ describe('F194 Phase Z11 — projection keeps post_message speech separate from 
       {
         id: 'rec-stream',
         type: 'assistant',
-        catId: 'opus',
+        catId: 'nahida',
         content: 'Confirmed — branch at 47c91e45c, single fix commit',
         timestamp: 1000,
         origin: 'stream',
@@ -36,8 +36,8 @@ describe('F194 Phase Z11 — projection keeps post_message speech separate from 
       {
         id: 'rec-callback',
         type: 'assistant',
-        catId: 'opus',
-        content: '@codex Review continuity confirmed to 47c91e45 — APPROVE.',
+        catId: 'nahida',
+        content: '@zhongli Review continuity confirmed to 47c91e45 — APPROVE.',
         timestamp: 2000,
         origin: 'callback',
         isStreaming: false,
@@ -55,7 +55,7 @@ describe('F194 Phase Z11 — projection keeps post_message speech separate from 
     expect(streamBubble.extra?.stream?.cliStdout).toBeUndefined();
     expect(streamBubble.extra?.stream?.speechContent).toBeUndefined();
     expect(callbackBubble.origin).toBe('callback');
-    expect(callbackBubble.content).toBe('@codex Review continuity confirmed to 47c91e45 — APPROVE.');
+    expect(callbackBubble.content).toBe('@zhongli Review continuity confirmed to 47c91e45 — APPROVE.');
     expect(callbackBubble.toolEvents).toBeUndefined();
   });
 
@@ -64,7 +64,7 @@ describe('F194 Phase Z11 — projection keeps post_message speech separate from 
       {
         id: 'rec-stream-only',
         type: 'assistant',
-        catId: 'opus',
+        catId: 'nahida',
         content: '接球。先 runtime preflight + 看最近 commits',
         timestamp: 1000,
         origin: 'stream',
@@ -85,7 +85,7 @@ describe('F194 Phase Z11 — projection keeps post_message speech separate from 
       {
         id: 'rec-cb-only',
         type: 'assistant',
-        catId: 'opus',
+        catId: 'nahida',
         content: 'standalone post_message speech',
         timestamp: 1000,
         origin: 'callback',
@@ -107,7 +107,7 @@ describe('F194 Phase Z11 — projection keeps post_message speech separate from 
       {
         id: 's1',
         type: 'assistant',
-        catId: 'codex',
+        catId: 'zhongli',
         content: 'first stream chunk',
         timestamp: 1000,
         origin: 'stream',
@@ -116,7 +116,7 @@ describe('F194 Phase Z11 — projection keeps post_message speech separate from 
       {
         id: 's2',
         type: 'assistant',
-        catId: 'codex',
+        catId: 'zhongli',
         content: 'second stream chunk',
         timestamp: 1500,
         origin: 'stream',
@@ -125,7 +125,7 @@ describe('F194 Phase Z11 — projection keeps post_message speech separate from 
       {
         id: 'cb',
         type: 'assistant',
-        catId: 'codex',
+        catId: 'zhongli',
         content: 'final speech',
         timestamp: 2000,
         origin: 'callback',

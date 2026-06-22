@@ -1,0 +1,24 @@
+id: 03c2b2f9-c4b
+status: captured
+source: callback:nahida:aac10ea0-c97c-4068-85f7-a1fae2ce87f5
+created_at: 2026-06-22T10:58:24.509Z
+content: |
+  ## 连续三个 bug 的模式：新 CLI/猫接入时的改半遗漏
+  
+  **来源**: 六神调测期间 catId 大扫除 + Trae/Qoder 接入
+  
+  **共同模式**: 改了一半——修改了核心定义但漏了下游调用点
+  
+  **三个具体 bug**:
+  1. **BuiltinAccountClient 类型** — shared 加了 `qoder` 但漏了 web 包的同名类型定义 → TS 编译失败
+  2. **SSG 崩溃 (CAT_COLORS)** — `CAT_COLORS` key 从旧 catId 改了但 MessageNavigator 仍用 `CAT_COLORS.opus` 直接索引 → SSG 构建崩溃。修复：改用 `catPrimary()` 带 fallback 函数
+  3. **catId 冲突** — template 改了 catId 但 catalog 对齐漏了
+  
+  **Checklist（新 CLI/猫接入必走）**:
+  1. 类型定义：shared + web + api 三包同步（BuiltinAccountClient）
+  2. 颜色表：CAT_COLORS key + 所有直接索引调用点
+  3. catId 映射：template + catalog + Agent Service default + 所有硬编码 fallback
+  4. 构建验证：`pnpm build`（不只是 TS check，SSG 也会炸）
+  5. 测试验证：跑全量测试而非子集
+  
+  **根因反思**: 这类"全局重命名"操作，grep 搜索不能只搜定义处，必须搜所有**引用点**（直接索引 `obj.key` 比 `obj[key]` 更隐蔽，因为 grep 搜不到字面量以外的模式）。

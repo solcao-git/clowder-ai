@@ -26,14 +26,14 @@ describe('mention highlight cache', () => {
         displayName: '火花猫',
         color: { primary: '#F59E0B', secondary: '#FDE68A' },
         mentionPatterns: ['@spark', '@火花猫'],
-        roster: { family: 'maine-coon', roles: ['coder'], lead: false, available: false, evaluation: 'disabled' },
+        roster: { family: 'Inazuma', roles: ['coder'], lead: false, available: false, evaluation: 'disabled' },
       }),
       makeCat({
-        id: 'ragdoll',
-        displayName: '布偶猫',
+        id: 'nahida',
+        displayName: '纳西妲',
         color: { primary: '#9B7EBD', secondary: '#E8DFF5' },
-        mentionPatterns: ['@ragdoll', '@布偶猫'],
-        roster: { family: 'ragdoll', roles: ['architect'], lead: true, available: true, evaluation: '' },
+        mentionPatterns: ['@nahida', '@纳西妲', '@草神'],
+        roster: { family: 'Sumeru', roles: ['architect'], lead: true, available: true, evaluation: '' },
       }),
     ];
 
@@ -44,14 +44,17 @@ describe('mention highlight cache', () => {
     expect(toCat.spark).toBeUndefined();
     expect(toCat['火花猫']).toBeUndefined();
     // Available cat included
-    expect(toCat.ragdoll).toBe('ragdoll');
-    expect(toCat['布偶猫']).toBe('ragdoll');
+    expect(toCat.nahida).toBe('nahida');
+    expect(toCat['纳西妲']).toBe('nahida');
+    expect(toCat['草神']).toBe('nahida');
 
     const re = getMentionRe();
     re.lastIndex = 0;
     expect(re.exec('@spark')).toBeNull();
     re.lastIndex = 0;
-    expect(re.exec('@ragdoll')).not.toBeNull();
+    expect(re.exec('@nahida')).not.toBeNull();
+    re.lastIndex = 0;
+    expect(re.exec('@纳西妲')).not.toBeNull();
   });
 
   it('includes cats without roster field (seed cats default to available)', async () => {

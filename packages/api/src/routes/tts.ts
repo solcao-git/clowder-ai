@@ -63,7 +63,7 @@ export async function ttsRoutes(app: FastifyInstance, opts: TtsRouteOptions): Pr
     const { text, catId, voice: voiceOverride, langCode: langCodeOverride, speed: speedOverride } = parsed.data;
 
     // Resolve voice config: explicit params > per-cat defaults
-    const catVoice = catId ? getCatVoice(catId) : getCatVoice('opus');
+    const catVoice = catId ? getCatVoice(catId) : getCatVoice('nahida');
     const voice = voiceOverride ?? catVoice.voice;
     const langCode = langCodeOverride ?? catVoice.langCode;
     const speed = speedOverride ?? catVoice.speed ?? 1.0;
@@ -216,7 +216,7 @@ export async function ttsRoutes(app: FastifyInstance, opts: TtsRouteOptions): Pr
       return { error: 'No TTS provider available' };
     }
 
-    const catVoice = getCatVoice(catId ?? 'opus');
+    const catVoice = getCatVoice(catId ?? 'nahida');
     const voice = voiceOverride ?? catVoice.voice;
     const langCode = langCodeOverride ?? catVoice.langCode;
     const speed = speedOverride ?? catVoice.speed ?? 1.0;

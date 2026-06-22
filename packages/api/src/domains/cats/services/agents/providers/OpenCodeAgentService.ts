@@ -111,7 +111,7 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
   readonly l0CompilerFn: import('../../types.js').L0CompilerFn | undefined;
 
   constructor(options?: OpenCodeAgentServiceOptions) {
-    this.catId = options?.catId ?? createCatId('opencode');
+    this.catId = options?.catId ?? createCatId('venti');
     this.model = options?.model ?? getCatModel(this.catId as string);
     this.apiKey = options?.apiKey;
     this.baseUrl = options?.baseUrl;

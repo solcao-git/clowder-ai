@@ -16,7 +16,7 @@ vi.mock('@/utils/api-client', () => ({
 }));
 
 const sampleEvents = [
-  { id: 'e1', type: 'debate_winner', timestamp: Date.now() - 60_000, threadId: 't1', data: { winner: 'opus' } },
+  { id: 'e1', type: 'debate_winner', timestamp: Date.now() - 60_000, threadId: 't1', data: { winner: 'nahida' } },
   { id: 'e2', type: 'phase_completed', timestamp: Date.now() - 120_000, threadId: 't1', data: { phase: 'red' } },
   { id: 'e3', type: 'invocation_error', timestamp: Date.now() - 180_000, threadId: 't1', data: { error: 'timeout' } },
 ];
@@ -97,6 +97,6 @@ describe('AuditEventsTab', () => {
 
     // Expanded data should show full JSON
     expect(container.textContent).toContain('"winner"');
-    expect(container.textContent).toContain('"opus"');
+    expect(container.textContent).toContain('"nahida"');
   });
 });

@@ -1,7 +1,7 @@
 /**
  * F056 catId → CSS variable helper.
  *
- * catSlug() returns catId directly — the runtime catId (e.g. "opus", "codex")
+ * catSlug() returns catId directly — the runtime catId (e.g. "nahida", "zhongli")
  * is already the CSS key. CatHueInjector generates --color-{catId}-* tokens
  * dynamically for all cats.
  *

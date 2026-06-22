@@ -14,7 +14,7 @@ import { createModuleLogger } from '../../../../../infrastructure/logger.js';
 const log = createModuleLogger('delivery-cursor-store');
 
 const MAX_CURSORS = 5000;
-const FALLBACK_CATS: readonly CatId[] = [createCatId('opus'), createCatId('codex'), createCatId('gemini')];
+const FALLBACK_CATS: readonly CatId[] = [createCatId('nahida'), createCatId('zhongli'), createCatId('mavuika')];
 
 /** Get all cat IDs dynamically from registry, with static fallback */
 function getAllCats(): readonly CatId[] {

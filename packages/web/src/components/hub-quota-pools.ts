@@ -28,6 +28,7 @@ const BUILTIN_CLIENT_LABELS: Record<BuiltinAccountClient, string> = {
   dare: 'Dare',
   opencode: 'OpenCode',
   acp: 'ACP',
+  qoder: 'Qoder',
 };
 
 function uniqueTags(tags: string[]): string[] {

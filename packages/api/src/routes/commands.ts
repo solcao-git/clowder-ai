@@ -19,8 +19,8 @@ export interface CommandsRoutesOptions {
   messageStore: IMessageStore;
   taskStore: ITaskStore;
   socketManager: SocketManager;
-  /** Opus service for LLM-powered extraction */
-  opusService: AgentService;
+  /** Nahida (草神) service for LLM-powered extraction */
+  nahidaService: AgentService;
   /** Optional thread ownership guard (enabled in production wiring). */
   threadStore?: IThreadStore;
   /** F142 Phase B: unified command registry for listing */
@@ -87,7 +87,7 @@ export const commandsRoutes: FastifyPluginAsync<CommandsRoutesOptions> = async (
     }
 
     // Extract tasks using LLM
-    const result = await extractTasks(messages, opts.opusService, {
+    const result = await extractTasks(messages, opts.nahidaService, {
       threadId,
       userId,
       maxMessages: messageCount ?? 50,

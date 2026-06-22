@@ -50,17 +50,17 @@ describe('applyTermDictionary', () => {
   });
 
   it('corrects cat names (proven misrecognitions)', () => {
-    expect(applyTermDictionary('免因猫帮我review')).toBe('缅因猫帮我review');
-    expect(applyTermDictionary('面因猫说')).toBe('缅因猫说');
-    expect(applyTermDictionary('棉因猫')).toBe('缅因猫');
-    expect(applyTermDictionary('绵因猫')).toBe('缅因猫');
-    expect(applyTermDictionary('免疫猫')).toBe('缅因猫');
-    expect(applyTermDictionary('先罗猫')).toBe('暹罗猫');
-    expect(applyTermDictionary('仙罗猫')).toBe('暹罗猫');
+    expect(applyTermDictionary('那希达帮我review')).toBe('纳西妲帮我review');
+    expect(applyTermDictionary('纳西达说')).toBe('纳西妲说');
+    expect(applyTermDictionary('哪西妲')).toBe('纳西妲');
+    expect(applyTermDictionary('钟理帮我看看')).toBe('钟离帮我看看');
+    expect(applyTermDictionary('中离')).toBe('钟离');
+    expect(applyTermDictionary('玛维卡')).toBe('玛薇卡');
+    expect(applyTermDictionary('马薇卡')).toBe('玛薇卡');
     expect(applyTermDictionary('产屎官')).toBe('co-creator');
     expect(applyTermDictionary('铲史官')).toBe('co-creator');
     expect(applyTermDictionary('铲是官')).toBe('co-creator');
-    expect(applyTermDictionary('不偶猫很可爱')).toBe('布偶猫很可爱');
+    expect(applyTermDictionary('草神很可爱')).toBe('纳西妲很可爱');
   });
 
   it('corrects nickname homophones (砚砚 yàn variants)', () => {
@@ -71,11 +71,11 @@ describe('applyTermDictionary', () => {
     expect(applyTermDictionary('岩岩')).toBe('砚砚');
   });
 
-  it('corrects nickname homophones (宪宪 xiàn variants)', () => {
-    expect(applyTermDictionary('现现你看')).toBe('宪宪你看');
-    expect(applyTermDictionary('弦弦')).toBe('宪宪');
-    expect(applyTermDictionary('险险帮忙')).toBe('宪宪帮忙');
-    expect(applyTermDictionary('闲闲')).toBe('宪宪');
+  it('corrects cat name homophones (纳西妲/钟离/玛薇卡 variants)', () => {
+    expect(applyTermDictionary('那希达你看')).toBe('纳西妲你看');
+    expect(applyTermDictionary('纳西达')).toBe('纳西妲');
+    expect(applyTermDictionary('钟理帮忙')).toBe('钟离帮忙');
+    expect(applyTermDictionary('玛维卡')).toBe('玛薇卡');
   });
 
   it('corrects AI model and brand names', () => {
@@ -158,7 +158,7 @@ describe('removeFillers', () => {
 
 describe('correctTranscription', () => {
   beforeEach(() => {
-    refreshSpeechAliases([{ mentionPatterns: ['@砚砚', '@宪宪'] }]);
+    refreshSpeechAliases([{ mentionPatterns: ['@砚砚', '@纳西妲'] }]);
   });
 
   it('applies both term replacement and filler removal', () => {
@@ -188,14 +188,14 @@ describe('correctTranscription', () => {
   });
 
   it('handles realistic voice input with cat names', () => {
-    const input = '嗯让免因猫帮我 review 一下那个克劳德的 web socket 代码';
-    const expected = '让缅因猫帮我 review 一下 Claude的 WebSocket 代码';
+    const input = '嗯让那希达帮我 review 一下那个克劳德的 web socket 代码';
+    const expected = '让纳西妲帮我 review 一下 Claude的 WebSocket 代码';
     expect(correctTranscription(input)).toBe(expected);
   });
 
   it('normalizes speech-style at-mentions for cat nicknames', () => {
-    const input = 'at咱的砚砚 和 at 宪宪 你们出来了';
-    const expected = '@砚砚 和 @宪宪 你们出来了';
+    const input = 'at咱的砚砚 和 at 纳西妲 你们出来了';
+    const expected = '@砚砚 和 @纳西妲 你们出来了';
     expect(correctTranscription(input)).toBe(expected);
   });
 

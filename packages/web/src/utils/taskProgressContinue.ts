@@ -2,7 +2,7 @@ import type { TaskProgressState } from '@/stores/chat-types';
 
 /**
  * Build a "continue interrupted task" message.
- * @param mentionHandle — full mention alias including `@` prefix (e.g. `@opus`).
+ * @param mentionHandle — full mention alias including `@` prefix (e.g. `@纳西妲`).
  *   Falls back to `@${rawId}` if no alias is available (#967).
  */
 export function buildContinueMessage(mentionHandle: string, progress: TaskProgressState): string {

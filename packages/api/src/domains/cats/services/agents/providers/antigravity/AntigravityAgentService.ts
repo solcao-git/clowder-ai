@@ -400,7 +400,7 @@ export class AntigravityAgentService implements AgentService {
       ? typeof options.catId === 'string'
         ? createCatId(options.catId)
         : options.catId
-      : createCatId('antigravity');
+      : createCatId('furina');
     this.model = options?.model ?? getCatModel(this.catId as string);
     const injectedBridge = options?.bridge;
     this.bridge =

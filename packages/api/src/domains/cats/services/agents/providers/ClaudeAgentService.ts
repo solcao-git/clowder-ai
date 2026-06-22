@@ -290,7 +290,7 @@ export class ClaudeAgentService implements AgentService {
   private readonly rawArchive: RawArchiveSink;
 
   constructor(options?: ClaudeAgentServiceOptions) {
-    this.catId = options?.catId ?? createCatId('opus');
+    this.catId = options?.catId ?? createCatId('nahida');
     this.spawnFn = options?.spawnFn;
     this.rawArchive = options?.rawArchive ?? new CliRawArchive();
     this.l0CompilerFn = options?.l0CompilerFn ?? compileL0ViaSubprocess;

@@ -100,6 +100,8 @@ const BUILTIN_ACCOUNT_MAP: Record<string, BuiltinAccountClient> = {
   builtin_dare: 'dare',
   opencode: 'opencode',
   builtin_opencode: 'opencode',
+  qoder: 'qoder',
+  'qoder-native': 'qoder',
 };
 
 const GOOGLE_OWNED_DOMAINS = ['generativelanguage.googleapis.com', 'googleapis.com'];

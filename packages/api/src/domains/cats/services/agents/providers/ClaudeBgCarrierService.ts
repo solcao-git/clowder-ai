@@ -128,7 +128,7 @@ export class ClaudeBgCarrierService implements AgentService {
   private readonly l0CompilerFn: typeof compileL0ViaSubprocess;
 
   constructor(options?: ClaudeBgCarrierServiceOptions) {
-    this.catId = options?.catId ?? createCatId('opus');
+    this.catId = options?.catId ?? createCatId('nahida');
     this.model = options?.model ?? getCatModel(this.catId as string);
     this.spawnFn = options?.spawnFn ?? spawn;
     this.l0CompilerFn = options?.l0CompilerFn ?? compileL0ViaSubprocess;

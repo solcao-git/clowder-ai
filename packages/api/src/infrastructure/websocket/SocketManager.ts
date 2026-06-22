@@ -30,8 +30,8 @@ interface QueueProcessorLike {
  */
 export function buildCancelMessages(result: CancelResult): AgentMessage[] {
   if (!result.cancelled) return [];
-  const catIds = result.catIds.length > 0 ? result.catIds : ['opus'];
-  const primaryCatId = catIds[0] ?? 'opus';
+  const catIds = result.catIds.length > 0 ? result.catIds : ['nahida'];
+  const primaryCatId = catIds[0] ?? 'nahida';
   const now = Date.now();
   const messages: AgentMessage[] = [];
 

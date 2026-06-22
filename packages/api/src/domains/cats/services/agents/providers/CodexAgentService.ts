@@ -373,7 +373,7 @@ export class CodexAgentService implements AgentService {
   private readonly l0CompilerFn: typeof compileL0ViaSubprocess;
 
   constructor(options?: CodexAgentServiceOptions) {
-    this.catId = options?.catId ?? createCatId('codex');
+    this.catId = options?.catId ?? createCatId('zhongli');
     this.spawnFn = options?.spawnFn;
     this.l0CompilerFn = options?.l0CompilerFn ?? compileL0ViaSubprocess;
     this.model = options?.model ?? getCatModel(this.catId as string);

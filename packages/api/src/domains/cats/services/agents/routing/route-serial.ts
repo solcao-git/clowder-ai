@@ -1178,7 +1178,7 @@ export async function* routeSerial(
               // F215 AC-C3: detect 46-接力 relay signal — set flag to push opus-4.6 after loop.
               // This is an internal routing signal; must be consumed here and NOT yielded to the frontend.
               if (parsed.type === 'malformed_toolcall_relay_46') {
-                const relay46CatId = createCatId('opus');
+                const relay46CatId = createCatId('nahida');
                 if (catId !== relay46CatId && Object.hasOwn(deps.services, relay46CatId as string)) {
                   malformedRelayPending = true;
                   log.info(
@@ -1428,7 +1428,7 @@ export async function* routeSerial(
 
       // F215 AC-C3: push opus-4.6 to worklist as relay when 48 炸毛 + fresh retry also failed
       if (malformedRelayPending) {
-        const relay46CatId = createCatId('opus');
+        const relay46CatId = createCatId('nahida');
         if (
           catId !== relay46CatId &&
           Object.hasOwn(deps.services, relay46CatId as string) &&

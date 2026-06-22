@@ -20,11 +20,14 @@ export interface CatColorPair {
 /** Cat persona fallback colors keyed by catId.
  * Values mirror cat-template.json defaults — update both when adding a new cat. */
 export const CAT_COLORS: Record<string, CatColorPair> = {
-  opus: { primary: '#9B7EBD', secondary: '#E8DFF5' },
-  codex: { primary: '#5B8C5A', secondary: '#D4E6D3' },
-  gemini: { primary: '#5B9BD5', secondary: '#D6E9F8' },
-  kimi: { primary: '#4B5563', secondary: '#E5E7EB' },
-  dare: { primary: '#D4A76A', secondary: '#FFF8F0' },
+  nahida: { primary: '#9B7EBD', secondary: '#E8DFF5' },
+  zhongli: { primary: '#5B8C5A', secondary: '#D4E6D3' },
+  mavuika: { primary: '#5B9BD5', secondary: '#D6E9F8' },
+  raiden: { primary: '#D4A76A', secondary: '#FFF8F0' },
+  furina: { primary: '#1F9CDB', secondary: '#E0F2FE' },
+  venti: { primary: '#7EC8C8', secondary: '#E0F7FA' },
+  tighnari: { primary: '#4ECDC4', secondary: '#E8FFF9' },
+  qiqi: { primary: '#7C5CFC', secondary: '#EDE8FF' },
 };
 
 /** Fallback when catId is unknown or color data is missing entirely. */

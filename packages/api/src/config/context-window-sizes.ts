@@ -24,6 +24,15 @@ export const CONTEXT_WINDOW_SIZES: Record<string, number> = {
   'gemini-2.5-flash': 1_000_000,
   'gemini-3-pro': 1_000_000,
   'gemini-3.1-pro-preview': 1_000_000,
+  // GLM (智谱)
+  'glm-5.2': 1_000_000,
+  'glm-5.2[1m]': 1_000_000,
+  'glm-5.1': 128_000,
+  // MiniMax
+  'MiniMax-M3': 1_000_000,
+  // Qwen (通义千问)
+  'qwen3.7-max': 1_000_000,
+  'qwen3.7-plus': 1_000_000,
 };
 
 /**

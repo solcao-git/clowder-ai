@@ -2985,19 +2985,19 @@ async function main(): Promise<void> {
   // (not Promise<AsyncIterable>), otherwise `for await (... of svc.invoke())`
   // crashes at runtime. Use sync generator wrapper that defers async setup
   // to first yield.
-  let _opusService: AgentService | undefined;
-  const opusService: AgentService = {
+  let _nahidaService: AgentService | undefined;
+  const nahidaService: AgentService = {
     invoke(prompt, options) {
       // Sync return of AsyncGenerator — IS AsyncIterable. Lazy init happens
       // before first yield, then delegates.
-      return (async function* opusLazyInvoke() {
-        if (!_opusService) {
+      return (async function* nahidaLazyInvoke() {
+        if (!_nahidaService) {
           const { createClaudeAgentServiceForCanary } = await import(
             './domains/cats/services/agents/providers/claude-carrier-factory.js'
           );
-          _opusService = createClaudeAgentServiceForCanary('opus' as CatId);
+          _nahidaService = createClaudeAgentServiceForCanary('nahida' as CatId);
         }
-        yield* _opusService.invoke(prompt, options);
+        yield* _nahidaService.invoke(prompt, options);
       })();
     },
   };
@@ -3005,7 +3005,7 @@ async function main(): Promise<void> {
     messageStore,
     taskStore,
     socketManager,
-    opusService,
+    nahidaService,
     threadStore,
     registry: commandRegistry,
   });

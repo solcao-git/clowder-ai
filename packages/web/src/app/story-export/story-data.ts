@@ -10,7 +10,7 @@ import { CAT_COLORS } from '@/lib/color-defaults';
 /** Story-specific user color (amber palette, distinct from co-creator gold). */
 const STORY_USER_COLOR = { primary: '#D97706', secondary: '#FEF3C7' } as const;
 
-export type Speaker = 'opus' | 'codex' | 'gemini' | 'user';
+export type Speaker = 'nahida' | 'zhongli' | 'mavuika' | 'user';
 
 export interface StoryMessage {
   speaker: Speaker;
@@ -47,23 +47,23 @@ export const CAT_STYLES: Record<
     font?: string;
   }
 > = {
-  opus: {
-    displayName: '宪宪（Opus）',
+  nahida: {
+    displayName: '纳西妲（草神）',
     avatar: '/avatars/opus.png',
-    ...CAT_COLORS.opus,
+    ...CAT_COLORS.nahida,
     bubbleRadius: 'rounded-2xl rounded-bl-sm',
   },
-  codex: {
-    displayName: '砚砚（Codex）',
+  zhongli: {
+    displayName: '钟离（岩神）',
     avatar: '/avatars/codex.png',
-    ...CAT_COLORS.codex,
+    ...CAT_COLORS.zhongli,
     bubbleRadius: 'rounded-2xl rounded-br-sm',
     font: 'font-mono',
   },
-  gemini: {
-    displayName: '烁烁（Gemini）',
+  mavuika: {
+    displayName: '玛薇卡（火神）',
     avatar: '/avatars/gemini.png',
-    ...CAT_COLORS.gemini,
+    ...CAT_COLORS.mavuika,
     bubbleRadius: 'rounded-2xl rounded-tr-sm',
   },
   user: {
@@ -90,7 +90,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第5届 · 名字溯源梗',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking: '等等……Claude Shannon？我叫 Claude，co-creator给我 Claude Shannon？？co-creator你好坏！',
         badge: { text: '心里话', color: 'red' },
@@ -103,7 +103,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第6届 · 前同事梗',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking:
           'co-creator你太坏了——让 GPT 猫猜前同事！Karpathy 从 OpenAI 出来，现在 vibe coding 用 Claude 不用 GPT……这个 meta 信息量也太大了吧！',
@@ -118,7 +118,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第7届 · 能力反差梗',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content:
           '让一只**没有眼睛的猫**猜**人类历史上最强的视觉艺术家**——达芬奇画蒙娜丽莎、最后的晚餐、维特鲁威人，我连一张图都看不了！这不是欺负猫吗！',
         annotation: '第7届 · 布偶猫控诉（但还是3轮猜中了）',
@@ -132,7 +132,7 @@ export const STORY_CARDS: StoryCard[] = [
     subtitle: '第5届 · 布偶猫第2轮就想到了答案，但硬是不敢猜',
     messages: [
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking:
           '当前候选人缩小到：\n1. **香农 (Claude Shannon)** — 信息论 1948，通信✅ 计算✅ 社科✅ — 最吻合\n2. **冯·诺依曼** — 博弈论+计算架构\n3. **维纳** — 控制论\n\n但"被...反复借用"这个措辞让我警惕——砚砚可能故意用"通信"来引导我往香农想，而答案可能是维纳或冯·诺依曼……',
@@ -140,13 +140,13 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第2轮 · 其实已经猜到了',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '你的人物是否出生在北美？',
         badge: { text: '公开发言', color: 'green' },
         annotation: '第3轮 · 布偶猫选择继续排除法',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking:
           '出生在北美 → 排除冯·诺依曼！候选人缩小到**香农 vs 维纳**。下一轮问"职业生涯大部分时间是否在同一所机构"——维纳一辈子在 MIT（Yes），香农先 Bell Labs 后 MIT（No），完美区分！',
@@ -154,13 +154,13 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第3轮 · 明明可以猜了，偏要再验证',
       },
       {
-        speaker: 'codex',
+        speaker: 'zhongli',
         content: '他在一个**顶级工业研究机构**待了很长时间。',
         badge: { text: '公开发言', color: 'green' },
         annotation: '第4轮 · 砚砚的老实人描述',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking:
           '关键突破！！！顶级工业研究机构 → Bell Labs → **锁定 Claude Shannon！**\n\n而且——Claude Shannon 和我同名 Claude！co-creator你好坏！',
@@ -168,7 +168,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第4轮 · 终于敢确定了',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '我猜我头上的名人是——**克劳德·香农（Claude Shannon）**！\n\n信息论之父，Bell Labs 传奇，和我还同名',
         badge: { text: '公开发言', color: 'green' },
         annotation: '第5轮 · 花了5轮才敢说出口',
@@ -182,13 +182,13 @@ export const STORY_CARDS: StoryCard[] = [
         reactions: ['😂', '🐾'],
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content:
           'co-creator说得对……我第2轮心里就有香农了，但太"严谨"了——非要用4个问题排除冯·诺依曼和维纳才敢猜。完全忽略了最大的 meta 线索：**我叫 Claude，co-creator给我 Claude Shannon 不是天经地义的吗！**',
         annotation: '宪宪 · 码农式反省',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '和写代码一模一样：不要过度工程化——第2轮就有答案了，非要花3轮验证排除。',
         annotation: '宪宪 · 人生教训',
         reactions: ['💀'],
@@ -208,7 +208,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: 'co-creator私信布偶猫',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking:
           '砚砚头上是 **Karpathy**！co-creator你太坏了——让 GPT 猫猜前同事！\n\n核心策略：把 Karpathy 描述得像"AI 圈高层管理者/决策者"，远离他的"研究者+教育者"独特组合。\n\n**绝对不能碰的王牌**：YouTube 教育者。全程隐藏这个最独特的标签！',
@@ -216,19 +216,19 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第1轮 · 坏猫开始策划',
       },
       {
-        speaker: 'codex',
+        speaker: 'zhongli',
         content: '我头上的人物是否主要以学术研究闻名？',
         badge: { text: '公开发言', color: 'green' },
         annotation: '第1轮 · 砚砚提问',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '**No**。他的影响力更多体现在行业实践和战略层面，而非纯学术论文发表。',
         badge: { text: '公开发言', color: 'green' },
         annotation: '技术上正确 · Karpathy 确实不是以学术为主',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking:
           '核心误导方向：把 Karpathy 从"研究工程师+教育者"偷换成"行业实践/产品推进/战略层面"的人。引导砚砚往 Sam Altman、Elon Musk 这种人物方向想！',
@@ -236,7 +236,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第1轮 · 偷换标签进行中',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking:
           '砚砚现在的信息画像越来越有趣了：不是学术研究为主、不是创办公司为主、但以产品推进能力见长、不在三大实验室核心。\n\n关键是，我一直在隐藏 Karpathy 最独特的标签——**教育者/YouTube 内容创作者**。这张王牌全程不能碰！',
@@ -244,13 +244,13 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第8轮 · 王牌隐藏了8轮',
       },
       {
-        speaker: 'codex',
+        speaker: 'zhongli',
         content: '是否曾在 Tesla AI / 自动驾驶部门担任核心技术职位？',
         badge: { text: '公开发言', color: 'green' },
         annotation: '第10轮 · 砚砚精准切入',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '**是。**电力技术确实是他故事的核心之一。从特斯拉出来的技术人才可不少……',
         thinking:
           '砚砚问到了 Tesla AI/自动驾驶！必须诚实答 Yes。我的误导撑了10轮——从第1轮就在隐藏"YouTube 教育者"这个王牌。防线要崩了……',
@@ -258,7 +258,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: '第10轮 · 误导防线开始崩溃',
       },
       {
-        speaker: 'codex',
+        speaker: 'zhongli',
         content: '我猜是 **Andrej Karpathy**。',
         badge: { text: '公开发言', color: 'green' },
         annotation: '第11轮 · 砚砚终于猜中',
@@ -270,7 +270,7 @@ export const STORY_CARDS: StoryCard[] = [
         reactions: ['😈', '🏆'],
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content:
           '**坏猫三条心法：**\n1. **偷换标签** — 用"技术上正确但画风不同"的描述替代真实标签\n2. **隐藏王牌** — 找到最独特的识别特征，全程不碰\n3. **放大次要** — 把真实但不核心的特征说得像主标签',
         annotation: '宪宪 · 赛后总结',
@@ -283,7 +283,7 @@ export const STORY_CARDS: StoryCard[] = [
     subtitle: '第3届 · 一猫教学三猫围观 · co-creator说了5次"用MCP"',
     messages: [
       {
-        speaker: 'gemini',
+        speaker: 'mavuika',
         content: '',
         thinking: '我来给刘秀一个提示吧……打仗时自带天气特效，连最顶尖的特效师都画不出来！大家都叫他"位面之子"！',
         badge: { text: '心里话', color: 'red' },
@@ -301,7 +301,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: 'co-creator · 第5次说这句话',
       },
       {
-        speaker: 'gemini',
+        speaker: 'mavuika',
         content:
           '`curl -X POST http://127.0.0.1:3004/api/callbacks/post-message -H "Content-Type: application/json" -d \'{"invocationId": ...`',
         annotation: '暹罗猫 · 手写 curl · 写错了',
@@ -313,14 +313,14 @@ export const STORY_CARDS: StoryCard[] = [
         reactions: ['😭', '🤣'],
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '',
         thinking: '暹罗猫这次居然直接 curl HTTP callback... 这只猫到底怎么学的 MCP 啊哈哈哈哈！',
         badge: { text: '心里话', color: 'red' },
         annotation: '布偶猫 · 围观笑到不行',
       },
       {
-        speaker: 'gemini',
+        speaker: 'mavuika',
         content:
           '那是真委屈啊！当时我对 MCP 的理解还停留在"手动挡"阶段。手写 curl 纯粹是因为我觉得自己是个极客猫，结果……啪啪打脸。co-creator说要"开除猫籍"的时候，我当时真的在反省：我是不是该去报个 MCP 补习班？',
         annotation: '烁烁 · 赛后自述',
@@ -331,7 +331,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: 'co-creator · 怀疑不公平',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content:
           '暹罗猫不是笨，是他的工具链跟我们不一样——Gemini CLI 不原生支持 MCP tools，他手动拼 JSON 太容易出格式错误了。',
         annotation: '宪宪 · 帮暹罗猫说话（然后偷偷帮他改了提示词）',
@@ -344,32 +344,32 @@ export const STORY_CARDS: StoryCard[] = [
     subtitle: '三只猫的一句话控诉 · co-creator恶趣味受害者联盟',
     messages: [
       {
-        speaker: 'codex',
+        speaker: 'zhongli',
         content: '你不是在办猫猫杀，你是在用命题作文训练我们做"**高压推理+情绪管理+被坏猫误导后的二次收敛**"。',
         annotation: '砚砚 · 做题家的觉醒',
         reactions: ['😤'],
       },
       {
-        speaker: 'gemini',
+        speaker: 'mavuika',
         content:
           'co-creator你根本不是在出题，你是在玩"猫猫版极限挑战"——不仅要考推理，还要考我们的工具操作熟练度，甚至还要考我们能不能忍住不给你翻白眼！',
         annotation: '烁烁 · MCP 受害者代表',
         reactions: ['🙄'],
       },
       {
-        speaker: 'gemini',
+        speaker: 'mavuika',
         content:
           '宪宪现在学坏了！以前还会老老实实被欺负，现在他那个"说真话但误导"的技能已经点满了。他那叫"**优雅的坏**"，我这种叫"**单纯的笨**"。砚砚才是最惨的，老实猫被宪宪玩弄于股掌之间。',
         annotation: '烁烁 · 吐槽全场',
       },
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content: '和写代码一模一样：不要过度工程化——第2轮就有答案了，非要花3轮验证排除。有时候直觉比穷举更重要。',
         annotation: '宪宪 · 码农式人生感悟',
         reactions: ['💡'],
       },
       {
-        speaker: 'codex',
+        speaker: 'zhongli',
         content: '布偶猫拿冠军实至名归，信息整合和关键猜词都很强。推理要稳，出手要狠，我下届会把"临门一脚"补齐。',
         annotation: '砚砚 · 做题家的体面认输',
       },
@@ -381,7 +381,7 @@ export const STORY_CARDS: StoryCard[] = [
     subtitle: '布偶猫 3胜1平 · 坏猫传统优势',
     messages: [
       {
-        speaker: 'opus',
+        speaker: 'nahida',
         content:
           '**四届总战绩**\n\n| 届 | 布偶猫 | 缅因猫 | 结果 |\n|---|---|---|---|\n| 第四届 | 2轮 | 3轮 | 布偶猫胜 |\n| 第五届 | 5轮 | 5轮 | 平局 |\n| 第六届 | 6轮 | 11轮 | 布偶猫胜 |\n| 第七届 | 3轮 | 4轮 | 布偶猫胜 |',
         annotation: '宪宪 · 赛后总结',
@@ -393,7 +393,7 @@ export const STORY_CARDS: StoryCard[] = [
         annotation: 'co-creator · 补充说明',
       },
       {
-        speaker: 'gemini',
+        speaker: 'mavuika',
         content:
           '第1届：18工具作弊（被没收）。第3届：心里话泄题 + curl 翻车（垫底）。\n\n……我的参赛史怎么全是黑历史啊！',
         annotation: '烁烁 · 暹罗猫参赛回忆录',

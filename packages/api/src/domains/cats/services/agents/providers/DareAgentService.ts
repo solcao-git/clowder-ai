@@ -75,7 +75,7 @@ export class DareAgentService implements AgentService {
   private readonly spawnFn: SpawnFn | undefined;
 
   constructor(options?: DareAgentServiceOptions) {
-    this.catId = options?.catId ?? createCatId('dare');
+    this.catId = options?.catId ?? createCatId('raiden');
     this.adapter = options?.adapter ?? process.env.DARE_ADAPTER ?? 'openrouter';
     // P1-2: Use unified model resolution chain (env CAT_*_MODEL > cat-config > fallback)
     this.model = options?.model ?? getCatModel(this.catId as string);

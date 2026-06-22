@@ -463,7 +463,7 @@ export class GeminiAgentService implements AgentService {
   private readonly adapter: GeminiAdapter;
   private readonly agyProfileConfig: AgyProfileConfig | undefined;
   constructor(options?: GeminiAgentServiceOptions) {
-    this.catId = options?.catId ?? createCatId('gemini');
+    this.catId = options?.catId ?? createCatId('mavuika');
     this.model = options?.model ?? getCatModel(this.catId as string);
     this.spawnFn = options?.spawnFn;
     this.antigravitySpawnFn = options?.antigravitySpawnFn ?? nodeSpawn;

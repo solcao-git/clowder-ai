@@ -98,7 +98,7 @@ export class ClaudeInteractivePtyCarrierService implements AgentService {
   private mcpConfigFilePath: string | undefined;
 
   constructor(options?: ClaudeInteractivePtyCarrierServiceOptions) {
-    this.catId = options?.catId ?? createCatId('opus');
+    this.catId = options?.catId ?? createCatId('nahida');
     this.model = getCatModel(this.catId) ?? 'claude-opus-4-8';
     this.pollIntervalMs = options?.pollIntervalMs ?? 500;
     this.terminalTimeoutMs = options?.terminalTimeoutMs ?? 5 * 60 * 1_000; // 5 min
