@@ -9,6 +9,8 @@ export interface TemplateCard {
   nickname?: string;
   avatar: string;
   color: { primary: string; secondary: string };
+  family?: string;
+  familyDisplayName?: string;
   roleDescription: string;
   personality: string;
   teamStrengths?: string;

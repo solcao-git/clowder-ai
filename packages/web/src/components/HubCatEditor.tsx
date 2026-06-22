@@ -72,6 +72,28 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
     () => availableProfiles.find((profile) => profile.id === form.accountRef) ?? null,
     [availableProfiles, form.accountRef],
   );
+
+  // 按 family（国家）分组 templates，未填 family 的归到"其他"
+  const groupedByFamily = useMemo(() => {
+    const order: { family: string; familyDisplayName: string; color: string }[] = [];
+    const map = new Map<string, TemplateCard[]>();
+    for (const t of templates) {
+      const key = t.family ?? '__other__';
+      if (!map.has(key)) {
+        map.set(key, []);
+        order.push({
+          family: key,
+          familyDisplayName: t.familyDisplayName ?? '其他',
+          color: t.color?.primary ?? '#888',
+        });
+      }
+      map.get(key)!.push(t);
+    }
+    return order.map((g) => ({
+      ...g,
+      members: map.get(g.family) ?? [],
+    }));
+  }, [templates]);
   const modelOptions = useMemo(() => {
     if (form.clientId === 'antigravity') return [];
     return selectedProfile?.models ?? [];
@@ -574,37 +596,100 @@ export function HubCatEditor({ cat, draft, existingCats, open, onClose, onSaved 
           {!cat && templates.length > 0 && (
             <section
               data-guide-id="add-member.template-picker"
-              className="space-y-3 rounded-[18px] bg-[var(--console-card-bg)] p-[18px] shadow-[0_8px_22px_rgba(43,33,26,0.04)]"
+              className="space-y-4 rounded-[18px] bg-[var(--console-card-bg)] p-[18px] shadow-[0_8px_22px_rgba(43,33,26,0.04)]"
             >
-              <h4 className="text-base font-extrabold text-cafe">成员模板</h4>
-              <p className="text-xs font-semibold text-cafe-secondary">
-                从内置成员模板开始，选择后自动填充身份、模型与运行时默认值。
-              </p>
-              <div className="flex flex-wrap gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => handleTemplateSelect(null)}
-                  className={`h-8 rounded-2xl px-3.5 text-compact font-extrabold transition ${
-                    selectedTemplateId === 'custom'
-                      ? 'bg-[var(--cafe-accent)] text-[var(--cafe-surface)]'
-                      : 'bg-[var(--console-field-bg)] text-[var(--console-template-text)]'
-                  }`}
-                >
-                  自定义
-                </button>
-                {templates.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => handleTemplateSelect(selectedTemplateId === t.id ? null : t)}
-                    className={`h-8 rounded-2xl px-3.5 text-compact font-extrabold transition ${
-                      selectedTemplateId === t.id
-                        ? 'bg-[var(--cafe-accent)] text-[var(--cafe-surface)]'
-                        : 'bg-[var(--console-field-bg)] text-[var(--console-template-text)]'
-                    }`}
-                  >
-                    {t.nickname ?? t.name}
-                  </button>
+              <div>
+                <h4 className="text-base font-extrabold text-cafe">成员模板</h4>
+                <p className="mt-1 text-xs font-semibold text-cafe-secondary">
+                  从内置成员模板开始，选择后自动填充身份、模型与运行时默认值。
+                </p>
+              </div>
+
+              {/* 自定义 — 独立的"或"入口 */}
+              <button
+                type="button"
+                onClick={() => handleTemplateSelect(null)}
+                data-template-id="custom"
+                className={`flex w-full items-center gap-2.5 rounded-xl border-2 border-dashed px-3.5 py-2.5 text-left transition ${
+                  selectedTemplateId === 'custom'
+                    ? 'border-[var(--cafe-accent)] bg-[var(--cafe-accent)]/10 text-[var(--cafe-accent)]'
+                    : 'border-[var(--console-border-soft)] text-[var(--console-template-text)] hover:border-[var(--cafe-accent)]/50'
+                }`}
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[var(--console-field-bg)] text-base">
+                  ✎
+                </span>
+                <span className="flex-1">
+                  <span className="block text-compact font-extrabold">自定义</span>
+                  <span className="block text-[10px] font-semibold opacity-70">
+                    从空白开始，不套用任何角色模板
+                  </span>
+                </span>
+              </button>
+
+              <div className="flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-wider text-cafe-muted">
+                <span className="h-px flex-1 bg-[var(--console-border-soft)]" />
+                <span>或选择一个角色模板</span>
+                <span className="h-px flex-1 bg-[var(--console-border-soft)]" />
+              </div>
+
+              {/* 按国家（family）分组渲染 */}
+              <div className="space-y-3">
+                {groupedByFamily.map((group) => (
+                  <div key={group.family} className="space-y-1.5">
+                    <div className="flex items-center gap-2 px-1 text-[10px] font-extrabold uppercase tracking-wider text-cafe-muted">
+                      <span
+                        className="h-1.5 w-1.5 rounded-full"
+                        style={{ backgroundColor: group.color }}
+                        aria-hidden
+                      />
+                      <span>{group.familyDisplayName}</span>
+                      <span className="text-[var(--cafe-muted)]/60">·</span>
+                      <span className="text-[var(--cafe-muted)]/60">{group.members.length} 只</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {group.members.map((t) => {
+                        const isSelected = selectedTemplateId === t.id;
+                        return (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => handleTemplateSelect(isSelected ? null : t)}
+                            data-template-id={t.id}
+                            className={`group flex items-center gap-2 rounded-2xl border-2 px-2.5 py-1.5 transition ${
+                              isSelected
+                                ? 'border-[var(--cafe-accent)] bg-[var(--cafe-accent)]/10 shadow-sm'
+                                : 'border-transparent bg-[var(--console-field-bg)] hover:border-[var(--cafe-accent)]/40'
+                            }`}
+                            style={
+                              isSelected
+                                ? undefined
+                                : { borderColor: `${t.color.primary}40` }
+                            }
+                          >
+                            <span
+                              className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full text-[10px] font-extrabold"
+                              style={{
+                                backgroundColor: t.color.secondary,
+                                color: t.color.primary,
+                              }}
+                            >
+                              {t.nickname?.charAt(0) ?? t.name.charAt(0)}
+                            </span>
+                            <span
+                              className={`text-compact font-extrabold ${
+                                isSelected
+                                  ? 'text-[var(--cafe-accent)]'
+                                  : 'text-[var(--console-template-text)]'
+                              }`}
+                            >
+                              {t.nickname ?? t.name}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 ))}
               </div>
             </section>
