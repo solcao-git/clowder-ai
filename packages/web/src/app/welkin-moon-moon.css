@@ -1,30 +1,26 @@
 /*
- * 空月之歌 · 月相层 v21 (再缩 72→64 + top 6→4, 折中水神 58 建议)
+ * 空月之歌 · 月相层 v22 (光晕加强 + 边缘过渡延后, 尺寸/位置不动)
  *
- * v1-v20 演进:
+ * v1-v21 演进:
  *   v1-v14: 探索到 "远观对了"
- *   v15-v17: 缩尺寸 (56-60px) - solcao 认可小
- *   v18/v19: 跳回 84px - solcao: "大小回退了"
- *   v20: 缩 72px (在 56-76 区间内, 但偏大) - solcao: 看水神分析
- *   v21: 再缩 64px (水神建议 58 折中, top 4px) (v21 是当前版本)
+ *   v15-v17: 缩尺寸 (56-60px)
+ *   v18/v19: 跳回 84px - solcao: "大小也回退了"
+ *   v20: 缩 72px
+ *   v21: 再缩 64px (水神数据驱动诊断) - solcao: "位置大小都很好了"
+ *   v22: 光晕加强 + 边缘过渡延后 (v22 是当前版本)
  *
- * v20→v21 关键改动 (水神芙宁娜数据驱动诊断, solcao 转水神分析):
- *   - 水神查版本历史: solcao 认可的尺寸区间 = 56-76px
- *   - v20 72px 在区间内但偏大
- *   - v21 64px = v15 56 + v17 60 + v20 72 中位
- *   - 比水神建议 58 大一档 (64 看着仍有"月亮"质感, 不会太小)
+ * v21→v22 关键改动 (solcao v21 截图反馈 "位置大小都很好了, 视觉效果对比参考图"):
+ *   - 尺寸/位置/数量: 全部不动 (solcao 认可)
+ *   - 光晕: 远晕 blur 70→80, alpha 0.18→0.25 (参考图光晕更明显)
+ *   - 边缘过渡: 主渐变 75% transparent → 85% transparent
+ *     - 月面更柔和过渡到光晕
+ *     - 中心 L=0.95 仍实心, 边缘 L=0.82 拉到 85%, 给光晕更多空间
+ *   - 中晕 alpha 0.35 → 0.4 (中范围柔光加强)
  *
- * v21 改动:
- *   - 尺寸: 72px → 64px
- *   - top: 6px → 4px (状态栏 48px, 月亮 64px top 4px → 4-68px, 中线 36px ≈ 状态栏中线 24 偏下)
- *   - 月海椭圆尺寸同步缩 (30/34/32/28/26 → 26/30/28/24/22)
- *   - 光晕 blur 缩到适配 64px (12/31/75 → 10/28/70)
- *   - 月海 alpha 不变 (v20 0.35-0.45 看着 OK)
- *   - 月海/光晕 H 不变
- *
- * 总外径: 64 + 70*2 = 204px ≈ 3.2x 月亮 (跟 v20 接近)
- *
- * v21 保留 v20: 边缘 L=0.82 + 主渐变 transparent 100% + 删暗色 stop + 远晕 H=265
+ * v22 不做 (避免风险):
+ *   - ❌ SVG noise (v16 翻车)
+ *   - ❌ 月海形状变化 (solcao 没批评月海)
+ *   - ❌ 环形山 (v17 solcao 删了)
  *
  * 三档回退不变.
  *
@@ -35,16 +31,16 @@
   /* 回退开关 */
   --wm-moon-opacity: 0.78;
   --wm-moon-scale: 1;
-  /* 月相颜色 - v19/v20/v21 不变 */
+  /* 月相颜色 - v22 不变 */
   --wm-moon-core: oklch(0.95 0.02 250);
   --wm-moon-edge: oklch(0.82 0.03 260);
-  /* 光晕 - v21 不变 */
+  /* 光晕 - v22 中晕 alpha 0.35→0.4, 远晕 alpha 0.18→0.25 */
   --wm-moon-glow-near: oklch(0.85 0.05 250 / 0.5);
-  --wm-moon-glow-mid: oklch(0.8 0.05 255 / 0.35);
-  --wm-moon-glow-far: oklch(0.75 0.05 265 / 0.18);
+  --wm-moon-glow-mid: oklch(0.8 0.05 255 / 0.4);
+  --wm-moon-glow-far: oklch(0.75 0.05 265 / 0.25);
 }
 
-/* 月相本体: 顶部居中, 64px (v21 再缩), 5 条淡淡带状月海 + 主渐变到 100% 透明 */
+/* 月相本体: 顶部居中, 64px (v22 不动), 5 条带状月海 (v22 不动) + 边缘过渡延后 */
 [data-theme="dark"][data-preset="welkin-moon"] body::after {
   content: "";
   position: fixed;
@@ -54,21 +50,21 @@
   height: 64px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月相表面 = 5 条淡淡带状月海 (v21 椭圆同步缩 26/30/28/24/22) + 主渐变 */
-  /* 5 个带状月海 (v21 椭圆尺寸同步缩 30/34/32/28/26 → 26/30/28/24/22) */
+  /* 月相表面 = 5 条淡淡带状月海 (v22 不动) + 主渐变 (边缘过渡延后 75%→85%) */
+  /* 5 个带状月海 (v22 跟 v21 一致, solcao 没批评形状) */
   background:
     radial-gradient(ellipse 26px 9px at 30% 30%, oklch(0.55 0.07 262 / 0.4) 0%, transparent 60%),
     radial-gradient(ellipse 30px 11px at 60% 25%, oklch(0.5 0.08 268 / 0.35) 0%, transparent 60%),
     radial-gradient(ellipse 28px 10px at 35% 55%, oklch(0.55 0.07 258 / 0.45) 0%, transparent 60%),
     radial-gradient(ellipse 24px 8px at 70% 60%, oklch(0.5 0.08 272 / 0.4) 0%, transparent 60%),
     radial-gradient(ellipse 22px 8px at 45% 80%, oklch(0.55 0.07 265 / 0.35) 0%, transparent 60%),
-    /* 主渐变: 银白月 */
-    radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 75%, transparent 100%);
-  /* 3 层 spread=0 连续高斯光晕: 近 10 + 中 28 + 远 70 (v21 适配 64px) */
+    /* 主渐变: 银白月, 边缘过渡延后 (中心 L=0.95 → 85% L=0.82 → 100% transparent) */
+    radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 85%, transparent 100%);
+  /* 3 层 spread=0 连续高斯光晕: 近 10 + 中 28 + 远 80 (v22 远晕 blur 70→80 加强) */
   box-shadow:
     0 0 10px 0 var(--wm-moon-glow-near),
     0 0 28px 0 var(--wm-moon-glow-mid),
-    0 0 70px 0 var(--wm-moon-glow-far);
+    0 0 80px 0 var(--wm-moon-glow-far);
   opacity: var(--wm-moon-opacity);
   pointer-events: none;
   z-index: 0;
@@ -76,20 +72,20 @@
   animation: wm-moon-breathe 8s ease-in-out infinite;
 }
 
-/* 呼吸 - 3 层 spread=0 高斯 ±10% blur + ±6% alpha, 紫蓝调一致 (远晕 H=265) */
+/* 呼吸 - 3 层 spread=0 高斯 ±10% blur + ±6% alpha, 紫蓝调一致 (远晕 blur 80) */
 @keyframes wm-moon-breathe {
   0%,
   100% {
     box-shadow:
       0 0 10px 0 oklch(0.85 0.05 250 / 0.5),
-      0 0 28px 0 oklch(0.8 0.05 255 / 0.35),
-      0 0 70px 0 oklch(0.75 0.05 265 / 0.18);
+      0 0 28px 0 oklch(0.8 0.05 255 / 0.4),
+      0 0 80px 0 oklch(0.75 0.05 265 / 0.25);
   }
   50% {
     box-shadow:
       0 0 11px 0 oklch(0.85 0.05 250 / 0.55),
-      0 0 31px 0 oklch(0.8 0.05 255 / 0.385),
-      0 0 77px 0 oklch(0.75 0.05 265 / 0.198);
+      0 0 31px 0 oklch(0.8 0.05 255 / 0.44),
+      0 0 88px 0 oklch(0.75 0.05 265 / 0.275);
   }
 }
 
