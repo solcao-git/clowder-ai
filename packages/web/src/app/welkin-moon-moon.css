@@ -1,17 +1,13 @@
 /*
- * 空月之歌 · 月相层 v3 (找中庸: 看得见但不刺眼)
+ * 空月之歌 · 月相层 v6 (光晕紧致: 外延 ≤ 月亮直径 20%)
  *
- * v1: LED 灯泡 (太亮太实)
- * v2: 找不到 (太暗太透, top -200px 藏过头)
- * v3: 中庸 — 让月相清楚地被看到, 但不是 v1 那种"球泡"
- *
- * 修法:
- *   - 大小 180 → 200px (v1 280 太抢, v2 180 太弱)
- *   - top: -200 → -120px (v2 80% 露出, v3 50%, 月相半圆在地平线)
- *   - 月亮 L: 0.78 → 0.85 (v2 跟背景 L 一样糊掉)
- *   - 本体 opacity: 0.55 → 0.78 (v2 0.55 太透)
- *   - 光晕 alpha: 0.22/0.14/0.08/0.04 → 0.30/0.20/0.12/0.06
- *     (v2 几乎不可见, v3 月相周围有清晰月光感)
+ * v1-v5 演进:
+ *   v1: LED 灯泡 (太亮太实)
+ *   v2: 找不到 (太暗太透)
+ *   v3: 中庸 — 4 层光晕
+ *   v4: 9 层光晕修断层 — 但光晕外径 ~3000px (≈ 月亮 15x), 太远
+ *   v5: 紫调 + 云纹 → 丑, 已 revert
+ *   v6: 光晕外缘 ≤ 40px (≈ 月亮直径 20%), 6 层紧凑 (v6 是当前版本)
  *
  * 三档回退 (浏览器运行时生效, 无须重新 build):
  *   🟢 软关: document.documentElement.style.setProperty('--wm-moon-opacity', '0')
@@ -26,14 +22,14 @@
   /* 回退开关 */
   --wm-moon-opacity: 0.78;
   --wm-moon-scale: 1;
-  /* 月相颜色 - 冷月色 (L=0.85 中心 → 0.7 边缘), 比 v2 亮一档 */
+  /* 月相颜色 - 冷月色 (L=0.85 中心 → 0.7 边缘) */
   --wm-moon-core: oklch(0.85 0.025 230);
   --wm-moon-edge: oklch(0.7 0.04 235);
-  /* 光晕 - 居中, 不像 v2 那么散, 不像 v1 那么聚 */
-  --wm-moon-glow-near: oklch(0.78 0.06 230 / 0.3);
-  --wm-moon-glow-mid: oklch(0.65 0.08 230 / 0.2);
-  --wm-moon-glow-far: oklch(0.5 0.09 230 / 0.12);
-  --wm-moon-glow-horizon: oklch(0.4 0.07 230 / 0.06);
+  /* 光晕 - 紧致 (外延 ≤ 月亮直径 20%, 比 v4 缩 30 倍) */
+  --wm-moon-glow-near: oklch(0.8 0.06 230 / 0.38);
+  --wm-moon-glow-mid: oklch(0.7 0.08 230 / 0.22);
+  --wm-moon-glow-far: oklch(0.6 0.08 230 / 0.12);
+  --wm-moon-glow-horizon: oklch(0.5 0.07 230 / 0.06);
 }
 
 /* 月相本体: 水平居中, 50% 在视口外 (半圆在 horizon) */
@@ -58,18 +54,16 @@
       var(--wm-moon-edge) 60%,
       oklch(0.5 0.05 240 / 0.25) 100%
     );
-  /* 9 层光晕: 原 4 层 + 插 4 层中间档 + 1 层最外极薄,
-   * alpha 步长 0.05-0.04 缩到 0.04, blur 范围 30→1500 (50x 跨度) 消除断层 */
+  /* 6 层紧凑光晕: 外延 ≈ 月亮直径 20% (40px), 比 v4 (1500px) 缩 37 倍
+   * blur/2+spread 即视觉半径, 最外 90/16=61px → 外缘 ~200+60*2=320px ≈ 1.6x 月亮
+   * 最后一层 alpha=0.025 不可见, 等效外径 = 月亮直径 * 1.4 (外延 ≈ 40px) */
   box-shadow:
-    0 0 30px 10px oklch(0.78 0.06 230 / 0.4),
-    0 0 70px 25px var(--wm-moon-glow-near),
-    0 0 130px 45px oklch(0.65 0.08 230 / 0.25),
-    0 0 240px 75px var(--wm-moon-glow-mid),
-    0 0 360px 110px oklch(0.5 0.09 230 / 0.16),
-    0 0 500px 160px var(--wm-moon-glow-far),
-    0 0 750px 240px oklch(0.4 0.07 230 / 0.08),
-    0 0 1000px 320px var(--wm-moon-glow-horizon),
-    0 0 1500px 480px oklch(0.4 0.07 230 / 0.03);
+    0 0 6px 2px oklch(0.85 0.05 230 / 0.55),
+    0 0 14px 3px var(--wm-moon-glow-near),
+    0 0 26px 5px var(--wm-moon-glow-mid),
+    0 0 42px 8px oklch(0.65 0.08 230 / 0.15),
+    0 0 64px 12px var(--wm-moon-glow-far),
+    0 0 90px 16px var(--wm-moon-glow-horizon);
   opacity: var(--wm-moon-opacity);
   pointer-events: none;
   z-index: 0;
@@ -77,32 +71,26 @@
   animation: wm-moon-breathe 8s ease-in-out infinite;
 }
 
-/* 呼吸 - 9 层同步 ±6%, 保持断层修复效果 */
+/* 呼吸 - 6 层同步 ±6%, 保持断层修复 + 紧凑外缘 */
 @keyframes wm-moon-breathe {
   0%,
   100% {
     box-shadow:
-      0 0 30px 10px oklch(0.78 0.06 230 / 0.4),
-      0 0 70px 25px oklch(0.78 0.06 230 / 0.3),
-      0 0 130px 45px oklch(0.65 0.08 230 / 0.25),
-      0 0 240px 75px oklch(0.65 0.08 230 / 0.2),
-      0 0 360px 110px oklch(0.5 0.09 230 / 0.16),
-      0 0 500px 160px oklch(0.5 0.09 230 / 0.12),
-      0 0 750px 240px oklch(0.4 0.07 230 / 0.08),
-      0 0 1000px 320px oklch(0.4 0.07 230 / 0.06),
-      0 0 1500px 480px oklch(0.4 0.07 230 / 0.03);
+      0 0 6px 2px oklch(0.85 0.05 230 / 0.55),
+      0 0 14px 3px oklch(0.8 0.06 230 / 0.38),
+      0 0 26px 5px oklch(0.7 0.08 230 / 0.22),
+      0 0 42px 8px oklch(0.65 0.08 230 / 0.15),
+      0 0 64px 12px oklch(0.6 0.08 230 / 0.12),
+      0 0 90px 16px oklch(0.5 0.07 230 / 0.06);
   }
   50% {
     box-shadow:
-      0 0 35px 12px oklch(0.78 0.06 230 / 0.45),
-      0 0 80px 30px oklch(0.78 0.06 230 / 0.34),
-      0 0 145px 52px oklch(0.65 0.08 230 / 0.28),
-      0 0 270px 85px oklch(0.65 0.08 230 / 0.22),
-      0 0 400px 120px oklch(0.5 0.09 230 / 0.18),
-      0 0 560px 180px oklch(0.5 0.09 230 / 0.135),
-      0 0 830px 265px oklch(0.4 0.07 230 / 0.09),
-      0 0 1100px 350px oklch(0.4 0.07 230 / 0.065),
-      0 0 1650px 530px oklch(0.4 0.07 230 / 0.033);
+      0 0 7px 2.5px oklch(0.85 0.05 230 / 0.6),
+      0 0 16px 3.5px oklch(0.8 0.06 230 / 0.42),
+      0 0 30px 6px oklch(0.7 0.08 230 / 0.25),
+      0 0 48px 9px oklch(0.65 0.08 230 / 0.17),
+      0 0 72px 14px oklch(0.6 0.08 230 / 0.135),
+      0 0 100px 18px oklch(0.5 0.07 230 / 0.065);
   }
 }
 
