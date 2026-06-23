@@ -16,7 +16,7 @@
  * 色值沿用 preset 锚点（accentHue=230 / surfaceHue=268），改 preset 一处自动跟随。
  */
 
-[data-theme='dark'][data-preset='welkin-moon'] {
+[data-theme="dark"][data-preset="welkin-moon"] {
   /* 锚点重声明（这里只用于 box-shadow / text-glow 的 alpha 计算，
    * 调色板生成仍由 buildCSS 负责）。 */
   --wm-accent: oklch(0.7 0.1 230);
@@ -26,22 +26,21 @@
   --wm-night-soft: oklch(0.22 0.04 270);
 
   /* 1. 夜空径向渐变 — 右上角作为"月亮方位"，向外扩散到深海蓝 */
-  background:
-    radial-gradient(
-      ellipse 90% 60% at 85% 8%,
-      var(--wm-night-soft) 0%,
-      var(--wm-night-mid) 35%,
-      var(--wm-night-deep) 75%,
-      oklch(0.07 0.015 260) 100%
-    );
+  background: radial-gradient(
+    ellipse 90% 60% at 85% 8%,
+    var(--wm-night-soft) 0%,
+    var(--wm-night-mid) 35%,
+    var(--wm-night-deep) 75%,
+    oklch(0.07 0.015 260) 100%
+  );
   background-attachment: fixed;
   min-height: 100vh;
 }
 
 /* 2. 星点 — 单个 ::before 元素叠 20 颗微弱星，靠 box-shadow 多位置
  *    用 mix-blend-mode: screen 让星点只增亮不覆盖。 */
-[data-theme='dark'][data-preset='welkin-moon'] body::before {
-  content: '';
+[data-theme="dark"][data-preset="welkin-moon"] body::before {
+  content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
@@ -76,8 +75,8 @@
 }
 
 /* 3. 卡片 / 浮起容器 — 微弱月光环（不刺眼，靠 box-shadow 多层 alpha） */
-[data-theme='dark'][data-preset='welkin-moon'] [class*='cafe-surface-elevated'],
-[data-theme='dark'][data-preset='welkin-moon'] [class*='cafe-surface-canvas'] {
+[data-theme="dark"][data-preset="welkin-moon"] [class*="cafe-surface-elevated"],
+[data-theme="dark"][data-preset="welkin-moon"] [class*="cafe-surface-canvas"] {
   box-shadow:
     0 0 0 1px var(--wm-accent-soft),
     0 0 24px -8px var(--wm-accent-soft),
@@ -85,50 +84,50 @@
 }
 
 /* 4. 标题微光 — 仅 h1/h2，避免全文发光变噪声 */
-[data-theme='dark'][data-preset='welkin-moon'] h1,
-[data-theme='dark'][data-preset='welkin-moon'] h2 {
+[data-theme="dark"][data-preset="welkin-moon"] h1,
+[data-theme="dark"][data-preset="welkin-moon"] h2 {
   text-shadow: 0 0 12px oklch(0.85 0.06 230 / 0.35);
   letter-spacing: 0.01em;
   font-weight: 600;
 }
 
 /* 5. 字体气质 — letter-spacing 略宽，呼吸感更"空" */
-[data-theme='dark'][data-preset='welkin-moon'] body {
+[data-theme="dark"][data-preset="welkin-moon"] body {
   letter-spacing: 0.005em;
   font-weight: 400;
 }
 
 /* 6. 选中色 — 月光蓝 */
-[data-theme='dark'][data-preset='welkin-moon'] ::selection {
+[data-theme="dark"][data-preset="welkin-moon"] ::selection {
   background: oklch(0.55 0.12 230 / 0.45);
   color: oklch(0.98 0.01 230);
 }
 
 /* 7. 滚动条 — 冷调细线 */
-[data-theme='dark'][data-preset='welkin-moon'] ::-webkit-scrollbar {
+[data-theme="dark"][data-preset="welkin-moon"] ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
-[data-theme='dark'][data-preset='welkin-moon'] ::-webkit-scrollbar-track {
+[data-theme="dark"][data-preset="welkin-moon"] ::-webkit-scrollbar-track {
   background: transparent;
 }
-[data-theme='dark'][data-preset='welkin-moon'] ::-webkit-scrollbar-thumb {
+[data-theme="dark"][data-preset="welkin-moon"] ::-webkit-scrollbar-thumb {
   background: oklch(0.4 0.05 250 / 0.5);
   border-radius: 4px;
 }
-[data-theme='dark'][data-preset='welkin-moon'] ::-webkit-scrollbar-thumb:hover {
+[data-theme="dark"][data-preset="welkin-moon"] ::-webkit-scrollbar-thumb:hover {
   background: oklch(0.55 0.08 235 / 0.7);
 }
 
 /* 8. 链接 / 强调文字 hover — 月光晕 */
-[data-theme='dark'][data-preset='welkin-moon'] a:hover,
-[data-theme='dark'][data-preset='welkin-moon'] button:hover {
+[data-theme="dark"][data-preset="welkin-moon"] a:hover,
+[data-theme="dark"][data-preset="welkin-moon"] button:hover {
   filter: drop-shadow(0 0 4px var(--wm-accent-soft));
 }
 
 /* 9. 减弱动效偏好 — 关闭星点呼吸 */
 @media (prefers-reduced-motion: reduce) {
-  [data-theme='dark'][data-preset='welkin-moon'] body::before {
+  [data-theme="dark"][data-preset="welkin-moon"] body::before {
     animation: none;
   }
 }
