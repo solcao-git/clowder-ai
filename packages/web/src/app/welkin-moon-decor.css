@@ -39,42 +39,26 @@
   min-height: 100vh;
 }
 
-/* 2. 星点 — 单个 ::before 元素叠 20 颗微弱星，靠 box-shadow 多位置
- *    用 mix-blend-mode: screen 让星点只增亮不覆盖。 */
-[data-theme="dark"][data-preset="welkin-moon"] body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image:
-    radial-gradient(1px 1px at 12% 18%, oklch(0.9 0.05 230 / 0.6), transparent 50%),
-    radial-gradient(1px 1px at 27% 42%, oklch(0.85 0.05 230 / 0.5), transparent 50%),
-    radial-gradient(1.5px 1.5px at 45% 12%, oklch(0.95 0.05 230 / 0.7), transparent 50%),
-    radial-gradient(1px 1px at 63% 28%, oklch(0.85 0.05 230 / 0.45), transparent 50%),
-    radial-gradient(1px 1px at 78% 55%, oklch(0.9 0.05 230 / 0.55), transparent 50%),
-    radial-gradient(1.5px 1.5px at 18% 68%, oklch(0.95 0.05 230 / 0.7), transparent 50%),
-    radial-gradient(1px 1px at 35% 85%, oklch(0.85 0.05 230 / 0.4), transparent 50%),
-    radial-gradient(1px 1px at 52% 72%, oklch(0.9 0.05 230 / 0.5), transparent 50%),
-    radial-gradient(1.5px 1.5px at 70% 88%, oklch(0.95 0.05 230 / 0.65), transparent 50%),
-    radial-gradient(1px 1px at 88% 75%, oklch(0.85 0.05 230 / 0.45), transparent 50%),
-    radial-gradient(1px 1px at 8% 92%, oklch(0.85 0.05 230 / 0.4), transparent 50%),
-    radial-gradient(1.5px 1.5px at 92% 30%, oklch(0.95 0.05 230 / 0.75), transparent 50%),
-    radial-gradient(1px 1px at 40% 35%, oklch(0.85 0.05 230 / 0.4), transparent 50%),
-    radial-gradient(1px 1px at 55% 50%, oklch(0.85 0.05 230 / 0.35), transparent 50%),
-    radial-gradient(1.5px 1.5px at 22% 50%, oklch(0.95 0.05 230 / 0.6), transparent 50%);
-  animation: wm-twinkle 8s ease-in-out infinite;
-}
-
-@keyframes wm-twinkle {
-  0%,
-  100% {
-    opacity: 0.85;
-  }
-  50% {
-    opacity: 0.55;
-  }
-}
+/* 2. 星点 — v28b 暂时禁掉整个 body::before 星点粒子层 (二分法定位色块)
+ *    嫌疑: body::before fixed 全屏 + inset 0 + 15 个 radial-gradient 粒子
+ *          + wm-twinkle 8s opacity 动画 = webkit 滚动合成闪烁色块
+ *
+ * [data-theme="dark"][data-preset="welkin-moon"] body::before {
+ *   content: "";
+ *   position: fixed;
+ *   inset: 0;
+ *   pointer-events: none;
+ *   z-index: 0;
+ *   background-image:
+ *     radial-gradient(1px 1px at 12% 18%, oklch(0.9 0.05 230 / 0.6), transparent 50%),
+ *     ... (15 颗星, 略)
+ *   animation: wm-twinkle 8s ease-in-out infinite;
+ * }
+ *
+ * @keyframes wm-twinkle {
+ *   0%, 100% { opacity: 0.85; }
+ *   50% { opacity: 0.55; }
+ * } */
 
 /* 3. 卡片 / 浮起容器 — 微弱月光环
  *    v28a: 暂时禁掉整个 selector (二分法定位色块根因)
