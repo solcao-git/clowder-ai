@@ -1,7 +1,7 @@
 /*
- * 空月之歌 · 月相层 v12 (月坑弱化 + 月海做大做强 + 紫蓝更明显)
+ * 空月之歌 · 月相层 v14 (升亮 + 月海加强 + 光晕 3 层柔扩)
  *
- * v1-v11 演进:
+ * v1-v13 演进:
  *   v1: LED 灯泡 (太亮太实)
  *   v2: 找不到 (太暗太透)
  *   v3: 中庸 — 4 层光晕
@@ -13,22 +13,22 @@
  *   v9: L=0.55 → 0.75 升亮 (solcao 反馈后调整)
  *   v10: 84px + L=0.9 + 月坑对比加强
  *   v11: 76px + 紫蓝 H=255 + 不规则月坑/海
- *   v12: 月坑弱化到 2 个 + 月海做大做强
- *   v13: 7 个小椭圆部分重叠拼出不规则云海 (v13 是当前版本)
+ *   v12: 月坑弱化 + 月海做大做强
+ *   v13: 7 个小椭圆部分重叠拼不规则云海
+ *   v14: 升亮 L=0.95 + 月海 alpha 加强 + 光晕 3 层柔扩 (v14 是当前版本)
  *
- * v12→v13 关键改动 (solcao v12 反馈方向):
- *   - 月海: 3 个大椭圆 (50x30 等) → 7 个小椭圆 (35x22 等) 部分重叠
- *   - CSS background 多 gradient 是叠层不是平铺, 重叠区域 alpha 累加自然更暗
- *   - 不规则位置 (30/30, 60/25, 50/50, 25/60, 70/65, 45/80, 80/40) 拼出大块不规则云海
- *   - 单个 alpha 0.3-0.45 (v12 是 0.5-0.55), 重叠区累计到 0.5-0.7
- *
- * v11→v12 关键改动 (solcao v11 截图反馈):
- *   - 月坑: 5 个像"发霉的霉点" → 弱化到 2 个 (低 alpha 0.3-0.35, 参考图几乎无月坑)
- *   - 月海: 4 小椭圆 (alpha 0.25-0.3, 看不见) → 3 大椭圆 (alpha 0.5-0.55, 覆盖月相 50%+)
- *   - 月海颜色: L 0.65-0.7 → 0.5-0.55 (更暗更像云海), C 0.04 → 0.06 (紫调更明显)
- *   - 月相 H: 255 → 250 (中心), 260 → 265 (边缘) (紫蓝更明显)
- *   - 月相中心 C: 0.025 → 0.03 (紫调略提)
- *   - 边缘 L: 0.55 → 0.5 (更深紫蓝)
+ * v13→v14 关键改动 (solcao v13 截图反馈 "有那个感觉了 + 亮度差 + 光晕生硬范围小"):
+ *   - 月相: L=0.9 → 0.95 (几乎纯白, 跟参考图一致)
+ *   - 月相 C: 0.03 → 0.02 (纯白一点, 接近参考图)
+ *   - 月相边缘 L: 0.5 → 0.55, H: 265 → 260 (略亮略偏蓝)
+ *   - 月海: alpha 0.3-0.45 → 0.45-0.6 (终于看得见)
+ *   - 月海 C: 0.06-0.07 → 0.07-0.08 (紫调更浓)
+ *   - 月海透明 65% → 55% (边缘更实)
+ *   - 光晕: 2 层 → 3 层 (近 8px + 中 48px + 远 100px)
+ *   - 近晕 alpha 0.5 → 0.45 (近月面连续, 避免"环")
+ *   - 中晕 alpha 0.3 → 0.25 (中范围柔)
+ *   - 远晕 alpha 0.1 (新加, 1.8x 月亮范围, 让光晕"散"开)
+ *   - 边缘渐变 70% → 60% (紫蓝晕更早开始)
  *
  * 三档回退 (浏览器运行时生效, 无须重新 build):
  *   🟢 软关: document.documentElement.style.setProperty('--wm-moon-opacity', '0')
@@ -43,15 +43,16 @@
   /* 回退开关 */
   --wm-moon-opacity: 0.78;
   --wm-moon-scale: 1;
-  /* 月相颜色 - 银白偏紫蓝月 (v12 H=250 中 → H=265 边缘深紫蓝) */
-  --wm-moon-core: oklch(0.9 0.03 250);
-  --wm-moon-edge: oklch(0.5 0.06 265);
-  /* 光晕 - 紫蓝, spread=0 高斯, 2 层叠加 */
-  --wm-moon-glow-near: oklch(0.85 0.05 250 / 0.5);
-  --wm-moon-glow-far: oklch(0.8 0.05 250 / 0.3);
+  /* 月相颜色 - 银白近白月 (v14 L=0.95 中 → L=0.55 边缘, 几乎纯白) */
+  --wm-moon-core: oklch(0.95 0.02 250);
+  --wm-moon-edge: oklch(0.55 0.05 260);
+  /* 光晕 - 3 层紫蓝高斯 (近/中/远) */
+  --wm-moon-glow-near: oklch(0.88 0.05 252 / 0.45);
+  --wm-moon-glow-mid: oklch(0.82 0.05 255 / 0.25);
+  --wm-moon-glow-far: oklch(0.75 0.05 260 / 0.1);
 }
 
-/* 月相本体: 顶部居中, 完整圆月, 76px, 紫蓝调, 大块月海 */
+/* 月相本体: 顶部居中, 完整圆月, 76px, 升亮 + 紫蓝 + 7 部分重叠月海 + 3 层光晕 */
 [data-theme="dark"][data-preset="welkin-moon"] body::after {
   content: "";
   position: fixed;
@@ -61,34 +62,31 @@
   height: 76px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月相表面: 2 弱月坑 + 7 小椭圆部分重叠拼大块云海 + 紫蓝主渐变
-   * 参考图: 月坑几乎不见, 月海是大块紫蓝云雾覆盖月相 50%+
-   * solcao v12 反馈方向: 多个椭圆部分重叠, 利用 background 叠层让重叠区自然更暗 */
-  /* 2 个弱化月坑 (v11 5个像霉点 → v12 2个低 alpha, 参考图风格) */
+  /* 月相表面: 2 弱月坑 + 7 部分重叠月海 (v14 加强 alpha 0.45-0.6) + 升亮主渐变 */
+  /* 2 个弱化月坑 (v14 保留 v12 弱化) */
   background:
     radial-gradient(circle at 35% 50%, oklch(0.55 0.04 260 / 0.35) 0%, transparent 3%),
     radial-gradient(circle at 65% 40%, oklch(0.5 0.04 260 / 0.3) 0%, transparent 2.5%),
-    /* 7 个小椭圆部分重叠 (v13 solcao 反馈方向)
-     * 位置交错, 单个 alpha 0.3-0.45, 重叠区累计到 0.5-0.7 (自然"深度")
-     * 紫调 H 258-268 微变, 模拟云海内部色彩不均 */
-    radial-gradient(ellipse 35px 22px at 30% 30%, oklch(0.6 0.06 258 / 0.4) 0%, transparent 65%),
-    radial-gradient(ellipse 30px 18px at 60% 25%, oklch(0.55 0.06 262 / 0.35) 0%, transparent 60%),
-    radial-gradient(ellipse 40px 28px at 50% 50%, oklch(0.5 0.07 265 / 0.45) 0%, transparent 70%),
-    radial-gradient(ellipse 32px 22px at 25% 60%, oklch(0.55 0.06 260 / 0.4) 0%, transparent 65%),
-    radial-gradient(ellipse 28px 20px at 70% 65%, oklch(0.5 0.07 268 / 0.35) 0%, transparent 60%),
-    radial-gradient(ellipse 30px 18px at 45% 80%, oklch(0.55 0.06 263 / 0.4) 0%, transparent 60%),
-    radial-gradient(ellipse 22px 16px at 80% 40%, oklch(0.5 0.06 265 / 0.3) 0%, transparent 55%),
-    /* 主渐变: 银白偏紫蓝月 (中心 L=0.9 H=250 → 边缘 L=0.5 H=265 → 深紫蓝透出) */
+    /* 7 个小椭圆部分重叠 (v14 alpha 0.45-0.6 加强, C 0.07-0.08 紫调更浓) */
+    radial-gradient(ellipse 35px 22px at 30% 30%, oklch(0.6 0.07 258 / 0.55) 0%, transparent 55%),
+    radial-gradient(ellipse 30px 18px at 60% 25%, oklch(0.55 0.07 262 / 0.5) 0%, transparent 50%),
+    radial-gradient(ellipse 40px 28px at 50% 50%, oklch(0.5 0.08 265 / 0.6) 0%, transparent 60%),
+    radial-gradient(ellipse 32px 22px at 25% 60%, oklch(0.55 0.07 260 / 0.55) 0%, transparent 55%),
+    radial-gradient(ellipse 28px 20px at 70% 65%, oklch(0.5 0.08 268 / 0.5) 0%, transparent 50%),
+    radial-gradient(ellipse 30px 18px at 45% 80%, oklch(0.55 0.07 263 / 0.55) 0%, transparent 50%),
+    radial-gradient(ellipse 22px 16px at 80% 40%, oklch(0.5 0.07 265 / 0.45) 0%, transparent 50%),
+    /* 主渐变: 银白近白月 (中心 L=0.95 H=250 → 边缘 L=0.55 H=260 → 紫蓝透出) */
     radial-gradient(
       circle at 50% 50%,
       var(--wm-moon-core) 0%,
-      var(--wm-moon-edge) 70%,
-      oklch(0.35 0.06 265 / 0.3) 100%
+      var(--wm-moon-edge) 60%,
+      oklch(0.4 0.06 265 / 0.35) 100%
     );
-  /* 2 层 spread=0 连续高斯光晕 (紫蓝, 跟月相一致) */
+  /* 3 层 spread=0 连续高斯光晕: 近 8 + 中 48 + 远 100 (柔+扩, 总外径 ≈ 76+100*2=276 ≈ 3.6x 月亮) */
   box-shadow:
-    0 0 12px 0 var(--wm-moon-glow-near),
-    0 0 31px 0 var(--wm-moon-glow-far);
+    0 0 8px 0 var(--wm-moon-glow-near),
+    0 0 48px 0 var(--wm-moon-glow-mid),
+    0 0 100px 0 var(--wm-moon-glow-far);
   opacity: var(--wm-moon-opacity);
   pointer-events: none;
   z-index: 0;
@@ -96,18 +94,20 @@
   animation: wm-moon-breathe 8s ease-in-out infinite;
 }
 
-/* 呼吸 - 2 层 spread=0 高斯 ±10% blur + ±6% alpha, 紫蓝调一致 */
+/* 呼吸 - 3 层 spread=0 高斯 ±10% blur + ±6% alpha, 紫蓝调一致 */
 @keyframes wm-moon-breathe {
   0%,
   100% {
     box-shadow:
-      0 0 12px 0 oklch(0.85 0.05 250 / 0.5),
-      0 0 31px 0 oklch(0.8 0.05 250 / 0.3);
+      0 0 8px 0 oklch(0.88 0.05 252 / 0.45),
+      0 0 48px 0 oklch(0.82 0.05 255 / 0.25),
+      0 0 100px 0 oklch(0.75 0.05 260 / 0.1);
   }
   50% {
     box-shadow:
-      0 0 13px 0 oklch(0.85 0.05 250 / 0.55),
-      0 0 34px 0 oklch(0.8 0.05 250 / 0.33);
+      0 0 9px 0 oklch(0.88 0.05 252 / 0.5),
+      0 0 53px 0 oklch(0.82 0.05 255 / 0.275),
+      0 0 110px 0 oklch(0.75 0.05 260 / 0.11);
   }
 }
 
