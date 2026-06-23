@@ -1,31 +1,33 @@
 /*
- * 空月之歌 · 月相层 v16 (环形山错开 + 月面 SVG noise + 光晕色相偏移)
+ * 空月之歌 · 月相层 v17 (减法回归: 删月坑 + 删 noise + 主渐变早透明 + 修位置)
  *
- * v1-v15 演进:
+ * v1-v16 演进:
  *   v1-v7: 早期探索
  *   v8-v10: 完整圆月 + 缩小 (140→84px) + 升亮
  *   v11-v14: 紫蓝调 + 月海/坑细节 + 3 层光晕
  *   v15: 缩 56px + 长条月海 + 环形山 + 边缘弥散
- *   v16: 环形山错开缩 4-5px + 月面 SVG noise + 光晕色相偏移 H 240→255→270 (v16 是当前版本)
+ *   v16: 环形山错开 + 月面 SVG noise + 光晕色相偏移 (翻车: 2 光晕 + 位置太靠上)
+ *   v17: 减法回归 - 删月坑 + 删 noise + 主渐变 92%→70% 透明 + 位置修 (v17 是当前版本)
  *
- * v15→v16 关键改动 (水神芙宁娜 5 条意见, 取 3 条 CSS 范围内能做):
- *   ✅ #1 采纳: 环形山位置错开 + 缩小
- *     - v15: 38%/28% + 72%/65% (对角但都是内→外方向) → v16: 32%/35% + 70%/70%
- *     - 直径从 50%/50% (≈7px) → 40%/40% (≈5px), 减少"贴纸感"
- *   ✅ #3 采纳: 月面 SVG noise 颗粒感
- *     - 在 background 上叠加 SVG noise (feTurbulence baseFrequency=0.9, opacity 5%)
- *     - data:image/svg+xml 内联, 无外部资源
- *     - 消除月面"塑料/平面渐变"感
- *   ✅ #4 采纳: 光晕色相偏移 (内暖→外冷)
- *     - v15: H 252/255/260 (太一致, 整体紫调)
- *     - v16: H 240/255/270 (内圈偏暖银, 外圈偏冷紫)
- *     - 月海色相 H 258-268 也跟着偏 (外圈紫更深)
- *   ⏸ #2 暂不做: SVG 月相升级是大重构, v16 评估后再决定
- *   ⏸ #5 (色相) = #4 一起做了
+ * v16→v17 关键改动 (solcao v16 截图反馈 "翻车 + 2 光晕 + 位置太靠上 + 不要月坑"):
+ *   ❌ 删月坑: 完全删除 2 个环形山 (solcao: 图很小月坑不必要)
+ *   ❌ 删 SVG noise: 完全删除 feTurbulence 叠层 (v16 引入, 看着像污渍)
+ *   ✅ 修"2 光晕": 主渐变 92% 透明 → 70% 透明
+ *     - 原来: 0% L=0.95 → 55% L=0.55 (中间深一圈) → 92% 透明
+ *     - 看着像"月面 + 1 圈光晕 + 外光晕" = 2 个光晕
+ *     - 现在: 0% L=0.95 → 55% L=0.55 → 70% 透明 (直接淡出, 没有中间圈)
+ *   ✅ 修位置: top -4px → 8px, 56px → 60px
+ *     - 状态栏高 48px, 月亮 60px, top 8px → 月亮实体从 8px 到 68px
+ *     - 中线 38px ≈ 状态栏底 + 一半外侧, 看着稳
+ *   ✅ 月海保留: v16 的 6 条带状月海 (色相 H 260-272 跟 v16 一致)
+ *     - 月海是参考图能看见的, 月坑是参考图小图看不见的, 区别对待
+ *   ✅ 光晕保留: v16 的 3 层色相偏移 H 240/255/270
  *
- * 三档回退不变。
+ * 回归到 v14 简洁感 + v15 尺寸/位置 + v16 月海 + v16 光晕色相.
  *
- * 性能: SVG noise 内联 + 3 层高斯 → 仍走 GPU 合成层。
+ * 三档回退不变.
+ *
+ * 性能: 删 noise 后回到 v14 同等负载 (3 层高斯 + 6 月海 + 主渐变, 仍 GPU 合成).
  */
 
 [data-theme="dark"][data-preset="welkin-moon"] {
@@ -35,51 +37,34 @@
   /* 月相颜色 */
   --wm-moon-core: oklch(0.95 0.02 250);
   --wm-moon-edge: oklch(0.55 0.05 260);
-  /* 光晕 - 3 层色相偏移 (v16 内暖 H=240 → 外冷 H=270, 比 v15 252/255/260 拉开) */
+  /* 光晕 - 3 层色相偏移 (内暖 H=240 → 外冷 H=270, 跟 v16 一致) */
   --wm-moon-glow-near: oklch(0.88 0.05 240 / 0.45);
   --wm-moon-glow-mid: oklch(0.82 0.05 255 / 0.25);
   --wm-moon-glow-far: oklch(0.75 0.06 270 / 0.12);
 }
 
-/* 月相本体: 顶部居中, 56px, 环形山错开 + 月海色相偏冷 + 月面 SVG noise */
+/* 月相本体: 顶部居中, 60px, 月海 + 主渐变早透明 (v17 减法回归) */
 [data-theme="dark"][data-preset="welkin-moon"] body::after {
   content: "";
   position: fixed;
-  top: -4px;
+  top: 8px;
   left: 50%;
-  width: 56px;
-  height: 56px;
+  width: 60px;
+  height: 60px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月相表面 = 环形山错开缩 + 月海色相偏冷紫 + 月面 SVG noise + 弥散主渐变 */
-  /* v16 月面 SVG noise 颗粒感 (baseFrequency=0.9 = 细颗粒, opacity 5%) */
-  background-image:
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.4  0 0 0 0 0.45  0 0 0 0 0.55  0 0 0 0.05 0'/></filter><rect width='56' height='56' filter='url(%23n)'/></svg>"),
-    /* 2 个环形山 (v16 错开缩: 32%/35% + 70%/70%, 缩到 40%/40% ≈ 5px) */
-    radial-gradient(circle at 32% 35%, oklch(0.4 0.05 265 / 0.55) 0%, oklch(0.7 0.03 250 / 0.5) 35%, transparent 45%),
-    radial-gradient(circle at 70% 70%, oklch(0.4 0.05 265 / 0.55) 0%, oklch(0.7 0.03 250 / 0.5) 35%, transparent 45%),
-    /* 6 个带状月海 (v16 色相偏冷 260-272, 月海本来就在月亮偏外侧, 配外圈紫) */
+  /* 月相表面 = 6 条带状月海 (月坑/SVG noise 全删) + 主渐变 (70% 早透明, 无"中间圈") */
+  /* 6 个带状月海 (v17 保留 v16, 色相偏冷紫 260-272) */
+  background:
     radial-gradient(ellipse 28px 10px at 35% 30%, oklch(0.55 0.07 262 / 0.55) 0%, transparent 60%),
     radial-gradient(ellipse 32px 12px at 55% 22%, oklch(0.5 0.08 268 / 0.5) 0%, transparent 60%),
     radial-gradient(ellipse 30px 11px at 30% 50%, oklch(0.55 0.07 260 / 0.6) 0%, transparent 60%),
     radial-gradient(ellipse 26px 9px at 65% 50%, oklch(0.5 0.08 272 / 0.55) 0%, transparent 60%),
     radial-gradient(ellipse 28px 10px at 45% 75%, oklch(0.55 0.07 265 / 0.55) 0%, transparent 60%),
     radial-gradient(ellipse 22px 8px at 70% 35%, oklch(0.5 0.07 270 / 0.5) 0%, transparent 60%),
-    /* 主渐变: 银白月 */
-    radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 55%, transparent 92%);
-  background-repeat: no-repeat;
-  background-size:
-    56px 56px,
-    /* noise 平铺到月相尺寸 */ auto,
-    auto,
-    auto,
-    auto,
-    auto,
-    auto,
-    auto,
-    auto,
-    auto;
-  /* 3 层 spread=0 连续高斯光晕: 近 8 (H=240 暖银) + 中 48 (H=255 中性) + 远 80 (H=270 冷紫) */
+    /* 主渐变: 银白月, 70% 早透明 (v17 修"2 光晕", 直接淡出无中间圈) */
+    radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 55%, transparent 70%);
+  /* 3 层 spread=0 连续高斯光晕: 近 8 (H=240) + 中 48 (H=255) + 远 80 (H=270) */
   box-shadow:
     0 0 8px 0 var(--wm-moon-glow-near),
     0 0 48px 0 var(--wm-moon-glow-mid),
