@@ -1,7 +1,7 @@
 /*
- * 空月之歌 · 月相层 v11 (76px + 紫蓝 H=255 + 不规则月坑/海)
+ * 空月之歌 · 月相层 v12 (月坑弱化 + 月海做大做强 + 紫蓝更明显)
  *
- * v1-v10 演进:
+ * v1-v11 演进:
  *   v1: LED 灯泡 (太亮太实)
  *   v2: 找不到 (太暗太透)
  *   v3: 中庸 — 4 层光晕
@@ -12,18 +12,16 @@
  *   v8: 完整圆月 + 140px 小巧 + 顶部居中
  *   v9: L=0.55 → 0.75 升亮 (solcao 反馈后调整)
  *   v10: 84px + L=0.9 + 月坑对比加强
- *   v11: 76px + 紫蓝 H=255 + 不规则月坑/海 (v11 是当前版本)
+ *   v11: 76px + 紫蓝 H=255 + 不规则月坑/海
+ *   v12: 月坑弱化到 2 个 + 月海做大做强 (v12 是当前版本)
  *
- * v11 关键改动 (solcao v10 截图反馈 + 参考图对比):
- *   - 缩小: 84px → 76px (-10%, "大小还能在当前基础上再减 10%")
- *   - 颜色: H=240 冷蓝 → H=255 紫蓝 (参考图关键: 月相偏紫蓝调, 边缘深紫蓝)
- *   - 月坑: 3 圆 → 5 不规则 (位置/大小不一, 像真实陨石坑分布)
- *   - 月海: 3 椭圆 → 4 不规则 (位置/大小/角度不一, 模拟参考图大块不规则)
- *   - 边缘: L=0.7 → L=0.55, H=240 → 260 (更深的紫蓝, 接近参考图边缘)
- *   - 边缘透到夜空: L=0.5 → 0.4, H=240 → 260 (紫蓝散射到背景)
- *   - 月相中心: H=240 → 255, C 0.015 → 0.025 (加一点点紫调)
- *   - 光晕 blur 缩 0.9: 13/34 → 12/31
- *   - top 8px → 6px (月相小, 留白略调)
+ * v11→v12 关键改动 (solcao v11 截图反馈):
+ *   - 月坑: 5 个像"发霉的霉点" → 弱化到 2 个 (低 alpha 0.3-0.35, 参考图几乎无月坑)
+ *   - 月海: 4 小椭圆 (alpha 0.25-0.3, 看不见) → 3 大椭圆 (alpha 0.5-0.55, 覆盖月相 50%+)
+ *   - 月海颜色: L 0.65-0.7 → 0.5-0.55 (更暗更像云海), C 0.04 → 0.06 (紫调更明显)
+ *   - 月相 H: 255 → 250 (中心), 260 → 265 (边缘) (紫蓝更明显)
+ *   - 月相中心 C: 0.025 → 0.03 (紫调略提)
+ *   - 边缘 L: 0.55 → 0.5 (更深紫蓝)
  *
  * 三档回退 (浏览器运行时生效, 无须重新 build):
  *   🟢 软关: document.documentElement.style.setProperty('--wm-moon-opacity', '0')
@@ -38,15 +36,15 @@
   /* 回退开关 */
   --wm-moon-opacity: 0.78;
   --wm-moon-scale: 1;
-  /* 月相颜色 - 银白偏紫蓝月 (v11 H=255 中 → H=260 边缘紫蓝, 接近参考图) */
-  --wm-moon-core: oklch(0.88 0.025 255);
-  --wm-moon-edge: oklch(0.55 0.05 260);
+  /* 月相颜色 - 银白偏紫蓝月 (v12 H=250 中 → H=265 边缘深紫蓝) */
+  --wm-moon-core: oklch(0.9 0.03 250);
+  --wm-moon-edge: oklch(0.5 0.06 265);
   /* 光晕 - 紫蓝, spread=0 高斯, 2 层叠加 */
-  --wm-moon-glow-near: oklch(0.85 0.05 255 / 0.5);
-  --wm-moon-glow-far: oklch(0.8 0.05 255 / 0.3);
+  --wm-moon-glow-near: oklch(0.85 0.05 250 / 0.5);
+  --wm-moon-glow-far: oklch(0.8 0.05 250 / 0.3);
 }
 
-/* 月相本体: 顶部居中, 完整圆月, 76px 微小月, 紫蓝调 + 不规则纹理 */
+/* 月相本体: 顶部居中, 完整圆月, 76px, 紫蓝调, 大块月海 */
 [data-theme="dark"][data-preset="welkin-moon"] body::after {
   content: "";
   position: fixed;
@@ -56,24 +54,25 @@
   height: 76px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月相表面: 5 不规则月坑 + 4 不规则月海 + 紫蓝主渐变
-   * 参考图: 月坑散布, 大小不一, 深浅不一; 月海大块, 不规则形状 */
-  /* 5 个不规则月坑 (位置/大小/alpha 都不一致, 紫调 H=260) */
+  /* 月相表面: 2 弱月坑 + 3 大月海 + 紫蓝主渐变
+   * 参考图: 月坑几乎不见, 月海是大块紫蓝云雾覆盖月相 50%+ */
+  /* 2 个弱化月坑 (v11 5个像霉点 → v12 2个低 alpha, 参考图风格) */
   background:
-    radial-gradient(circle at 28% 35%, oklch(0.4 0.03 260 / 0.55) 0%, transparent 4%),
-    radial-gradient(circle at 50% 28%, oklch(0.42 0.03 260 / 0.45) 0%, transparent 3%),
-    radial-gradient(circle at 72% 45%, oklch(0.38 0.03 260 / 0.5) 0%, transparent 4%),
-    radial-gradient(circle at 40% 60%, oklch(0.45 0.03 260 / 0.6) 0%, transparent 5%),
-    radial-gradient(circle at 60% 75%, oklch(0.4 0.03 260 / 0.5) 0%, transparent 3.5%),
-    /* 4 块不规则月海 (大小/位置/角度不一, 浅紫蓝 H=255) */
-    radial-gradient(ellipse 28px 18px at 25% 30%, oklch(0.7 0.04 255 / 0.3) 0%, transparent 65%),
-    radial-gradient(ellipse 22px 14px at 60% 25%, oklch(0.65 0.04 255 / 0.25) 0%, transparent 60%),
-    radial-gradient(ellipse 30px 18px at 45% 60%, oklch(0.7 0.04 255 / 0.3) 0%, transparent 70%),
-    radial-gradient(ellipse 18px 12px at 75% 70%, oklch(0.65 0.04 255 / 0.25) 0%, transparent 60%),
-    /* 主渐变: 银白偏紫蓝月 (中心 L=0.88 → 边缘 L=0.55 → 紫蓝透出) */
-    radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 60%, oklch(0.4 0.05 260 / 0.3) 100%);
-  /* 2 层 spread=0 连续高斯光晕: 按 0.9 比例缩 (13/34 → 12/31)
-   * 总外径 ≈ 76+31*2=138px ≈ 1.8x 月亮 (跟之前比例一致) */
+    radial-gradient(circle at 35% 50%, oklch(0.55 0.04 260 / 0.35) 0%, transparent 3%),
+    radial-gradient(circle at 65% 40%, oklch(0.5 0.04 260 / 0.3) 0%, transparent 2.5%),
+    /* 3 块大且不规则月海 (v11 4 小椭圆 alpha 0.25-0.3 看不见 → v12 3 大椭圆 alpha 0.5-0.55)
+     * 覆盖月相 50%+, 模拟参考图大块云海 */
+    radial-gradient(ellipse 50px 30px at 30% 35%, oklch(0.55 0.06 260 / 0.55) 0%, transparent 60%),
+    radial-gradient(ellipse 40px 25px at 65% 50%, oklch(0.5 0.06 260 / 0.5) 0%, transparent 60%),
+    radial-gradient(ellipse 35px 20px at 50% 75%, oklch(0.55 0.06 260 / 0.5) 0%, transparent 55%),
+    /* 主渐变: 银白偏紫蓝月 (中心 L=0.9 H=250 → 边缘 L=0.5 H=265 → 深紫蓝透出) */
+    radial-gradient(
+      circle at 50% 50%,
+      var(--wm-moon-core) 0%,
+      var(--wm-moon-edge) 70%,
+      oklch(0.35 0.06 265 / 0.3) 100%
+    );
+  /* 2 层 spread=0 连续高斯光晕 (紫蓝, 跟月相一致) */
   box-shadow:
     0 0 12px 0 var(--wm-moon-glow-near),
     0 0 31px 0 var(--wm-moon-glow-far);
@@ -89,13 +88,13 @@
   0%,
   100% {
     box-shadow:
-      0 0 12px 0 oklch(0.85 0.05 255 / 0.5),
-      0 0 31px 0 oklch(0.8 0.05 255 / 0.3);
+      0 0 12px 0 oklch(0.85 0.05 250 / 0.5),
+      0 0 31px 0 oklch(0.8 0.05 250 / 0.3);
   }
   50% {
     box-shadow:
-      0 0 13px 0 oklch(0.85 0.05 255 / 0.55),
-      0 0 34px 0 oklch(0.8 0.05 255 / 0.33);
+      0 0 13px 0 oklch(0.85 0.05 250 / 0.55),
+      0 0 34px 0 oklch(0.8 0.05 250 / 0.33);
   }
 }
 
