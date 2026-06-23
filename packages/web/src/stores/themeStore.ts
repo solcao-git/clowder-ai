@@ -161,9 +161,44 @@ export async function restoreFromServer(): Promise<boolean> {
   }
 }
 
+/* 空月之歌 (Song of the Welkin Moon) — 原神 5.x 版本主题色 · 深靛夜空 + 月光冷蓝
+ * 锚点：surfaceHue=268 取自 KV 主色 #0A101E (实测 265.7°)
+ *       accentHue=230 取月光冷蓝 (Yelan 风格)
+ *       accentChroma=0.10 暗色模式低饱和，月光不发腻
+ * base=dark 整张 KV 都是夜色；想用浅色调去"自定义"克隆一份。 */
+const WELKIN_MOON: TunerState = {
+  ...structuredClone(INIT_DARK),
+  accentHue: 230,
+  accentChroma: 0.1,
+  surfaceHue: 268,
+  surfaceChroma: 0.3,
+  neutralHue: 260,
+  neutralChroma: 0.008,
+  dark: {
+    ...INIT_DARK.dark,
+    inset: { L: 0.2, Cmul: 0.1 },
+    msgText: { L: 0.85, C: 0.02 },
+    elev: { sunken: 0.22, base: 0.16, elevated: 0.1, canvas: 0.13 },
+  },
+  neutralDark: {
+    ...INIT_DARK.neutralDark,
+    textL: 0.92,
+    secondaryL: 0.74,
+    mutedL: 0.62,
+    borderL: 0.3,
+    borderSubtleL: 0.22,
+  },
+  queue: { H: 265, C: 0.15, L: 0.6 },
+  catTextH: 250,
+  catTextC: 0.05,
+  catTextLightL: 0.18,
+  catTextDarkL: 0.92,
+};
+
 const mkBuiltIn = (): ThemePreset[] => [
   { id: 'light', name: 'Light', base: 'light', params: structuredClone(INIT_LIGHT), builtIn: true },
   { id: 'dark', name: 'Dark', base: 'dark', params: structuredClone(INIT_DARK), builtIn: true },
+  { id: 'welkin-moon', name: '空月之歌', base: 'dark', params: structuredClone(WELKIN_MOON), builtIn: true },
 ];
 
 /* ── Store ── */
