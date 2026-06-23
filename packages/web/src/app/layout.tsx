@@ -53,6 +53,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="stylesheet" href="/vendor/app/console-shell.css" />
         <link rel="stylesheet" href="/vendor/app/console-controls.css" />
         <link rel="stylesheet" href="/vendor/app/werewolf-theme.css" />
+        <link rel="stylesheet" href="/vendor/app/welkin-moon-decor.css" />
         <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
       </head>
       <body className="min-h-screen">

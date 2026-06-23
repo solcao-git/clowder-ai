@@ -20,6 +20,7 @@ const appGlobalCssFiles = [
   'connector-tokens.css',
   'theme-extras.css',
   'werewolf-theme.css',
+  'welkin-moon-decor.css',
 ];
 
 function ensureDir(path) {

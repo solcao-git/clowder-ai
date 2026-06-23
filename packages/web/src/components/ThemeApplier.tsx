@@ -40,6 +40,16 @@ export function ThemeApplier() {
     setTheme(active.base);
   }, [active.base, setTheme, theme]);
 
+  /* Sync preset id → data-preset attribute (decor layer hook for welkin-moon etc.) */
+  useEffect(() => {
+    const root = document.documentElement;
+    if (active.id === 'welkin-moon') {
+      root.dataset.preset = 'welkin-moon';
+    } else {
+      delete root.dataset.preset;
+    }
+  }, [active.id]);
+
   /* Inject CSS overrides for the active theme's OKLCH params */
   useEffect(() => {
     applyThemeCSS(active.params);
