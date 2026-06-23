@@ -67,16 +67,19 @@
     radial-gradient(ellipse 20px 7px at 45% 80%, oklch(0.65 0.06 265 / 0.35) 0%, transparent 60%),
     /* 主渐变: 纯白月 (中心 L=1.0 → 边缘 L=0.92 85% → 透明 100%) */
     radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 85%, transparent 100%);
-  /* 3 层 spread=0 连续高斯光晕: 近 9 + 中 26 + 远 75 (v26 适配 60px 月相) */
+  /* 3 层 spread=0 连续高斯光晕: 近 9 + 中 26 + 远 50 (v30 缩 blur 适配 webkit)
+   *    v30: 远晕 blur 75 → 50, 降一档 (webkit 大 blur + animation 闪烁根因) */
   box-shadow:
     0 0 9px 0 var(--wm-moon-glow-near),
     0 0 26px 0 var(--wm-moon-glow-mid),
-    0 0 75px 0 var(--wm-moon-glow-far);
+    0 0 50px 0 var(--wm-moon-glow-far);
   opacity: var(--wm-moon-opacity);
   pointer-events: none;
   z-index: 0;
   will-change: opacity, transform;
-  animation: wm-moon-breathe 8s ease-in-out infinite;
+  /* v30: 禁 wm-moon-breathe 动画 (solcao 反馈"色块自己会动" + 8s 周期吻合)
+   *      大 blur box-shadow + 持续 blur 动画在 webkit 上产生色块闪烁
+   *      月相本体保留, 改静态后依然精致 */
 }
 
 /* 呼吸 - 3 层 spread=0 高斯 ±10% blur + ±6% alpha, 近晕 H=250 alpha 0.6 */
