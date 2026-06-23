@@ -52,23 +52,24 @@
   height: 140px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月相表面: 3 个月坑 + 3 块柔和月海 + 主渐变 (银白冷月, v8 降亮)
-   * 半径/range 按 200→140 (×0.7) 比例缩, 保持比例感 */
-  /* 3 个月坑 (v7 9%/7%/11% → v8 6.3%/4.9%/7.7%) */
+  /* 月相表面: 3 个月坑 + 3 块柔和月海 + 主渐变 (银白冷月, v9 升亮)
+   * 半径/range 按 200→140 (×0.7) 比例缩, 保持比例感
+   * v9 月坑/月海 L 同步 +0.2 (本体亮, 坑/海对应也亮, 保持对比度) */
+  /* 3 个月坑 (v8 0.45/0.47/0.43 → v9 0.65/0.67/0.63) */
   background:
-    radial-gradient(circle at 38% 42%, oklch(0.45 0.02 240 / 0.4) 0%, transparent 6.3%),
-    radial-gradient(circle at 62% 35%, oklch(0.47 0.02 240 / 0.32) 0%, transparent 4.9%),
-    radial-gradient(circle at 50% 65%, oklch(0.43 0.02 240 / 0.38) 0%, transparent 7.7%),
-    /* 3 块月海 (v7 110/50 → v8 77/35 等) */
-    radial-gradient(ellipse 77px 35px at 30% 40%, oklch(0.5 0.02 245 / 0.3) 0%, transparent 70%),
-    radial-gradient(ellipse 56px 28px at 70% 60%, oklch(0.45 0.02 245 / 0.25) 0%, transparent 65%),
-    radial-gradient(ellipse 42px 21px at 45% 75%, oklch(0.5 0.02 245 / 0.3) 0%, transparent 60%),
-    /* 主渐变: 银白冷月 (中心 L=0.55 → 边缘 L=0.4 → 透到夜空) */
+    radial-gradient(circle at 38% 42%, oklch(0.65 0.02 240 / 0.4) 0%, transparent 6.3%),
+    radial-gradient(circle at 62% 35%, oklch(0.67 0.02 240 / 0.32) 0%, transparent 4.9%),
+    radial-gradient(circle at 50% 65%, oklch(0.63 0.02 240 / 0.38) 0%, transparent 7.7%),
+    /* 3 块月海 (v8 0.5/0.45/0.5 → v9 0.7/0.65/0.7) */
+    radial-gradient(ellipse 77px 35px at 30% 40%, oklch(0.7 0.02 245 / 0.3) 0%, transparent 70%),
+    radial-gradient(ellipse 56px 28px at 70% 60%, oklch(0.65 0.02 245 / 0.25) 0%, transparent 65%),
+    radial-gradient(ellipse 42px 21px at 45% 75%, oklch(0.7 0.02 245 / 0.3) 0%, transparent 60%),
+    /* 主渐变: 银白冷月 (中心 L=0.75 → 边缘 L=0.55 → 透到夜空) */
     radial-gradient(
       circle at 50% 50%,
       var(--wm-moon-core) 0%,
       var(--wm-moon-edge) 60%,
-      oklch(0.28 0.03 240 / 0.25) 100%
+      oklch(0.4 0.03 240 / 0.25) 100%
     );
   /* 2 层 spread=0 连续高斯光晕: 无环带, 真正"月光晕"
    * 按 0.7 比例缩: blur 30/80 → 21/56, 总外径 ≈ 140+56*2=252px ≈ 1.8x 月亮 */
