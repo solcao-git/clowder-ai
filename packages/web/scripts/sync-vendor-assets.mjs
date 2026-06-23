@@ -21,6 +21,7 @@ const appGlobalCssFiles = [
   'theme-extras.css',
   'werewolf-theme.css',
   'welkin-moon-decor.css',
+  'welkin-moon-moon.css',
 ];
 
 function ensureDir(path) {
