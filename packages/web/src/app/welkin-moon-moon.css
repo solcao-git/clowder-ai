@@ -1,45 +1,51 @@
 /*
- * 空月之歌 · 月相层 v18 (真正回归 v14, 吸取 v15-v17 折腾教训)
+ * 空月之歌 · 月相层 v19 (水神三件套: 边缘提亮 + 月海减淡 + 删暗色 stop)
  *
- * v1-v17 演进:
+ * v1-v18 演进:
  *   v1-v7: 早期探索
  *   v8-v10: 完整圆月 + 缩小 (140→84px) + 升亮
- *   v11-v14: 紫蓝调 + 月海/坑细节 + 3 层光晕 (v14 = "远观感觉对了")
- *   v15: 缩 56px + 长条月海 + 环形山 + 边缘弥散
- *   v16: 环形山错开 + 月面 SVG noise + 光晕色相偏移 (翻车)
- *   v17: 减法回归 (60px + 3 层光晕) - solcao: "越来越不行"
- *   v18: 真正回 v14 + 月坑删除 + 月海数减少 (v18 是当前版本)
+ *   v11-v14: 紫蓝调 + 月海/坑细节 + 3 层光晕 (v14 = "远观对了")
+ *   v15-v17: 折腾期 (环形山, SVG noise, 缩尺寸) - solcao: "越来越不行"
+ *   v18: 真正回 v14 + 删月坑 + 5 条带状月海 (方向对, 但 3 个核心问题没修)
+ *   v19: 水神三件套 (边缘 L=0.5→0.82 + 月海 alpha 减半 + 删暗色 stop) (v19 是当前版本)
  *
- * v17→v18 关键改动 (solcao v17 截图反馈 "越来越不行"):
- *   - solcao 视角: v15→v16→v17 一直在加细节/减细节, 但整体越调越偏
- *   - 根因: v14 是 "远观对了" 的版本, v15 起偏离 v14 折腾
- *   - v18 直接用 v14 的核心 (尺寸/光晕/月海色相), 不再做加法
+ * v18→v19 关键改动 (水神芙宁娜诊断 + 建议, 火神采纳):
+ *   ✅ #1 月相边缘太暗: L=0.5 → L=0.82, C 0.06→0.03, H 265→260
+ *     - 满月边缘只是比中心略暗, 不是深灰紫
+ *     - 边缘 transition 从 70% 拉到 75% (晚一点开始变暗)
+ *   ✅ #2 月海太浓: alpha 全部乘 0.5
+ *     - 0.55→0.28, 0.5→0.25, 0.6→0.3, 0.55→0.28, 0.5→0.25
+ *     - 月海是"隐约可见的暗斑", 不是紫色条纹
+ *   ✅ #3 外圈暗色 stop 是历史 bug (v4 留下来的)
+ *     - oklch(0.35 0.06 265 / 0.3) 100% 在月亮最外圈画了一道深紫硬边
+ *     - 像"月亮被框了个深色的圈" → 删掉, 改 transparent 100%
  *
- * v18 vs v14 差异 (3 处必要改动):
- *   - 尺寸: 76px → 84px (v14 76 太小, 升到 84, 跟 v10 一致)
- *   - 月坑: 删 v14 的 2 个弱月坑 (solcao v17 反馈 "不要月坑")
- *   - 月海: 从 v14 的 7 个胖椭圆 → 5 个带状椭圆 (v15 的 2-3:1 长宽比, 拉长)
- *   - 其他跟 v14 一模一样 (主渐变 92% 透明, 3 层光晕 H 252/255/260, L=0.95)
+ * v19 保留 v18:
+ *   - 84px 尺寸 ✓
+ *   - top 6px ✓
+ *   - 5 条带状月海 ✓
+ *   - 3 层光晕 H 250/255/260 ✓
+ *   - 删月坑 ✓
  *
  * 三档回退不变.
  *
- * 性能不变 (v14 同等负载).
+ * 性能不变.
  */
 
 [data-theme="dark"][data-preset="welkin-moon"] {
   /* 回退开关 */
   --wm-moon-opacity: 0.78;
   --wm-moon-scale: 1;
-  /* 月相颜色 - v14 L=0.95 中 → L=0.5 边缘, 银白近白月 */
-  --wm-moon-core: oklch(0.95 0.03 250);
-  --wm-moon-edge: oklch(0.5 0.06 265);
-  /* 光晕 - v14 的 3 层紫蓝高斯 H 252/255/260 */
+  /* 月相颜色 - v19 边缘提亮: L 0.5→0.82, C 0.06→0.03 */
+  --wm-moon-core: oklch(0.95 0.02 250);
+  --wm-moon-edge: oklch(0.82 0.03 260);
+  /* 光晕 - 3 层紫蓝高斯 H 250/255/260 (跟 v18 一致) */
   --wm-moon-glow-near: oklch(0.85 0.05 250 / 0.5);
   --wm-moon-glow-mid: oklch(0.8 0.05 255 / 0.3);
   --wm-moon-glow-far: oklch(0.75 0.05 260 / 0.1);
 }
 
-/* 月相本体: 顶部居中, 84px (v14 76 → v18 84), 5 条带状月海 + 主渐变 92% 透明 */
+/* 月相本体: 顶部居中, 84px, 5 条淡淡带状月海 + 主渐变到 100% 透明 (无暗色 stop) */
 [data-theme="dark"][data-preset="welkin-moon"] body::after {
   content: "";
   position: fixed;
@@ -49,22 +55,17 @@
   height: 84px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月相表面 = 5 条带状月海 (v15 拉长 2-3:1) + v14 主渐变 (92% 透明) */
-  /* 5 个带状月海 (v18 取 v13 的 7 个精简到 5 个, 长宽比 2.5-3:1) */
+  /* 月相表面 = 5 条淡淡带状月海 (alpha 减半) + 主渐变 (到 100% 透明, 删暗色 stop) */
+  /* 5 个带状月海 (v19 alpha 全部 ×0.5: 隐约可见, 不抢主角) */
   background:
-    radial-gradient(ellipse 35px 12px at 30% 30%, oklch(0.55 0.07 262 / 0.55) 0%, transparent 60%),
-    radial-gradient(ellipse 40px 14px at 60% 25%, oklch(0.5 0.08 268 / 0.5) 0%, transparent 60%),
-    radial-gradient(ellipse 38px 13px at 35% 55%, oklch(0.55 0.07 258 / 0.6) 0%, transparent 60%),
-    radial-gradient(ellipse 32px 11px at 70% 60%, oklch(0.5 0.08 272 / 0.55) 0%, transparent 60%),
-    radial-gradient(ellipse 30px 10px at 45% 80%, oklch(0.55 0.07 265 / 0.5) 0%, transparent 60%),
-    /* 主渐变: 银白月 (中心 L=0.95 → 边缘 L=0.5 → 紫蓝透出, v14 92% 透明) */
-    radial-gradient(
-      circle at 50% 50%,
-      var(--wm-moon-core) 0%,
-      var(--wm-moon-edge) 70%,
-      oklch(0.35 0.06 265 / 0.3) 100%
-    );
-  /* v14 的 3 层 spread=0 连续高斯光晕: 近 12 + 中 31 + 远 ?? */
+    radial-gradient(ellipse 35px 12px at 30% 30%, oklch(0.55 0.07 262 / 0.28) 0%, transparent 60%),
+    radial-gradient(ellipse 40px 14px at 60% 25%, oklch(0.5 0.08 268 / 0.25) 0%, transparent 60%),
+    radial-gradient(ellipse 38px 13px at 35% 55%, oklch(0.55 0.07 258 / 0.3) 0%, transparent 60%),
+    radial-gradient(ellipse 32px 11px at 70% 60%, oklch(0.5 0.08 272 / 0.28) 0%, transparent 60%),
+    radial-gradient(ellipse 30px 10px at 45% 80%, oklch(0.55 0.07 265 / 0.25) 0%, transparent 60%),
+    /* 主渐变: 银白月 (中心 L=0.95 → 边缘 L=0.82 75% → transparent 100%, 删暗色 stop) */
+    radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 75%, transparent 100%);
+  /* 3 层 spread=0 连续高斯光晕: 近 12 + 中 31 + 远 60 */
   box-shadow:
     0 0 12px 0 var(--wm-moon-glow-near),
     0 0 31px 0 var(--wm-moon-glow-mid),
