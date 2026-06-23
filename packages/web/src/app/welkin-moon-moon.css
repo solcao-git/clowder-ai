@@ -1,58 +1,68 @@
 /*
- * 空月之歌 · 月相层 (满月居中)
+ * 空月之歌 · 月相层 v2 (远在天边, 不再是 LED 灯泡)
  *
- * 继承 welkin-moon-decor.css 的 [data-theme="dark"][data-preset="welkin-moon"] 钩子。
- * 本文件独立于 decor 套件：decor 在 body / *；月相在本文件 body::after。
+ * v1 反馈："像个大灯泡" —— 月相太大太亮太实。
+ * 修法 (v2):
+ *   - 月相缩小 280 → 180px (远)
+ *   - top: -140 → -200px (80% 藏在视口外, 真·地平线升起)
+ *   - 月亮本体 L=0.95 → 0.72 (冷月色, 不刺眼)
+ *   - 月相本体 opacity 1.0 → 0.55 (月色透薄, 不是主角)
+ *   - 光晕 blur 翻倍 + alpha 减半 (散射感, 不是聚光)
  *
- * 三档回退（不需要重新 build）：
- *   🟢 软关月相：document.documentElement.style.setProperty('--wm-moon-opacity', '0')
- *   🟡 强度调节：--wm-moon-opacity: 0.5（半透）
- *   🔴 硬回退：layout.tsx 删本文件 <link>，月相不加载
+ * 三档回退 (浏览器运行时生效, 无须重新 build):
+ *   🟢 软关月相: document.documentElement.style.setProperty('--wm-moon-opacity', '0')
+ *   🟡 强度调节: --wm-moon-opacity: 0.4
+ *   🔴 硬回退:   layout.tsx 删本文件 <link>
  *
- * 位置：水平居中 + 顶部偏移 50%（半个月在视口外，仪式感来自"地平线升起"）。
- * 性能：position: fixed + will-change 触发独立合成层；box-shadow 在合成层上便宜。
- * 动画：4 层光晕 alpha ±10% 呼吸 8s，尊重 prefers-reduced-motion。
+ * 性能: position: fixed + will-change → 独立合成层; box-shadow 在合成层上便宜。
+ * 动画: 8s 呼吸 (alpha ±5% 微起伏, 不再 ±10% 喧宾夺主); reduced-motion 关闭。
  */
 
 [data-theme="dark"][data-preset="welkin-moon"] {
-  /* 回退开关：默认 1（开），改 0 月相秒关 */
-  --wm-moon-opacity: 1;
-  /* 强度档位：base 是 1，可调到 0.5/0.7 等 */
+  /* 回退开关 */
+  --wm-moon-opacity: 0.55;
   --wm-moon-scale: 1;
-  /* 月相颜色锚点（沿用 preset 的 cool blue，hue=230） */
-  --wm-moon-core: oklch(0.95 0.02 230);
-  --wm-moon-edge: oklch(0.82 0.04 235);
-  --wm-moon-glow-near: oklch(0.85 0.06 230 / 0.45);
-  --wm-moon-glow-mid: oklch(0.7 0.08 230 / 0.28);
-  --wm-moon-glow-far: oklch(0.5 0.1 230 / 0.16);
-  --wm-moon-glow-horizon: oklch(0.4 0.08 230 / 0.08);
+  /* 月相颜色锚点 - 冷月色 (L=0.72) 而非纯白 */
+  --wm-moon-core: oklch(0.78 0.025 230);
+  --wm-moon-edge: oklch(0.62 0.04 235);
+  /* 光晕 - 大幅降 alpha, 加 blur 范围 */
+  --wm-moon-glow-near: oklch(0.75 0.05 230 / 0.22);
+  --wm-moon-glow-mid: oklch(0.6 0.07 230 / 0.14);
+  --wm-moon-glow-far: oklch(0.45 0.08 230 / 0.08);
+  --wm-moon-glow-horizon: oklch(0.35 0.06 230 / 0.04);
 }
 
-/* 月相本体：固定定位，水平居中，顶部偏移 -50%（半个月在视口外）
- * 渲染：单 ::after 元素 + 多层 box-shadow 模拟光晕；月亮本身用 radial-gradient 画。
- * 不响应点击（pointer-events: none）。 */
+/* 月相本体：固定定位，水平居中，80% 在视口外
+ * 渲染：单 ::after 元素 + 多层 box-shadow 模拟光晕。
+ * 月亮本身用 radial-gradient + 月坑，但更"薄"，避免实心球感。 */
 [data-theme="dark"][data-preset="welkin-moon"] body::after {
   content: "";
   position: fixed;
-  top: calc(-140px * var(--wm-moon-scale));
+  top: calc(-200px * var(--wm-moon-scale));
   left: 50%;
-  width: 280px;
-  height: 280px;
+  width: 180px;
+  height: 180px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月坑纹理：3 个微弱暗斑模拟月表 */
+  /* 月坑 + 主体渐变 (冷月色, 不再纯白) */
+  /* 3 个月坑 (更淡) */
   background:
-    radial-gradient(circle at 38% 42%, oklch(0.78 0.04 235 / 0.5) 0%, transparent 8%),
-    radial-gradient(circle at 62% 35%, oklch(0.8 0.04 235 / 0.4) 0%, transparent 6%),
-    radial-gradient(circle at 50% 65%, oklch(0.75 0.04 235 / 0.45) 0%, transparent 10%),
-    /* 月亮主渐变：中心亮白→边缘冷蓝 */
-    radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 70%, oklch(0.6 0.05 240 / 0.3) 100%);
-  /* 4 层光晕：从内到外、从亮到暗、范围从小到大 */
+    radial-gradient(circle at 38% 42%, oklch(0.6 0.035 235 / 0.35) 0%, transparent 8%),
+    radial-gradient(circle at 62% 35%, oklch(0.62 0.035 235 / 0.28) 0%, transparent 6%),
+    radial-gradient(circle at 50% 65%, oklch(0.58 0.035 235 / 0.32) 0%, transparent 10%),
+    /* 月亮主渐变: 中心冷白 (L=0.78) → 边缘冷蓝 (L=0.62) → 透到夜空 */
+    radial-gradient(
+      circle at 50% 50%,
+      var(--wm-moon-core) 0%,
+      var(--wm-moon-edge) 60%,
+      oklch(0.45 0.04 240 / 0.2) 100%
+    );
+  /* 4 层光晕: blur 范围翻倍, alpha 减半 (散射, 不是聚光) */
   box-shadow:
-    0 0 60px 20px var(--wm-moon-glow-near),
-    0 0 200px 60px var(--wm-moon-glow-mid),
-    0 0 400px 120px var(--wm-moon-glow-far),
-    0 0 800px 240px var(--wm-moon-glow-horizon);
+    0 0 80px 30px var(--wm-moon-glow-near),
+    0 0 280px 90px var(--wm-moon-glow-mid),
+    0 0 600px 200px var(--wm-moon-glow-far),
+    0 0 1200px 400px var(--wm-moon-glow-horizon);
   opacity: var(--wm-moon-opacity);
   pointer-events: none;
   z-index: 0;
@@ -60,26 +70,26 @@
   animation: wm-moon-breathe 8s ease-in-out infinite;
 }
 
-/* 月相呼吸：4 层光晕同步 ±10% alpha 起伏，月亮"活的" */
+/* 呼吸 - alpha ±5% 微起伏, 不要再 ±10% 喧宾夺主 */
 @keyframes wm-moon-breathe {
   0%,
   100% {
     box-shadow:
-      0 0 60px 20px oklch(0.85 0.06 230 / 0.45),
-      0 0 200px 60px oklch(0.7 0.08 230 / 0.28),
-      0 0 400px 120px oklch(0.5 0.1 230 / 0.16),
-      0 0 800px 240px oklch(0.4 0.08 230 / 0.08);
+      0 0 80px 30px oklch(0.75 0.05 230 / 0.22),
+      0 0 280px 90px oklch(0.6 0.07 230 / 0.14),
+      0 0 600px 200px oklch(0.45 0.08 230 / 0.08),
+      0 0 1200px 400px oklch(0.35 0.06 230 / 0.04);
   }
   50% {
     box-shadow:
-      0 0 60px 24px oklch(0.85 0.06 230 / 0.55),
-      0 0 220px 70px oklch(0.7 0.08 230 / 0.34),
-      0 0 440px 140px oklch(0.5 0.1 230 / 0.2),
-      0 0 900px 280px oklch(0.4 0.08 230 / 0.1);
+      0 0 90px 36px oklch(0.75 0.05 230 / 0.26),
+      0 0 310px 100px oklch(0.6 0.07 230 / 0.16),
+      0 0 660px 220px oklch(0.45 0.08 230 / 0.09),
+      0 0 1320px 440px oklch(0.35 0.06 230 / 0.045);
   }
 }
 
-/* 减弱动效偏好：关闭呼吸 + 锁定基础光晕 */
+/* 减弱动效偏好 */
 @media (prefers-reduced-motion: reduce) {
   [data-theme="dark"][data-preset="welkin-moon"] body::after {
     animation: none;
