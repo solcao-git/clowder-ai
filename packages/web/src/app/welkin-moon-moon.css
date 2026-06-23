@@ -1,13 +1,20 @@
 /*
- * 空月之歌 · 月相层 v6 (光晕紧致: 外延 ≤ 月亮直径 20%)
+ * 空月之歌 · 月相层 v7 (spread=0 连续高斯 + 银白月)
  *
- * v1-v5 演进:
+ * v1-v6 演进:
  *   v1: LED 灯泡 (太亮太实)
  *   v2: 找不到 (太暗太透)
  *   v3: 中庸 — 4 层光晕
  *   v4: 9 层光晕修断层 — 但光晕外径 ~3000px (≈ 月亮 15x), 太远
  *   v5: 紫调 + 云纹 → 丑, 已 revert
- *   v6: 光晕外缘 ≤ 40px (≈ 月亮直径 20%), 6 层紧凑 (v6 是当前版本)
+ *   v6: 光晕缩到 20% 月亮直径, 但 6 层 spread>0 仍出环带
+ *   v7: 改用 spread=0 连续高斯 (无环带), 月相降亮 + 微调 H=240
+ *
+ * 关键修复 (solcao 参考图反馈):
+ *   - 光晕环带: v6 box-shadow 6 层 spread>0 堆叠 → 可见环
+ *   - 改: spread=0 高斯, 2 层叠加 (近 30px + 远 80px), 平滑无环
+ *   - 月相太白太实: v6 L=0.85 → v7 L=0.65 (更接近参考图银白冷月)
+ *   - 颜色微调: H=230 偏蓝 → H=240 银白冷 (参考图风格)
  *
  * 三档回退 (浏览器运行时生效, 无须重新 build):
  *   🟢 软关: document.documentElement.style.setProperty('--wm-moon-opacity', '0')
@@ -22,14 +29,12 @@
   /* 回退开关 */
   --wm-moon-opacity: 0.78;
   --wm-moon-scale: 1;
-  /* 月相颜色 - 冷月色 (L=0.85 中心 → 0.7 边缘) */
-  --wm-moon-core: oklch(0.85 0.025 230);
-  --wm-moon-edge: oklch(0.7 0.04 235);
-  /* 光晕 - 紧致 (外延 ≤ 月亮直径 20%, 比 v4 缩 30 倍) */
-  --wm-moon-glow-near: oklch(0.8 0.06 230 / 0.38);
-  --wm-moon-glow-mid: oklch(0.7 0.08 230 / 0.22);
-  --wm-moon-glow-far: oklch(0.6 0.08 230 / 0.12);
-  --wm-moon-glow-horizon: oklch(0.5 0.07 230 / 0.06);
+  /* 月相颜色 - 银白冷月 (H=240, L=0.65 中 → L=0.4 边缘, C 极低 0.015-0.025) */
+  --wm-moon-core: oklch(0.65 0.015 240);
+  --wm-moon-edge: oklch(0.45 0.025 240);
+  /* 光晕 - 银白微蓝, spread=0 高斯, 2 层叠加 */
+  --wm-moon-glow-near: oklch(0.75 0.03 240 / 0.5);
+  --wm-moon-glow-far: oklch(0.7 0.03 240 / 0.3);
 }
 
 /* 月相本体: 水平居中, 50% 在视口外 (半圆在 horizon) */
@@ -42,28 +47,30 @@
   height: 200px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 3 个月坑 (中等深度) */
+  /* 月相表面: 3 个月坑 + 3 块柔和月海 + 主渐变 (银白冷月)
+   * 月坑 (暗, 模拟陨石坑阴影) + 月海 (低对比度大块, 模拟参考图云海) */
+  /* 3 个月坑 (暗, 比 v6 更深因为整体降亮) */
   background:
-    radial-gradient(circle at 38% 42%, oklch(0.7 0.04 235 / 0.4) 0%, transparent 9%),
-    radial-gradient(circle at 62% 35%, oklch(0.72 0.04 235 / 0.32) 0%, transparent 7%),
-    radial-gradient(circle at 50% 65%, oklch(0.68 0.04 235 / 0.38) 0%, transparent 11%),
-    /* 月亮主渐变: 中心 L=0.85 冷白 → 边缘 L=0.7 冷蓝 → 透到夜空 */
+    radial-gradient(circle at 38% 42%, oklch(0.5 0.02 240 / 0.4) 0%, transparent 9%),
+    radial-gradient(circle at 62% 35%, oklch(0.52 0.02 240 / 0.32) 0%, transparent 7%),
+    radial-gradient(circle at 50% 65%, oklch(0.48 0.02 240 / 0.38) 0%, transparent 11%),
+    /* 3 块月海 (柔和大块, 模拟参考图表面纹理) */
+    radial-gradient(ellipse 110px 50px at 30% 40%, oklch(0.55 0.02 245 / 0.3) 0%, transparent 70%),
+    radial-gradient(ellipse 80px 40px at 70% 60%, oklch(0.5 0.02 245 / 0.25) 0%, transparent 65%),
+    radial-gradient(ellipse 60px 30px at 45% 75%, oklch(0.55 0.02 245 / 0.3) 0%, transparent 60%),
+    /* 主渐变: 银白冷月 (中心 L=0.65 → 边缘 L=0.45 → 透到夜空) */
     radial-gradient(
       circle at 50% 50%,
       var(--wm-moon-core) 0%,
       var(--wm-moon-edge) 60%,
-      oklch(0.5 0.05 240 / 0.25) 100%
+      oklch(0.3 0.03 240 / 0.25) 100%
     );
-  /* 6 层紧凑光晕: 外延 ≈ 月亮直径 20% (40px), 比 v4 (1500px) 缩 37 倍
-   * blur/2+spread 即视觉半径, 最外 90/16=61px → 外缘 ~200+60*2=320px ≈ 1.6x 月亮
-   * 最后一层 alpha=0.025 不可见, 等效外径 = 月亮直径 * 1.4 (外延 ≈ 40px) */
+  /* 2 层 spread=0 连续高斯光晕: 无环带, 真正"月光晕"
+   * blur=30 + blur=80 叠加, 总外径 ≈ 月亮 1.8x, 外延 ≈ 80px (40% 月亮直径)
+   * spread=0 避免 spread>0 的 ring 形状 */
   box-shadow:
-    0 0 6px 2px oklch(0.85 0.05 230 / 0.55),
-    0 0 14px 3px var(--wm-moon-glow-near),
-    0 0 26px 5px var(--wm-moon-glow-mid),
-    0 0 42px 8px oklch(0.65 0.08 230 / 0.15),
-    0 0 64px 12px var(--wm-moon-glow-far),
-    0 0 90px 16px var(--wm-moon-glow-horizon);
+    0 0 30px 0 var(--wm-moon-glow-near),
+    0 0 80px 0 var(--wm-moon-glow-far);
   opacity: var(--wm-moon-opacity);
   pointer-events: none;
   z-index: 0;
@@ -71,26 +78,18 @@
   animation: wm-moon-breathe 8s ease-in-out infinite;
 }
 
-/* 呼吸 - 6 层同步 ±6%, 保持断层修复 + 紧凑外缘 */
+/* 呼吸 - 2 层 spread=0 高斯 ±10% blur + ±6% alpha, 保持无环带 + 紧致 */
 @keyframes wm-moon-breathe {
   0%,
   100% {
     box-shadow:
-      0 0 6px 2px oklch(0.85 0.05 230 / 0.55),
-      0 0 14px 3px oklch(0.8 0.06 230 / 0.38),
-      0 0 26px 5px oklch(0.7 0.08 230 / 0.22),
-      0 0 42px 8px oklch(0.65 0.08 230 / 0.15),
-      0 0 64px 12px oklch(0.6 0.08 230 / 0.12),
-      0 0 90px 16px oklch(0.5 0.07 230 / 0.06);
+      0 0 30px 0 oklch(0.75 0.03 240 / 0.5),
+      0 0 80px 0 oklch(0.7 0.03 240 / 0.3);
   }
   50% {
     box-shadow:
-      0 0 7px 2.5px oklch(0.85 0.05 230 / 0.6),
-      0 0 16px 3.5px oklch(0.8 0.06 230 / 0.42),
-      0 0 30px 6px oklch(0.7 0.08 230 / 0.25),
-      0 0 48px 9px oklch(0.65 0.08 230 / 0.17),
-      0 0 72px 14px oklch(0.6 0.08 230 / 0.135),
-      0 0 100px 18px oklch(0.5 0.07 230 / 0.065);
+      0 0 33px 0 oklch(0.75 0.03 240 / 0.55),
+      0 0 88px 0 oklch(0.7 0.03 240 / 0.33);
   }
 }
 
