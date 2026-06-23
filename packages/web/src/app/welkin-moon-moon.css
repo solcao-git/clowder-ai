@@ -1,92 +1,76 @@
 /*
- * 空月之歌 · 月相层 v14 (升亮 + 月海加强 + 光晕 3 层柔扩)
+ * 空月之歌 · 月相层 v15 (缩尺寸 + 月海拉长 + 环形山 + 边缘弥散)
  *
- * v1-v13 演进:
- *   v1: LED 灯泡 (太亮太实)
- *   v2: 找不到 (太暗太透)
- *   v3: 中庸 — 4 层光晕
- *   v4: 9 层光晕修断层 — 但光晕外径 ~3000px (≈ 月亮 15x), 太远
- *   v5: 紫调 + 云纹 → 丑, 已 revert
- *   v6: 光晕缩到 20% 月亮直径, 但 6 层 spread>0 仍出环带
- *   v7: spread=0 连续高斯 + 银白月 (200px 半圆 50% 露出)
- *   v8: 完整圆月 + 140px 小巧 + 顶部居中
- *   v9: L=0.55 → 0.75 升亮 (solcao 反馈后调整)
- *   v10: 84px + L=0.9 + 月坑对比加强
- *   v11: 76px + 紫蓝 H=255 + 不规则月坑/海
- *   v12: 月坑弱化 + 月海做大做强
- *   v13: 7 个小椭圆部分重叠拼不规则云海
- *   v14: 升亮 L=0.95 + 月海 alpha 加强 + 光晕 3 层柔扩 (v14 是当前版本)
+ * v1-v14 演进:
+ *   v1-v7: 早期探索 (LED/暗/光晕环带等)
+ *   v8-v10: 完整圆月 + 缩小 (140→84px) + 升亮
+ *   v11: 76px + 紫蓝调
+ *   v12: 月坑弱化 + 月海做大
+ *   v13: 7 小椭圆重叠拼不规则云海
+ *   v14: 升亮 L=0.95 + 月海 alpha 加强 + 3 层光晕柔扩
+ *   v15: 缩 56px + 月海拉长带状 + 环形山 + 边缘弥散 (v15 是当前版本)
  *
- * v13→v14 关键改动 (solcao v13 截图反馈 "有那个感觉了 + 亮度差 + 光晕生硬范围小"):
- *   - 月相: L=0.9 → 0.95 (几乎纯白, 跟参考图一致)
- *   - 月相 C: 0.03 → 0.02 (纯白一点, 接近参考图)
- *   - 月相边缘 L: 0.5 → 0.55, H: 265 → 260 (略亮略偏蓝)
- *   - 月海: alpha 0.3-0.45 → 0.45-0.6 (终于看得见)
- *   - 月海 C: 0.06-0.07 → 0.07-0.08 (紫调更浓)
- *   - 月海透明 65% → 55% (边缘更实)
- *   - 光晕: 2 层 → 3 层 (近 8px + 中 48px + 远 100px)
- *   - 近晕 alpha 0.5 → 0.45 (近月面连续, 避免"环")
- *   - 中晕 alpha 0.3 → 0.25 (中范围柔)
- *   - 远晕 alpha 0.1 (新加, 1.8x 月亮范围, 让光晕"散"开)
- *   - 边缘渐变 70% → 60% (紫蓝晕更早开始)
+ * v14→v15 关键改动 (solcao v14 截图反馈 "近看细节差 + 月亮超出状态栏"):
+ *   - 尺寸: 76px → 56px (实体不碰状态栏)
+ *   - 位置: top 6px → -4px (月亮中线对齐状态栏中线)
+ *   - 月海: 7 个胖椭圆 (1.3:1 ~ 1.6:1 长宽比) → 6 个带状椭圆 (2:1 ~ 3:1)
+ *     - 模仿月海"拉长不规则"形态 (参考图右下+左上的月海都是带状)
+ *   - 月坑: 2 个弱点 (alpha 0.3) → 2 个弱点 (保留) + 2 个环形山
+ *     - 环形山 = 亮边 + 暗心 (双层 radial-gradient, 模拟陨石坑凸起感)
+ *     - alpha 0.6, 直径 4-6px
+ *   - 月相边缘: "硬切" → "弥散"
+ *     - 100% 处 oklch(0.4 ... / 0.35) 改为 transparent 92%
+ *     - 半径外不再"突然变黑", 月面跟光晕平滑过渡
+ *   - 远晕: blur 100 → 80px (缩尺寸后保持比例, 总外径 ≈ 56+80*2=216 ≈ 3.9x 月亮)
+ *   - 月海透明: 50-55% → 60-65% (拉长后变窄, 边缘更柔)
  *
- * 三档回退 (浏览器运行时生效, 无须重新 build):
- *   🟢 软关: document.documentElement.style.setProperty('--wm-moon-opacity', '0')
- *   🟡 调强: --wm-moon-opacity 0.4 (弱) / 1.0 (强) / --wm-moon-scale 1.2 (放大)
- *   🔴 硬回退: layout.tsx 删本文件 <link>
+ * 三档回退不变。
  *
- * 性能: position: fixed + will-change → 独立合成层。
- * 动画: 8s 呼吸 (alpha ±6%); reduced-motion 关闭。
+ * 性能不变。
  */
 
 [data-theme="dark"][data-preset="welkin-moon"] {
   /* 回退开关 */
   --wm-moon-opacity: 0.78;
   --wm-moon-scale: 1;
-  /* 月相颜色 - 银白近白月 (v14 L=0.95 中 → L=0.55 边缘, 几乎纯白) */
+  /* 月相颜色 - 银白近白月 (v15 保留 v14 L=0.95 几乎纯白) */
   --wm-moon-core: oklch(0.95 0.02 250);
   --wm-moon-edge: oklch(0.55 0.05 260);
-  /* 光晕 - 3 层紫蓝高斯 (近/中/远) */
+  /* 光晕 - 3 层紫蓝高斯 (近/中/远) — v15 远晕缩到 80 适配 56px 月相 */
   --wm-moon-glow-near: oklch(0.88 0.05 252 / 0.45);
   --wm-moon-glow-mid: oklch(0.82 0.05 255 / 0.25);
-  --wm-moon-glow-far: oklch(0.75 0.05 260 / 0.1);
+  --wm-moon-glow-far: oklch(0.75 0.05 260 / 0.12);
 }
 
-/* 月相本体: 顶部居中, 完整圆月, 76px, 升亮 + 紫蓝 + 7 部分重叠月海 + 3 层光晕 */
+/* 月相本体: 顶部居中, 完整圆月, 56px (v15 缩尺寸) */
 [data-theme="dark"][data-preset="welkin-moon"] body::after {
   content: "";
   position: fixed;
-  top: 6px;
+  top: -4px;
   left: 50%;
-  width: 76px;
-  height: 76px;
+  width: 56px;
+  height: 56px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月相表面: 2 弱月坑 + 7 部分重叠月海 (v14 加强 alpha 0.45-0.6) + 升亮主渐变 */
-  /* 2 个弱化月坑 (v14 保留 v12 弱化) */
+  /* 月相表面: 2 环形山 + 2 弱月坑 + 6 带状月海 (v15 拉长 2-3:1) + 弥散主渐变 */
+  /* 2 个环形山 (v15 新加, 亮边 + 暗心, 模拟陨石坑) */
   background:
-    radial-gradient(circle at 35% 50%, oklch(0.55 0.04 260 / 0.35) 0%, transparent 3%),
-    radial-gradient(circle at 65% 40%, oklch(0.5 0.04 260 / 0.3) 0%, transparent 2.5%),
-    /* 7 个小椭圆部分重叠 (v14 alpha 0.45-0.6 加强, C 0.07-0.08 紫调更浓) */
-    radial-gradient(ellipse 35px 22px at 30% 30%, oklch(0.6 0.07 258 / 0.55) 0%, transparent 55%),
-    radial-gradient(ellipse 30px 18px at 60% 25%, oklch(0.55 0.07 262 / 0.5) 0%, transparent 50%),
-    radial-gradient(ellipse 40px 28px at 50% 50%, oklch(0.5 0.08 265 / 0.6) 0%, transparent 60%),
-    radial-gradient(ellipse 32px 22px at 25% 60%, oklch(0.55 0.07 260 / 0.55) 0%, transparent 55%),
-    radial-gradient(ellipse 28px 20px at 70% 65%, oklch(0.5 0.08 268 / 0.5) 0%, transparent 50%),
-    radial-gradient(ellipse 30px 18px at 45% 80%, oklch(0.55 0.07 263 / 0.55) 0%, transparent 50%),
-    radial-gradient(ellipse 22px 16px at 80% 40%, oklch(0.5 0.07 265 / 0.45) 0%, transparent 50%),
-    /* 主渐变: 银白近白月 (中心 L=0.95 H=250 → 边缘 L=0.55 H=260 → 紫蓝透出) */
-    radial-gradient(
-      circle at 50% 50%,
-      var(--wm-moon-core) 0%,
-      var(--wm-moon-edge) 60%,
-      oklch(0.4 0.06 265 / 0.35) 100%
-    );
-  /* 3 层 spread=0 连续高斯光晕: 近 8 + 中 48 + 远 100 (柔+扩, 总外径 ≈ 76+100*2=276 ≈ 3.6x 月亮) */
+    radial-gradient(circle at 38% 28%, oklch(0.4 0.05 260 / 0.55) 0%, oklch(0.7 0.03 255 / 0.5) 35%, transparent 50%),
+    radial-gradient(circle at 72% 65%, oklch(0.4 0.05 260 / 0.55) 0%, oklch(0.7 0.03 255 / 0.5) 35%, transparent 50%),
+    /* 6 个带状月海 (v15 拉长 2-3:1, 模仿月海"条带"形态) */
+    radial-gradient(ellipse 28px 10px at 35% 30%, oklch(0.55 0.07 260 / 0.55) 0%, transparent 60%),
+    radial-gradient(ellipse 32px 12px at 55% 22%, oklch(0.5 0.08 263 / 0.5) 0%, transparent 60%),
+    radial-gradient(ellipse 30px 11px at 30% 50%, oklch(0.55 0.07 258 / 0.6) 0%, transparent 60%),
+    radial-gradient(ellipse 26px 9px at 65% 50%, oklch(0.5 0.08 268 / 0.55) 0%, transparent 60%),
+    radial-gradient(ellipse 28px 10px at 45% 75%, oklch(0.55 0.07 262 / 0.55) 0%, transparent 60%),
+    radial-gradient(ellipse 22px 8px at 70% 35%, oklch(0.5 0.07 265 / 0.5) 0%, transparent 60%),
+    /* 主渐变: 银白月 (中心 L=0.95 → 边缘 L=0.55 → 92% 处透明, 让月面跟光晕平滑过渡) */
+    radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 55%, transparent 92%);
+  /* 3 层 spread=0 连续高斯光晕: 近 8 + 中 48 + 远 80 (v15 远晕 100→80 适配 56px) */
   box-shadow:
     0 0 8px 0 var(--wm-moon-glow-near),
     0 0 48px 0 var(--wm-moon-glow-mid),
-    0 0 100px 0 var(--wm-moon-glow-far);
+    0 0 80px 0 var(--wm-moon-glow-far);
   opacity: var(--wm-moon-opacity);
   pointer-events: none;
   z-index: 0;
@@ -94,20 +78,20 @@
   animation: wm-moon-breathe 8s ease-in-out infinite;
 }
 
-/* 呼吸 - 3 层 spread=0 高斯 ±10% blur + ±6% alpha, 紫蓝调一致 */
+/* 呼吸 - 3 层 spread=0 高斯 ±10% blur + ±6% alpha, 紫蓝调一致 (远晕 80) */
 @keyframes wm-moon-breathe {
   0%,
   100% {
     box-shadow:
       0 0 8px 0 oklch(0.88 0.05 252 / 0.45),
       0 0 48px 0 oklch(0.82 0.05 255 / 0.25),
-      0 0 100px 0 oklch(0.75 0.05 260 / 0.1);
+      0 0 80px 0 oklch(0.75 0.05 260 / 0.12);
   }
   50% {
     box-shadow:
       0 0 9px 0 oklch(0.88 0.05 252 / 0.5),
       0 0 53px 0 oklch(0.82 0.05 255 / 0.275),
-      0 0 110px 0 oklch(0.75 0.05 260 / 0.11);
+      0 0 88px 0 oklch(0.75 0.05 260 / 0.132);
   }
 }
 
