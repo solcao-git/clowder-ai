@@ -58,12 +58,18 @@
       var(--wm-moon-edge) 60%,
       oklch(0.5 0.05 240 / 0.25) 100%
     );
-  /* 4 层光晕: 中等范围 + 中等 alpha */
+  /* 9 层光晕: 原 4 层 + 插 4 层中间档 + 1 层最外极薄,
+   * alpha 步长 0.05-0.04 缩到 0.04, blur 范围 30→1500 (50x 跨度) 消除断层 */
   box-shadow:
+    0 0 30px 10px oklch(0.78 0.06 230 / 0.4),
     0 0 70px 25px var(--wm-moon-glow-near),
+    0 0 130px 45px oklch(0.65 0.08 230 / 0.25),
     0 0 240px 75px var(--wm-moon-glow-mid),
+    0 0 360px 110px oklch(0.5 0.09 230 / 0.16),
     0 0 500px 160px var(--wm-moon-glow-far),
-    0 0 1000px 320px var(--wm-moon-glow-horizon);
+    0 0 750px 240px oklch(0.4 0.07 230 / 0.08),
+    0 0 1000px 320px var(--wm-moon-glow-horizon),
+    0 0 1500px 480px oklch(0.4 0.07 230 / 0.03);
   opacity: var(--wm-moon-opacity);
   pointer-events: none;
   z-index: 0;
@@ -71,22 +77,32 @@
   animation: wm-moon-breathe 8s ease-in-out infinite;
 }
 
-/* 呼吸 - alpha ±6% */
+/* 呼吸 - 9 层同步 ±6%, 保持断层修复效果 */
 @keyframes wm-moon-breathe {
   0%,
   100% {
     box-shadow:
+      0 0 30px 10px oklch(0.78 0.06 230 / 0.4),
       0 0 70px 25px oklch(0.78 0.06 230 / 0.3),
+      0 0 130px 45px oklch(0.65 0.08 230 / 0.25),
       0 0 240px 75px oklch(0.65 0.08 230 / 0.2),
+      0 0 360px 110px oklch(0.5 0.09 230 / 0.16),
       0 0 500px 160px oklch(0.5 0.09 230 / 0.12),
-      0 0 1000px 320px oklch(0.4 0.07 230 / 0.06);
+      0 0 750px 240px oklch(0.4 0.07 230 / 0.08),
+      0 0 1000px 320px oklch(0.4 0.07 230 / 0.06),
+      0 0 1500px 480px oklch(0.4 0.07 230 / 0.03);
   }
   50% {
     box-shadow:
+      0 0 35px 12px oklch(0.78 0.06 230 / 0.45),
       0 0 80px 30px oklch(0.78 0.06 230 / 0.34),
+      0 0 145px 52px oklch(0.65 0.08 230 / 0.28),
       0 0 270px 85px oklch(0.65 0.08 230 / 0.22),
+      0 0 400px 120px oklch(0.5 0.09 230 / 0.18),
       0 0 560px 180px oklch(0.5 0.09 230 / 0.135),
-      0 0 1100px 350px oklch(0.4 0.07 230 / 0.065);
+      0 0 830px 265px oklch(0.4 0.07 230 / 0.09),
+      0 0 1100px 350px oklch(0.4 0.07 230 / 0.065),
+      0 0 1650px 530px oklch(0.4 0.07 230 / 0.033);
   }
 }
 
