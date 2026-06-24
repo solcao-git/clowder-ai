@@ -38,6 +38,8 @@ import { CliRawArchive } from '../../session/CliRawArchive.js';
 import type { AgentMessage, AgentServiceOptions, L0InjectableAgentService, MessageMetadata } from '../../types.js';
 import type { RawArchiveSink } from '../providers/codex-audit-hooks.js';
 import { sanitizeRawEvent } from '../providers/codex-audit-hooks.js';
+import { appendLocalImagePathHints, collectImageAccessDirectories } from './image-cli-bridge.js';
+import { extractImagePaths } from './image-paths.js';
 import { compileL0ViaSubprocess } from './l0-compiler.js';
 import {
   createTraeTransformState,
@@ -119,6 +121,12 @@ export class TraeAgentService implements L0InjectableAgentService {
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
     const effectiveModel = options?.callbackEnv?.CAT_CAFE_TRAE_MODEL_OVERRIDE ?? this.model;
     let effectivePrompt = options?.systemPrompt ? `${options.systemPrompt}\n\n${prompt}` : prompt;
+    // Image support: trae-cli has no native image/attachment flag, so we use
+    // path hints (textual reference) + --add-dir (directory sandbox access)
+    // so the model can read image files via its tools if it supports file reading.
+    const imagePaths = extractImagePaths(options?.contentBlocks, options?.uploadDir);
+    const imageAccessDirs = collectImageAccessDirectories(imagePaths);
+    effectivePrompt = appendLocalImagePathHints(effectivePrompt, imagePaths);
     const metadata: MessageMetadata = { provider: 'trae', model: effectiveModel };
     let sessionInitEmitted = false;
     let textEventCount = 0;
@@ -167,7 +175,7 @@ export class TraeAgentService implements L0InjectableAgentService {
       // Build args (L0 is now injected via prompt prepend by invoke-single-cat,
       // since injectsL0Natively() returns false. This is more reliable than
       // passing long L0 content through -c developer_instructions=...)
-      const args = this.buildArgs(effectivePrompt, options?.sessionId, effectiveModel, options?.cliConfigArgs);
+      const args = this.buildArgs(effectivePrompt, options?.sessionId, effectiveModel, imageAccessDirs, options?.cliConfigArgs);
 
       // Authentication: TRAE CLI natively reads TRAECLI_PERSONAL_ACCESS_TOKEN
       // from environment (official method for headless/CICD scenarios).
@@ -354,6 +362,7 @@ export class TraeAgentService implements L0InjectableAgentService {
     prompt: string,
     sessionId?: string,
     model?: string,
+    imageAccessDirs?: readonly string[],
     cliConfigArgs?: readonly string[],
   ): string[] {
     const args: string[] = [];
@@ -377,6 +386,13 @@ export class TraeAgentService implements L0InjectableAgentService {
 
     // YOLO mode (bypass tool permission checks — our route layer handles safety)
     args.push('-y');
+
+    // Image directory access (--add-dir: sandbox directory for image file reading)
+    if (imageAccessDirs && imageAccessDirs.length > 0) {
+      for (const dir of imageAccessDirs) {
+        args.push('--add-dir', dir);
+      }
+    }
 
     // User-defined CLI args
     const userParts: string[] = [];

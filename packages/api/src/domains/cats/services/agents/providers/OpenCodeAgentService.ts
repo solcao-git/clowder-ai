@@ -26,6 +26,8 @@ import { CliRawArchive } from '../../session/CliRawArchive.js';
 import type { AgentMessage, AgentServiceOptions, L0InjectableAgentService, MessageMetadata } from '../../types.js';
 import type { RawArchiveSink } from '../providers/codex-audit-hooks.js';
 import { sanitizeRawEvent } from '../providers/codex-audit-hooks.js';
+import { appendLocalImagePathHints } from './image-cli-bridge.js';
+import { extractImagePaths } from './image-paths.js';
 import { transformOpenCodeEvent } from './opencode-event-transform.js';
 
 const log = createModuleLogger('opencode-agent');
@@ -134,10 +136,55 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
     return true;
   }
 
+  /**
+   * Detect multimodal content serialization errors from provider APIs.
+   *
+   * When opencode's @ai-sdk adapter serializes multimodal tool results (e.g. image
+   * read_file output) for APIs like Qwen's chat completions, it may produce an
+   * invalid content block with all fields set to None (e.g. `{text: None, image:
+   * None, ...}`), which the provider rejects with InvalidParameter / content.str
+   * validation error.
+   *
+   * This commonly happens on session resume — opencode replays the full history
+   * including previous multimodal tool results, and if the adapter can't correctly
+   * re-serialize them for the target API, the whole invocation crashes.
+   *
+   * Fix: detect this specific error pattern and retry without --session (fresh
+   * start, no history replay) so the cat can continue working.
+   */
+  private static isMultimodalSerializationError(errorMessage: string): boolean {
+    return errorMessage.includes('InvalidParameter')
+      && errorMessage.includes('content.str')
+      && errorMessage.includes('string_type');
+  }
+
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
     // P1-2: runtime model override takes precedence over constructor model
     const effectiveModel = options?.callbackEnv?.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE ?? this.model;
-    const args = this.buildArgs(prompt, options?.sessionId, effectiveModel, options?.cliConfigArgs);
+
+    // Try the normal invocation first. If it hits a multimodal serialization error
+    // on session resume, retry without --session (fresh start, no history replay).
+    yield* this.invokeInternal(prompt, options, effectiveModel, false);
+
+    // Note: retry logic is handled inside invokeInternal via the
+    // multimodalSerializationRetry flag — see error handling below.
+  }
+
+  private async *invokeInternal(
+    prompt: string,
+    options: AgentServiceOptions | undefined,
+    effectiveModel: string,
+    isRetry: boolean,
+  ): AsyncIterable<AgentMessage> {
+    // On retry, skip session resume to avoid replaying the corrupted history
+    const sessionId = isRetry ? undefined : options?.sessionId;
+    // Image support: extract paths and build --file args for native multimodal passing.
+    // opencode run --file attaches files to the message, letting the model see images natively.
+    const imagePaths = extractImagePaths(options?.contentBlocks, options?.uploadDir);
+    const imageArgs = imagePaths.flatMap((path: string) => ['--file', path]);
+    // Also append path hints as textual fallback (useful if --file doesn't work for the provider)
+    const effectivePrompt = appendLocalImagePathHints(prompt, imagePaths);
+    const args = this.buildArgs(effectivePrompt, sessionId, effectiveModel, imageArgs, options?.cliConfigArgs);
     const cwd = options?.workingDirectory;
     const childEnv = this.buildEnv(options?.callbackEnv);
     // F171: Account env vars applied LAST — user overrides provider-injected values
@@ -314,6 +361,35 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
               },
               'OpenCode CLI returned error event',
             );
+
+            // Multimodal serialization retry: when opencode resumes a session that
+            // contains multimodal tool results (e.g. a previous read_file on an image),
+            // the @ai-sdk adapter may produce an invalid content block that the provider
+            // API rejects with InvalidParameter + content.str validation error.
+            // If this is the first attempt (not already a retry) and we were using a
+            // session, retry without --session to start fresh (no history replay).
+            const errorMsg = rawError?.data?.message ?? '';
+            if (!isRetry && sessionId && OpenCodeAgentService.isMultimodalSerializationError(errorMsg)) {
+              log.info(
+                { catId: this.catId, sessionId, invocationId: options?.invocationId },
+                'Multimodal serialization error on session resume — retrying without --session',
+              );
+              // Yield a system_info so the user sees what happened
+              yield {
+                type: 'system_info' as const,
+                catId: this.catId,
+                content: JSON.stringify({
+                  type: 'session_retry',
+                  reason: 'opencode session resume produced invalid multimodal content — starting fresh session',
+                }),
+                metadata,
+                timestamp: Date.now(),
+              };
+              // Delegate the retry to the outer invoke() method
+              yield* this.invokeInternal(prompt, options, effectiveModel, true);
+              return;
+            }
+
             if (rawError?.data?.message) {
               const cliDiagnostics = buildCliDiagnostics({
                 rawText: rawError.data.message,
@@ -395,7 +471,7 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
     }
   }
 
-  private buildArgs(prompt: string, sessionId?: string, model?: string, cliConfigArgs?: readonly string[]): string[] {
+  private buildArgs(prompt: string, sessionId?: string, model?: string, imageArgs?: string[], cliConfigArgs?: readonly string[]): string[] {
     const args = ['run'];
 
     // Session resume
@@ -411,6 +487,11 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
 
     // JSON event stream output
     args.push('--format', 'json');
+
+    // Image file attachments (--file flag: native multimodal passing)
+    if (imageArgs && imageArgs.length > 0) {
+      args.push(...imageArgs);
+    }
 
     // User-defined CLI args from the member editor (#567).
     // User args win when they overlap with system-injected flags.

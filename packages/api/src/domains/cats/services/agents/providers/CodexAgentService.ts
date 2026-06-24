@@ -40,6 +40,7 @@ import {
   type CodexSessionContextSnapshotResolver,
   createCodexSessionContextSnapshotResolver,
 } from '../providers/codex-session-context-snapshot.js';
+import { appendLocalImagePathHints } from '../providers/image-cli-bridge.js';
 import { extractImagePaths } from '../providers/image-paths.js';
 import { compileL0ViaSubprocess } from './l0-compiler.js';
 
@@ -427,10 +428,28 @@ export class CodexAgentService implements AgentService {
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
     // Codex CLI has no system prompt flag; prepend identity to prompt text
-    const effectivePrompt = options?.systemPrompt ? `${options.systemPrompt}\n\n${prompt}` : prompt;
+    let effectivePrompt = options?.systemPrompt ? `${options.systemPrompt}\n\n${prompt}` : prompt;
     const effectiveModel = options?.callbackEnv?.CAT_CAFE_OPENAI_MODEL_OVERRIDE ?? this.model;
     const imagePaths = extractImagePaths(options?.contentBlocks, options?.uploadDir);
-    const imageArgs = imagePaths.flatMap((path) => ['--image', path]);
+
+    // Determine if this is a third-party API endpoint (e.g. 百炼/DashScope).
+    // Codex --image sends OpenAI-format image_url content blocks which may not be
+    // supported by third-party OpenAI-compatible APIs. When a custom base URL is
+    // set, skip --image to avoid API errors and fall back to path hints instead.
+    const customBaseUrl =
+      options?.callbackEnv?.OPENAI_BASE_URL ??
+      options?.callbackEnv?.OPENAI_API_BASE ??
+      options?.accountEnv?.OPENAI_BASE_URL ??
+      options?.accountEnv?.OPENAI_API_BASE;
+    const useNativeImage = !customBaseUrl;
+    const imageArgs = useNativeImage
+      ? imagePaths.flatMap((path: string) => ['--image', path])
+      : [];
+
+    // Always append path hints as textual fallback reference (useful alongside
+    // native --image for tool-based file access, and essential as the only
+    // image reference when --image is skipped for third-party APIs)
+    effectivePrompt = appendLocalImagePathHints(effectivePrompt, imagePaths);
 
     const sandboxMode = getCodexSandboxMode();
     const approvalPolicy = getCodexApprovalPolicy();
@@ -479,13 +498,7 @@ export class CodexAgentService implements AgentService {
     //   - env_key: env var name for the API key
     //   - base_url: API endpoint
     //   - wire_api: "responses" (HTTP, the only supported value)
-    // Check both callbackEnv and accountEnv — after F171 env separation,
-    // user-configured OPENAI_BASE_URL lives in accountEnv, not callbackEnv.
-    const customBaseUrl =
-      options?.callbackEnv?.OPENAI_BASE_URL ??
-      options?.callbackEnv?.OPENAI_API_BASE ??
-      options?.accountEnv?.OPENAI_BASE_URL ??
-      options?.accountEnv?.OPENAI_API_BASE;
+    // customBaseUrl was already resolved above (for --image conditional logic)
     const customProviderArgs: string[] = customBaseUrl
       ? [
           '--config',

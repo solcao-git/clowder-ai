@@ -24,6 +24,8 @@ import { CliRawArchive } from '../../session/CliRawArchive.js';
 import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata } from '../../types.js';
 import type { RawArchiveSink } from '../providers/codex-audit-hooks.js';
 import { sanitizeRawEvent } from '../providers/codex-audit-hooks.js';
+import { appendLocalImagePathHints } from './image-cli-bridge.js';
+import { extractImagePaths } from './image-paths.js';
 import {
   createQoderTransformState,
   transformQoderEvent,
@@ -76,6 +78,13 @@ export class QoderAgentService implements AgentService {
     const effectiveModel = options?.callbackEnv?.CAT_CAFE_QODER_MODEL_OVERRIDE ?? this.model;
     const metadata: MessageMetadata = { provider: 'qoder', model: effectiveModel };
 
+    // Image support: extract paths and build --attachment args for native multimodal passing.
+    // qodercli --attachment attaches files to the message, letting the model see images natively.
+    const imagePaths = extractImagePaths(options?.contentBlocks, options?.uploadDir);
+    const imageArgs = imagePaths.flatMap((path: string) => ['--attachment', path]);
+    // Also append path hints as textual fallback reference
+    const effectivePrompt = appendLocalImagePathHints(prompt, imagePaths);
+
     const qoderCommand = resolveQoderCommand();
     if (!qoderCommand) {
       yield {
@@ -114,8 +123,13 @@ export class QoderAgentService implements AgentService {
       args.push('-w', options.workingDirectory);
     }
 
+    // Image file attachments (--attachment flag: native multimodal passing)
+    if (imageArgs.length > 0) {
+      args.push(...imageArgs);
+    }
+
     // Print mode + prompt (must be last)
-    args.push('-p', prompt);
+    args.push('-p', effectivePrompt);
 
     // User-defined CLI args from the member editor (#567).
     const userParts: string[] = [];
