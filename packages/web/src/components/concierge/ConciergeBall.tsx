@@ -81,25 +81,34 @@ export function ConciergeBall({ ballState }: ConciergeBallProps) {
   const isIdle = ballState === 'idle';
 
   return (
-    <div aria-live="polite" aria-atomic="false" className="pointer-events-none">
-      <button
-        type="button"
+    <div
+      aria-live="polite"
+      aria-atomic="false"
+      className="pointer-events-none"
+      style={{ background: 'transparent' }}
+    >
+      {/* Using div instead of button to avoid browser default button styles
+          (dark background in some themes) that create a visible dark box */}
+      <div
+        role="button"
+        tabIndex={0}
         aria-label={`猫猫球 — ${stateLabel}`}
         aria-expanded={isExpanded}
         aria-haspopup="dialog"
         style={{
-          backgroundColor: 'var(--cafe-surface-elevated)',
-          boxShadow: 'var(--shadow-elevation-1)',
+          background: 'transparent',
+          border: 'none',
+          padding: 0,
+          margin: 0,
+          outline: 'none',
         }}
         className={[
           'pointer-events-auto',
           'relative flex items-center justify-center',
-          'w-[72px] h-[72px]',
-          // Squircle: border-radius 16px per design spec (§7)
-          'rounded-2xl',
+          'w-[96px] h-[96px]',
+          'bg-transparent',
+          'overflow-visible',
           // Bug fix: disable CSS transition + breathing animation during drag.
-          // The transition on `transform` caused a visible "teleport then slide"
-          // artifact when react-rnd's position prop updated after drag stop.
           isDragging ? '' : 'transition-transform duration-200',
           isIdle && !isDragging ? 'animate-[concierge-breathe_4s_ease-in-out_infinite]' : '',
           'focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--cafe-accent)] focus-visible:ring-offset-2',
@@ -107,22 +116,25 @@ export function ConciergeBall({ ballState }: ConciergeBallProps) {
           isDragging ? 'cursor-grabbing' : 'cursor-pointer hover:scale-105',
         ].join(' ')}
         onClick={handleClick}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleClick();
+          }
+        }}
       >
-        {/* Cat sprite — 64×64 inside 72×72 base
-            V1: PNG sprite replaces emoji
-            V5: crossfade on state change via CSS transition */}
+        {/* Floating character sprite — 72×128 transparent PNG */}
         <img
           src={spriteSrc}
           alt=""
           aria-hidden="true"
-          width={64}
-          height={64}
+          width={96}
+          height={96}
           className="object-contain"
           style={{ transition: 'opacity 300ms ease-in-out' }}
         />
 
-        {/* Badge dot — shows only when unseenResultCount > 0 (quiet-badge policy §3)
-            role="img" lets aria-label attach to an empty visual element */}
+        {/* Badge dot — shows only when unseenResultCount > 0 (quiet-badge policy §3) */}
         {unseenResultCount > 0 && (
           <span
             role="img"
@@ -131,7 +143,7 @@ export function ConciergeBall({ ballState }: ConciergeBallProps) {
             className={[
               'absolute -top-1 -right-1',
               'w-3 h-3 rounded-full',
-              'border-2 border-[color:var(--cafe-surface-elevated)]',
+              'border-2 border-white',
             ].join(' ')}
           />
         )}
@@ -142,11 +154,11 @@ export function ConciergeBall({ ballState }: ConciergeBallProps) {
           className={[
             'absolute -bottom-1 -right-1',
             'w-3 h-3 rounded-full',
-            'border-2 border-[color:var(--cafe-surface-elevated)]',
+            'border-2 border-white',
           ].join(' ')}
           aria-hidden="true"
         />
-      </button>
+      </div>
     </div>
   );
 }

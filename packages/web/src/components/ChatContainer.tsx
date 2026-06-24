@@ -941,7 +941,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
             {messages.length === 0 && !isLoadingHistory ? (
               <div className="text-center mt-20">
                 <PawIcon className="w-12 h-12 text-cafe-muted mx-auto mb-4" />
-                <p className="text-lg text-cafe-secondary mb-1">欢迎来到 Clowder AI!</p>
+                <p className="text-lg text-cafe-secondary mb-1">欢迎来到 Tenri AI!</p>
                 <p className="text-sm text-cafe-muted" suppressHydrationWarning>
                   {cats.length > 0 ? '输入 @布偶 召唤布偶猫开始聊天' : '还没有可用成员，先开始新手教程创建第一只猫猫'}
                 </p>

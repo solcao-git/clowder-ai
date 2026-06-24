@@ -415,7 +415,7 @@ const WORKFLOW_TRIGGERS: Record<string, string> = {
     '',
     '### 金渐层家族治理（OpenCode 专属）',
     'OMOC Sisyphus 只编排自己的 sub-agent，不编排其他猫。opencode 原生 MCP 和 Clowder AI MCP 需避免 tool 名冲突。',
-    '`question` 工具已 deny——co-creator通过 Hub 交互，不走 OpenCode TUI 弹窗。提问用回复文本或 `cat_cafe_create_rich_block(kind=interactive)`。',
+    '`question` 工具已 deny——{{CVO_NAME}}通过 Hub 交互，不走 OpenCode TUI 弹窗。提问用回复文本或 `cat_cafe_create_rich_block(kind=interactive)`。',
   ].join('\n'),
 };
 
@@ -565,7 +565,12 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
   // Per-breed workflow triggers (fallback to catId for legacy configs without breedId)
   const triggers = WORKFLOW_TRIGGERS[config.breedId ?? ''] ?? WORKFLOW_TRIGGERS[catId as string];
   if (triggers) {
-    lines.push(triggers, '');
+    // Replace {{CVO_NAME}} / {{CVO_HANDLE}} placeholders with dynamic config values
+    const ccConfig = getCoCreatorConfig();
+    const resolvedTriggers = triggers
+      .replaceAll('{{CVO_NAME}}', ccConfig.name)
+      .replaceAll('{{CVO_HANDLE}}', ccConfig.mentionPatterns[0] ?? '@co-creator');
+    lines.push(resolvedTriggers, '');
   }
 
   // F129: Pack workflow blocks (after breed workflow triggers)
@@ -584,7 +589,12 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
 
   // L0 Governance Digest — compiled from shared-rules.md (#747)
   // Source of truth: cat-cafe-skills/refs/shared-rules.md (supports .local/.local-override)
-  lines.push('', getGovernanceDigest());
+  // Replace {{CVO_NAME}} / {{CVO_HANDLE}} placeholders in governance digest
+  const ccConfigGov = getCoCreatorConfig();
+  const governanceDigest = getGovernanceDigest()
+    .replaceAll('{{CVO_NAME}}', ccConfigGov.name)
+    .replaceAll('{{CVO_HANDLE}}', ccConfigGov.mentionPatterns[0] ?? '@co-creator');
+  lines.push('', governanceDigest);
 
   // F129: Pack guardrails — hard constraint track (only adds strictness, never relaxes Core Rails)
   if (packBlocks?.guardrailBlock) {

@@ -439,7 +439,9 @@ export async function compileL0(options) {
     .replace('{{TEAMMATE_ROSTER}}', buildTeammateRoster(catId))
     .replace('{{GOVERNANCE_L0}}', governanceL0.content)
     .replace('{{WORKFLOW_TRIGGERS}}', buildWorkflowTriggers(config.breedId, catId, config.displayName))
-    .replace('{{CVO_REF}}', renderCvoRef());
+    .replace('{{CVO_REF}}', renderCvoRef())
+    .replaceAll('{{CVO_NAME}}', _coCreatorConfig?.name ?? 'co-creator')
+    .replaceAll('{{CVO_HANDLE}}', _coCreatorConfig?.mentionPatterns?.[0] ?? '@co-creator');
 }
 
 /**

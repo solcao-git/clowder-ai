@@ -191,7 +191,7 @@ export function PushSettingsPanel() {
         <div className="rounded-2xl border border-conn-amber-ring bg-conn-amber-bg px-5 py-4 space-y-2">
           <p className="text-sm text-conn-amber-text font-medium">{environmentHint ?? '当前浏览器不支持推送通知。'}</p>
           <p className="text-xs text-conn-amber-text">
-            iPhone 用户请将 Clowder AI 添加到主屏幕后再开启推送（Safari 普通标签页不支持 Web Push）。
+            iPhone 用户请将 Tenri AI 添加到主屏幕后再开启推送（Safari 普通标签页不支持 Web Push）。
           </p>
         </div>
       </div>
