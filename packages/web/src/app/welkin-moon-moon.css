@@ -1,5 +1,13 @@
 /*
- * 空月之歌 · 月相层 v26 (再小一丢丢 + 近晕加强: 64→60px + top 5 + 近晕 alpha 0.5→0.6)
+ * 空月之歌 · 月相层 v32 (霜月冷蓝: 色相统一转向 235-250 + chroma 微提 + 远晕去紫化)
+ *
+ * v32 (2026-06-24): 霜月调色 (solcao: "我想要那种霜月的感觉，带点蓝的")
+ *   - 色相统一转向冷蓝: core 250→235, edge 260→240, near 250→235, mid 255→240, far 272→250
+ *   - 远晕去紫化: H=272 (purple-blue) → H=250 (cool blue), 整月不再有紫色 hint
+ *   - chroma 微提: core 0.005→0.008, edge 0.02→0.03, near/mid 0.05→0.06
+ *   - 月海同步转冷: 5 条月海 H=258-272 → H=235-245 (蓝紫色 → 冷蓝色)
+ *   - L/opacity 不动 (保留 v26 完美档的亮度平衡)
+ *   - 尺寸/位置/呼吸动画不动
  *
  * v1-v25 演进:
  *   v1-v14: 探索到 "远观对了"
@@ -38,13 +46,13 @@
   /* 回退开关 - v26 不变 */
   --wm-moon-opacity: 0.95;
   --wm-moon-scale: 1;
-  /* 月相颜色 - v25/v26 不变 */
-  --wm-moon-core: oklch(1 0.005 250);
-  --wm-moon-edge: oklch(0.92 0.02 260);
-  /* 光晕 - v26 近晕 alpha 0.5 → 0.6 (水神 #1 落地) */
-  --wm-moon-glow-near: oklch(0.85 0.05 250 / 0.6);
-  --wm-moon-glow-mid: oklch(0.8 0.05 255 / 0.5);
-  --wm-moon-glow-far: oklch(0.75 0.05 272 / 0.45);
+  /* 月相颜色 - v32 霜月 (色相统一 235-250 冷蓝, chroma 微提) */
+  --wm-moon-core: oklch(1 0.008 235);
+  --wm-moon-edge: oklch(0.92 0.03 240);
+  /* 光晕 - v32 (近晕/中晕 H 转冷蓝 + chroma↑, 远晕 H 272→250 去紫化) */
+  --wm-moon-glow-near: oklch(0.85 0.06 235 / 0.6);
+  --wm-moon-glow-mid: oklch(0.8 0.06 240 / 0.5);
+  --wm-moon-glow-far: oklch(0.75 0.05 250 / 0.45);
 }
 
 /* 月相本体: 顶部居中, 60px (v26 缩一丢丢), 5 条淡蓝紫月海 (椭圆同步缩) + 主渐变 85% 透明 */
@@ -57,14 +65,14 @@
   height: 60px;
   transform: translateX(-50%) scale(var(--wm-moon-scale));
   border-radius: 50%;
-  /* 月相表面 = 5 条淡蓝紫月海 (椭圆同步缩 26/30/28/24/22 → 24/28/26/22/20) + 主渐变 */
-  /* 5 个带状月海 (v26 椭圆尺寸同步缩) */
+  /* 月相表面 = 5 条冷蓝月海 (椭圆同步缩 26/30/28/24/22 → 24/28/26/22/20) + 主渐变 */
+  /* 5 个带状月海 (v26 椭圆尺寸同步缩 + v32 色相转向冷蓝 H=235-245) */
   background:
-    radial-gradient(ellipse 24px 8px at 30% 30%, oklch(0.65 0.06 262 / 0.4) 0%, transparent 60%),
-    radial-gradient(ellipse 28px 10px at 60% 25%, oklch(0.6 0.07 268 / 0.35) 0%, transparent 60%),
-    radial-gradient(ellipse 26px 9px at 35% 55%, oklch(0.65 0.06 258 / 0.45) 0%, transparent 60%),
-    radial-gradient(ellipse 22px 7px at 70% 60%, oklch(0.6 0.07 272 / 0.4) 0%, transparent 60%),
-    radial-gradient(ellipse 20px 7px at 45% 80%, oklch(0.65 0.06 265 / 0.35) 0%, transparent 60%),
+    radial-gradient(ellipse 24px 8px at 30% 30%, oklch(0.65 0.06 240 / 0.4) 0%, transparent 60%),
+    radial-gradient(ellipse 28px 10px at 60% 25%, oklch(0.6 0.07 245 / 0.35) 0%, transparent 60%),
+    radial-gradient(ellipse 26px 9px at 35% 55%, oklch(0.65 0.06 235 / 0.45) 0%, transparent 60%),
+    radial-gradient(ellipse 22px 7px at 70% 60%, oklch(0.6 0.07 245 / 0.4) 0%, transparent 60%),
+    radial-gradient(ellipse 20px 7px at 45% 80%, oklch(0.65 0.06 240 / 0.35) 0%, transparent 60%),
     /* 主渐变: 纯白月 (中心 L=1.0 → 边缘 L=0.92 85% → 透明 100%) */
     radial-gradient(circle at 50% 50%, var(--wm-moon-core) 0%, var(--wm-moon-edge) 85%, transparent 100%);
   /* 3 层 spread=0 连续高斯光晕: 近 9 + 中 26 + 远 75 (v26 完美档)
@@ -80,20 +88,20 @@
   animation: wm-moon-breathe 8s ease-in-out infinite;
 }
 
-/* 呼吸 - 3 层 spread=0 高斯 ±10% blur + ±6% alpha, 近晕 H=250 alpha 0.6 */
+/* 呼吸 - 3 层 spread=0 高斯 ±10% blur + ±6% alpha, v32 霜月 (近晕 H=235 alpha 0.6) */
 @keyframes wm-moon-breathe {
   0%,
   100% {
     box-shadow:
-      0 0 9px 0 oklch(0.85 0.05 250 / 0.6),
-      0 0 26px 0 oklch(0.8 0.05 255 / 0.5),
-      0 0 75px 0 oklch(0.75 0.05 272 / 0.45);
+      0 0 9px 0 oklch(0.85 0.06 235 / 0.6),
+      0 0 26px 0 oklch(0.8 0.06 240 / 0.5),
+      0 0 75px 0 oklch(0.75 0.05 250 / 0.45);
   }
   50% {
     box-shadow:
-      0 0 10px 0 oklch(0.85 0.05 250 / 0.66),
-      0 0 29px 0 oklch(0.8 0.05 255 / 0.55),
-      0 0 82px 0 oklch(0.75 0.05 272 / 0.495);
+      0 0 10px 0 oklch(0.85 0.06 235 / 0.66),
+      0 0 29px 0 oklch(0.8 0.06 240 / 0.55),
+      0 0 82px 0 oklch(0.75 0.05 250 / 0.495);
   }
 }
 
