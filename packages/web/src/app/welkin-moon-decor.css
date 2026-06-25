@@ -49,14 +49,16 @@
   min-height: 100vh;
 }
 
-/* 2. 星点 — 双层交错闪烁 (html::before + body::before)
- *    v38: 拆成两组星, 分到两个伪元素, animation-delay 错开半个周期
- *    v37 问题: 所有星在同一个伪元素上共享 opacity 动画 = 集体呼吸灯
- *    v38 方案:
- *      a) A组(html::before): 7颗星, animation-delay 0s
- *      b) B组(body::before): 8颗星, animation-delay -2s (半周期错相)
- *      c) A亮时B暗 → 交错闪烁 = 真正"各自闪"而非"集体呼吸"
- *      d) 保留 OLED 漂移动画, 两组各自漂移路径不同
+/* 2. 星点 — 三层交错闪烁 (html::before + html::after + body::before)
+ *    v39: 三组星, 三等分延迟, 任意时刻都有一亮一半一暗
+ *    v38 问题: 两组还是有点同步感
+ *    v39 方案:
+ *      可用伪元素: html::before, html::after, body::before (body::after=月亮)
+ *      A组(html::before): 5颗, delay 0s
+ *      B组(html::after):  5颗, delay -1.33s (三等分1/3)
+ *      C组(body::before): 5颗, delay -2.67s (三等分2/3)
+ *      4s周期三等分 → 任意时刻: 一组亮 + 一组半亮 + 一组暗 = 自然闪烁
+ *      保留 OLED 漂移, 三组各自路径不同
  */
 [data-theme="dark"][data-preset="welkin-moon"] html::before {
   content: "";
@@ -66,19 +68,13 @@
   z-index: 0;
   mix-blend-mode: screen;
   background-image:
-    /* A组: 亮星2颗 */
+    /* A组: 亮星1 + 中星2 + 小星2 */
     radial-gradient(4px 4px at 45% 12%, oklch(1 0.06 235), transparent 50%),
     radial-gradient(12px 12px at 45% 12%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
-    radial-gradient(4px 4px at 70% 88%, oklch(1 0.06 235), transparent 50%),
-    radial-gradient(12px 12px at 70% 88%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
-    /* A组: 中星3颗 */
     radial-gradient(3px 3px at 12% 18%, oklch(1 0.05 235), transparent 50%),
     radial-gradient(9px 9px at 12% 18%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
     radial-gradient(3px 3px at 52% 72%, oklch(1 0.05 235), transparent 50%),
     radial-gradient(9px 9px at 52% 72%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
-    radial-gradient(3px 3px at 88% 75%, oklch(1 0.05 235), transparent 50%),
-    radial-gradient(9px 9px at 88% 75%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
-    /* A组: 小星2颗 */
     radial-gradient(2px 2px at 27% 42%, oklch(1 0.04 240), transparent 50%),
     radial-gradient(6px 6px at 27% 42%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
     radial-gradient(2px 2px at 8% 92%, oklch(1 0.04 240), transparent 50%),
@@ -89,6 +85,32 @@
     wm-star-drift-a 90s ease-in-out infinite;
 }
 
+[data-theme="dark"][data-preset="welkin-moon"] html::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  mix-blend-mode: screen;
+  background-image:
+    /* B组: 亮星1 + 中星2 + 小星2 */
+    radial-gradient(4px 4px at 70% 88%, oklch(1 0.06 235), transparent 50%),
+    radial-gradient(12px 12px at 70% 88%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
+    radial-gradient(3px 3px at 35% 85%, oklch(1 0.05 235), transparent 50%),
+    radial-gradient(9px 9px at 35% 85%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
+    radial-gradient(3px 3px at 88% 75%, oklch(1 0.05 235), transparent 50%),
+    radial-gradient(9px 9px at 88% 75%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
+    radial-gradient(2px 2px at 63% 28%, oklch(1 0.04 240), transparent 50%),
+    radial-gradient(6px 6px at 63% 28%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
+    radial-gradient(2px 2px at 40% 35%, oklch(1 0.04 240), transparent 50%),
+    radial-gradient(6px 6px at 40% 35%, oklch(0.85 0.06 230 / 0.25), transparent 70%);
+  /* 三等分 1/3: -1.33s delay */
+  animation:
+    wm-star-bright 4s ease-in-out -1.33s infinite,
+    wm-star-focus 6.5s ease-in-out -2.17s infinite,
+    wm-star-drift-b 90s ease-in-out infinite;
+}
+
 [data-theme="dark"][data-preset="welkin-moon"] body::before {
   content: "";
   position: fixed;
@@ -97,30 +119,22 @@
   z-index: 0;
   mix-blend-mode: screen;
   background-image:
-    /* B组: 亮星2颗 */
+    /* C组: 亮星2 + 中星1 + 小星2 */
     radial-gradient(4px 4px at 18% 68%, oklch(1 0.06 235), transparent 50%),
     radial-gradient(12px 12px at 18% 68%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
     radial-gradient(4px 4px at 92% 30%, oklch(1 0.06 235), transparent 50%),
     radial-gradient(12px 12px at 92% 30%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
-    /* B组: 中星3颗 */
-    radial-gradient(3px 3px at 78% 55%, oklch(1 0.05 235), transparent 50%),
-    radial-gradient(9px 9px at 78% 55%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
-    radial-gradient(3px 3px at 35% 85%, oklch(1 0.05 235), transparent 50%),
-    radial-gradient(9px 9px at 35% 85%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
     radial-gradient(3px 3px at 22% 50%, oklch(1 0.05 235), transparent 50%),
     radial-gradient(9px 9px at 22% 50%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
-    /* B组: 小星3颗 */
-    radial-gradient(2px 2px at 63% 28%, oklch(1 0.04 240), transparent 50%),
-    radial-gradient(6px 6px at 63% 28%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
-    radial-gradient(2px 2px at 40% 35%, oklch(1 0.04 240), transparent 50%),
-    radial-gradient(6px 6px at 40% 35%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
+    radial-gradient(2px 2px at 78% 55%, oklch(1 0.04 240), transparent 50%),
+    radial-gradient(6px 6px at 78% 55%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
     radial-gradient(2px 2px at 55% 50%, oklch(1 0.04 240), transparent 50%),
     radial-gradient(6px 6px at 55% 50%, oklch(0.85 0.06 230 / 0.25), transparent 70%);
-  /* 关键: -2s delay = 半周期错相, A组亮时B组暗 */
+  /* 三等分 2/3: -2.67s delay */
   animation:
-    wm-star-bright 4s ease-in-out -2s infinite,
-    wm-star-focus 6.5s ease-in-out -3.25s infinite,
-    wm-star-drift-b 90s ease-in-out infinite;
+    wm-star-bright 4s ease-in-out -2.67s infinite,
+    wm-star-focus 6.5s ease-in-out -4.33s infinite,
+    wm-star-drift-c 90s ease-in-out infinite;
 }
 
 /* 明暗摆幅 0.3↔1.0 (70%, 周期4s) */
@@ -143,12 +157,20 @@
   75% { transform: translate(-10px, -8px); }
 }
 
-/* OLED 烧屏防护 — B组漂移 (周期90s, 路径不同于A组) */
+/* OLED 烧屏防护 — B组漂移 (周期90s, 路径不同于A/C) */
 @keyframes wm-star-drift-b {
   0%, 100% { transform: translate(0, 0); }
   25% { transform: translate(-7px, 6px); }
   50% { transform: translate(9px, -8px); }
   75% { transform: translate(5px, 11px); }
+}
+
+/* OLED 烧屏防护 — C组漂移 (周期90s, 路径不同于A/B) */
+@keyframes wm-star-drift-c {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(6px, 9px); }
+  50% { transform: translate(-9px, -4px); }
+  75% { transform: translate(-4px, 7px); }
 }
 
 /* 3. 卡片 / 浮起容器 — 微弱月光环（不刺眼，靠 box-shadow 多层 alpha） */
@@ -205,6 +227,7 @@
 /* 9. 减弱动效偏好 — 关闭星点动画 */
 @media (prefers-reduced-motion: reduce) {
   [data-theme="dark"][data-preset="welkin-moon"] html::before,
+  [data-theme="dark"][data-preset="welkin-moon"] html::after,
   [data-theme="dark"][data-preset="welkin-moon"] body::before {
     animation: none;
   }
