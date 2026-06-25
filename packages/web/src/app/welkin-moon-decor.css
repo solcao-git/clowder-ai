@@ -2,8 +2,8 @@
  * 空月之歌 (Song of the Welkin Moon) — 装饰层
  *
  * OKLCH 调色板在 themeStore.ts WELKIN_MOON preset 里管；本文件管"空灵 + 神秘"氛围：
- *   1. 夜空径向渐变（body 背景深靛）
- *   2. 星点粒子（::before 多 box-shadow）
+ *   1. 夜空径向渐变（html 背景深靛）
+ *   2. 星点粒子（body::before 多 radial-gradient）
  *   3. 卡片月光晕
  *   4. 标题微光（text-glow）
  *   5. 字体气质（letter-spacing 略宽）
@@ -14,9 +14,20 @@
  *           本文件 selector: [data-theme="dark"][data-preset="welkin-moon"]
  *
  * 色值沿用 preset 锚点（accentHue=230 / surfaceHue=268），改 preset 一处自动跟随。
+ *
+ * v34 (2026-06-25): B 组修复 - 修 solcao 反馈 B1 夜空渐变 + B2 星点看不到
+ *   根因: 双层遮盖 - body { bg: var(--bg-app) } + .console-shell { bg: var(--console-shell-bg) }
+ *         默认都是深色实心, 把 html 的夜空径向渐变 + body::before 星点全盖住了
+ *   修法: welkin-moon preset 下重写 --bg-app + --console-shell-bg 为 transparent
+ *         html 渐变透到 AppShell 根, body::before 星点透出来
+ *   保留: --cafe-surface-* 直引的 cards/panels 仍不透明 (内容可读性)
  */
 
 [data-theme="dark"][data-preset="welkin-moon"] {
+  /* v34 修复: 双层透明化让 html 夜空透出来 */
+  --bg-app: transparent;
+  --console-shell-bg: transparent;
+
   /* 锚点重声明（这里只用于 box-shadow / text-glow 的 alpha 计算，
    * 调色板生成仍由 buildCSS 负责）。 */
   --wm-accent: oklch(0.7 0.1 230);
@@ -25,7 +36,8 @@
   --wm-night-mid: oklch(0.16 0.03 268);
   --wm-night-soft: oklch(0.22 0.04 270);
 
-  /* 1. 夜空径向渐变 — 右上角作为"月亮方位"，向外扩散到深海蓝 */
+  /* 1. 夜空径向渐变 — 右上角作为"月亮方位"，向外扩散到深海蓝
+   *    注: data-preset 在 <html>, 所以这条 background 实际应用到 <html> 元素 */
   background: radial-gradient(
     ellipse 90% 60% at 85% 8%,
     var(--wm-night-soft) 0%,
