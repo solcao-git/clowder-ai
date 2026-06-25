@@ -49,10 +49,15 @@
   min-height: 100vh;
 }
 
-/* 2. 星点 — 单个 ::before 元素叠 15 颗星，radial-gradient 多位置
- *    v35: 星点增强 (1px→2px, alpha 显著提, 加 mix-blend-mode:screen 让亮星透出)
- *    根因: v34 只做了遮罩透明化, 但 1px 星点在 oklch alpha 0.35-0.75 下
- *          在任何显示器上都几乎不可见。物理机也看不到 = 不是 GPU 问题。 */
+/* 2. 星点 — body::before 叠星，radial-gradient 多位置
+ *    v36: 星点重做 — 3档尺寸(4/6/8px含光晕) + 双动画不同频率制造"闪烁"感
+ *    v35 问题: 2-3px 在高 DPI 屏上像灰尘; opacity 0.55↔0.85 幅度太小感知不到
+ *    v36 方案:
+ *      a) 3档星: 小星4px(白蓝微光) / 中星6px(核心+光晕) / 亮星8px(核心+宽光晕)
+ *      b) 双动画: opacity(4s) + filter:blur(6.5s) 两个不同周期叠加,
+ *         不规则明暗变化 = 感知上像"闪烁"而非"集体呼吸"
+ *      c) opacity 幅度: 0.3↔1.0 (70%摆幅, 远超 v35 的30%)
+ */
 [data-theme="dark"][data-preset="welkin-moon"] body::before {
   content: "";
   position: fixed;
@@ -61,32 +66,54 @@
   z-index: 0;
   mix-blend-mode: screen;
   background-image:
-    radial-gradient(2px 2px at 12% 18%, oklch(0.95 0.06 230 / 0.9), transparent 60%),
-    radial-gradient(2px 2px at 27% 42%, oklch(0.9 0.06 230 / 0.8), transparent 60%),
-    radial-gradient(3px 3px at 45% 12%, oklch(1 0.06 230 / 0.95), transparent 60%),
-    radial-gradient(2px 2px at 63% 28%, oklch(0.9 0.06 230 / 0.7), transparent 60%),
-    radial-gradient(2px 2px at 78% 55%, oklch(0.95 0.06 230 / 0.85), transparent 60%),
-    radial-gradient(3px 3px at 18% 68%, oklch(1 0.06 230 / 0.95), transparent 60%),
-    radial-gradient(2px 2px at 35% 85%, oklch(0.9 0.06 230 / 0.7), transparent 60%),
-    radial-gradient(2px 2px at 52% 72%, oklch(0.95 0.06 230 / 0.8), transparent 60%),
-    radial-gradient(3px 3px at 70% 88%, oklch(1 0.06 230 / 0.9), transparent 60%),
-    radial-gradient(2px 2px at 88% 75%, oklch(0.9 0.06 230 / 0.75), transparent 60%),
-    radial-gradient(2px 2px at 8% 92%, oklch(0.9 0.06 230 / 0.7), transparent 60%),
-    radial-gradient(3px 3px at 92% 30%, oklch(1 0.06 230 / 0.95), transparent 60%),
-    radial-gradient(2px 2px at 40% 35%, oklch(0.9 0.06 230 / 0.7), transparent 60%),
-    radial-gradient(2px 2px at 55% 50%, oklch(0.9 0.06 230 / 0.65), transparent 60%),
-    radial-gradient(3px 3px at 22% 50%, oklch(1 0.06 230 / 0.9), transparent 60%);
-  animation: wm-twinkle 8s ease-in-out infinite;
+    /* 亮星 (8px: 3px核心 + 8px光晕) — 4颗 */
+    radial-gradient(3px 3px at 45% 12%, oklch(1 0.06 235), transparent 50%),
+    radial-gradient(8px 8px at 45% 12%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
+    radial-gradient(3px 3px at 18% 68%, oklch(1 0.06 235), transparent 50%),
+    radial-gradient(8px 8px at 18% 68%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
+    radial-gradient(3px 3px at 92% 30%, oklch(1 0.06 235), transparent 50%),
+    radial-gradient(8px 8px at 92% 30%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
+    radial-gradient(3px 3px at 70% 88%, oklch(1 0.06 235), transparent 50%),
+    radial-gradient(8px 8px at 70% 88%, oklch(0.95 0.08 230 / 0.35), transparent 70%),
+    /* 中星 (6px: 2px核心 + 6px光晕) — 6颗 */
+    radial-gradient(2px 2px at 12% 18%, oklch(1 0.05 235), transparent 50%),
+    radial-gradient(6px 6px at 12% 18%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
+    radial-gradient(2px 2px at 78% 55%, oklch(1 0.05 235), transparent 50%),
+    radial-gradient(6px 6px at 78% 55%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
+    radial-gradient(2px 2px at 35% 85%, oklch(1 0.05 235), transparent 50%),
+    radial-gradient(6px 6px at 35% 85%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
+    radial-gradient(2px 2px at 52% 72%, oklch(1 0.05 235), transparent 50%),
+    radial-gradient(6px 6px at 52% 72%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
+    radial-gradient(2px 2px at 22% 50%, oklch(1 0.05 235), transparent 50%),
+    radial-gradient(6px 6px at 22% 50%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
+    radial-gradient(2px 2px at 88% 75%, oklch(1 0.05 235), transparent 50%),
+    radial-gradient(6px 6px at 88% 75%, oklch(0.9 0.07 230 / 0.3), transparent 70%),
+    /* 小星 (4px: 1.5px核心 + 4px微晕) — 5颗 */
+    radial-gradient(1.5px 1.5px at 27% 42%, oklch(1 0.04 240), transparent 50%),
+    radial-gradient(4px 4px at 27% 42%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
+    radial-gradient(1.5px 1.5px at 63% 28%, oklch(1 0.04 240), transparent 50%),
+    radial-gradient(4px 4px at 63% 28%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
+    radial-gradient(1.5px 1.5px at 8% 92%, oklch(1 0.04 240), transparent 50%),
+    radial-gradient(4px 4px at 8% 92%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
+    radial-gradient(1.5px 1.5px at 40% 35%, oklch(1 0.04 240), transparent 50%),
+    radial-gradient(4px 4px at 40% 35%, oklch(0.85 0.06 230 / 0.25), transparent 70%),
+    radial-gradient(1.5px 1.5px at 55% 50%, oklch(1 0.04 240), transparent 50%),
+    radial-gradient(4px 4px at 55% 50%, oklch(0.85 0.06 230 / 0.25), transparent 70%);
+  animation:
+    wm-star-bright 4s ease-in-out infinite,
+    wm-star-focus 6.5s ease-in-out infinite;
 }
 
-@keyframes wm-twinkle {
-  0%,
-  100% {
-    opacity: 0.85;
-  }
-  50% {
-    opacity: 0.55;
-  }
+/* 双动画 ①: 明暗摆幅 0.3↔1.0 (70%, 周期4s) */
+@keyframes wm-star-bright {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* 双动画 ②: 微聚焦漂移 (周期6.5s, 与①不可约, 叠加出不规则闪烁) */
+@keyframes wm-star-focus {
+  0%, 100% { filter: blur(0px); }
+  50% { filter: blur(0.6px); }
 }
 
 /* 3. 卡片 / 浮起容器 — 微弱月光环（不刺眼，靠 box-shadow 多层 alpha） */
