@@ -174,7 +174,7 @@ export function formatCliNotFoundError(command: string, platform: NodeJS.Platfor
       platform === 'win32'
         ? 'curl.exe -fsSL https://antigravity.google/cli/install.cmd -o install.cmd && install.cmd && del install.cmd'
         : 'curl -fsSL https://antigravity.google/cli/install.sh | bash',
-    kimi: 'uv tool install --python 3.13 kimi-cli',
+    kimi: 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash',
     opencode: 'npm install -g opencode',
   };
   const hint = installHints[command] ?? `install the "${command}" CLI`;
