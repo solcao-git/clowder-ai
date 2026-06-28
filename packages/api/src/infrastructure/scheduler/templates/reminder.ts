@@ -44,7 +44,7 @@ export const reminderTemplate: TaskTemplate = {
         async execute(_signal, subjectKey, ctx) {
           if (!ctx.deliver) throw new Error('deliver not available');
           const tid = subjectKey.startsWith('thread-') ? subjectKey.slice(7) : subjectKey;
-          const catId = targetCatId ?? ctx.assignedCatId ?? 'opus';
+          const catId = targetCatId ?? ctx.assignedCatId ?? 'nahida';
           const content = `${SCHEDULER_TRIGGER_PREFIX} ${message}`;
 
           // Store trigger message first → real messageId for InvocationRecord + retry

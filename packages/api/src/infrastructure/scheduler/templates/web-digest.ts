@@ -44,7 +44,7 @@ export const webDigestTemplate: TaskTemplate = {
             if (!ctx.invokeTrigger) {
               throw new Error('invokeTrigger not available for browser-required digest');
             }
-            const catId = targetCatId ?? ctx.assignedCatId ?? 'opus';
+            const catId = targetCatId ?? ctx.assignedCatId ?? 'nahida';
             const topicLine = topic ? `\n重点关注：${topic}` : '';
             const triggerContent =
               `${SCHEDULER_TRIGGER_PREFIX} 请使用 browser-automation 抓取并汇总网页内容\n` +
