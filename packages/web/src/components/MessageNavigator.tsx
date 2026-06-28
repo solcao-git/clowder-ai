@@ -4,7 +4,7 @@ import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { type CatData, formatCatName, useCatData } from '@/hooks/useCatData';
 import { useCoCreatorConfig } from '@/hooks/useCoCreatorConfig';
 import { catColorVar } from '@/lib/cat-slug';
-import { catPrimary } from '@/lib/color-defaults';
+import { CAT_COLORS } from '@/lib/color-defaults';
 import type { ChatMessage as ChatMessageData } from '@/stores/chatStore';
 import { scrollToMessage } from '@/utils/scrollToMessage';
 
@@ -21,17 +21,13 @@ const VARIANT_BASE_FALLBACK: Record<string, string> = {
   spark: 'codex',
   sonnet: 'opus',
   gemini25: 'gemini',
-  'dare-agent': 'dare',
 };
 
-// F056: use catPrimary() which falls back to UNKNOWN_CAT_COLOR — never throws
-// even if the catId isn't in CAT_COLORS (e.g. after the nahida/zhongli rename).
 const FALLBACK_CAT_META: Record<string, { label: string; color: string }> = {
-  opus: { label: '布偶猫', color: catPrimary('opus') },
-  codex: { label: '缅因猫', color: catPrimary('codex') },
-  gemini: { label: '暹罗猫', color: catPrimary('gemini') },
-  kimi: { label: '梵花猫', color: catPrimary('kimi') },
-  dare: { label: '狸花猫', color: catPrimary('dare') },
+  opus: { label: '布偶猫', color: CAT_COLORS.opus.primary },
+  codex: { label: '缅因猫', color: CAT_COLORS.codex.primary },
+  gemini: { label: '暹罗猫', color: CAT_COLORS.gemini.primary },
+  kimi: { label: '梵花猫', color: CAT_COLORS.kimi.primary },
 };
 
 function resolveFallbackCatMeta(catId: string): { baseId: string; label: string; color: string } | undefined {

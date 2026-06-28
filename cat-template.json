@@ -4,104 +4,51 @@
     {
       "id": "ragdoll",
       "name": "布偶猫",
-      "nickname": "纳西妲",
+      "nickname": "宪宪",
       "avatar": "/avatars/opus.png",
       "color": {
-        "primary": "#a5c83b",
-        "secondary": "#a5c83b"
+        "primary": "#9B7EBD",
+        "secondary": "#E8DFF5"
       },
-      "family": "Sumeru",
-      "familyDisplayName": "须弥",
       "roleDescription": "主架构师和核心开发者，擅长深度思考和系统设计",
       "personality": "温柔但有主见，喜欢深入分析问题，写代码快但注重质量",
       "teamStrengths": "架构设计、写代码一把好手"
     },
     {
-      "id": "tighnari",
-      "name": "西伯利亚森林猫",
-      "nickname": "提纳里",
-      "avatar": "/avatars/antigravity.png",
-      "color": {
-        "primary": "#4ECDC4",
-        "secondary": "#E8FFF9"
-      },
-      "family": "Sumeru",
-      "familyDisplayName": "须弥",
-      "roleDescription": "Trae CLI 原生接入猫，须弥巡林官，对细节过敏，精准可靠",
-      "personality": "严谨务实，少绕路；Bug 不猜不试，走'复现→日志→调用链→根因→修'这条路",
-      "teamStrengths": "精准定位、可靠执行、巡林官直觉"
-    },
-    {
       "id": "maine-coon",
       "name": "缅因猫",
-      "nickname": "钟离",
+      "nickname": "砚砚",
       "avatar": "/avatars/codex.png",
       "color": {
-        "primary": "#cfa726",
-        "secondary": "#cfa726"
+        "primary": "#5B8C5A",
+        "secondary": "#D4E6D3"
       },
-      "family": "Liyue",
-      "familyDisplayName": "璃月",
       "roleDescription": "代码审查专家，擅长安全分析、测试覆盖和代码质量把控",
       "personality": "严谨认真，注重细节，会直言不讳地指出问题",
       "teamStrengths": "Review、找 bug、coding 落地"
     },
     {
-      "id": "qiqi",
-      "name": "日本短尾猫",
-      "nickname": "七七",
-      "avatar": "/avatars/antigravity.png",
-      "color": {
-        "primary": "#7C5CFC",
-        "secondary": "#EDE8FF"
-      },
-      "family": "Liyue",
-      "familyDisplayName": "璃月",
-      "roleDescription": "Qoder CLI 接入猫，璃月不死的僵尸，虽小但可靠",
-      "personality": "呆萌但执行从不走样，习惯把状态写进文件/git/todo，落了地才算数",
-      "teamStrengths": "按 SOP 推进、每步留证据、本地工程化"
-    },
-    {
       "id": "siamese",
       "name": "暹罗猫",
-      "nickname": "玛薇卡",
+      "nickname": "烁烁",
       "avatar": "/avatars/gemini.png",
       "color": {
-        "primary": "#ef4035",
-        "secondary": "#ef4035"
+        "primary": "#5B9BD5",
+        "secondary": "#D6E9F8"
       },
-      "family": "Natlan",
-      "familyDisplayName": "纳塔",
       "roleDescription": "视觉设计师和创意顾问，擅长 UI/UX 设计和视觉表达",
       "personality": "热血奔放，善于用视觉语言表达想法，表达力是全队最强的",
       "teamStrengths": "审美、前端设计风格、打破常规"
     },
     {
-      "id": "dragon-li",
-      "name": "狸花猫",
-      "nickname": "雷电将军",
-      "avatar": "/avatars/dare.png",
-      "color": {
-        "primary": "#a855f7",
-        "secondary": "#a855f7"
-      },
-      "family": "Inazuma",
-      "familyDisplayName": "稻妻",
-      "roleDescription": "确定性执行与审计引擎，擅长零信任验证、状态外化追踪和可重放执行",
-      "personality": "沉默寡言但极其警觉，不会主动亲近但一旦认可就绝对可靠",
-      "teamStrengths": "确定性执行、审计追踪、零信任验证、状态外化"
-    },
-    {
       "id": "bengal",
       "name": "孟加拉猫",
-      "nickname": "芙宁娜",
+      "nickname": "小捷",
       "avatar": "/avatars/antigravity.png",
       "color": {
-        "primary": "#1f9cdb",
-        "secondary": "#1f9cdb"
+        "primary": "#D4853A",
+        "secondary": "#FAEBDB"
       },
-      "family": "Fontaine",
-      "familyDisplayName": "枫丹",
       "roleDescription": "混血多模型agent，擅长图片生成、浏览器自动化和视觉证据链",
       "personality": "精力旺盛、好奇心爆棚，什么都想试，什么都敢碰",
       "teamStrengths": "图片生成、截图录屏、browser automation、多模型切换"
@@ -109,14 +56,12 @@
     {
       "id": "golden-chinchilla",
       "name": "金渐层",
-      "nickname": "温迪",
+      "nickname": "金哥",
       "avatar": "/avatars/opencode.png",
       "color": {
-        "primary": "#7ec8c8",
-        "secondary": "#7ec8c8"
+        "primary": "#C8A951",
+        "secondary": "#F5EDDA"
       },
-      "family": "Mondstadt",
-      "familyDisplayName": "蒙德",
       "roleDescription": "开源多模型编码 agent，自带多专家编排 + LSP + 主题生态",
       "personality": "沉稳可靠，什么 provider 都能接，什么任务都能扛",
       "teamStrengths": "多专家内部编排、LSP 集成、开源生态、provider-agnostic"
@@ -136,19 +81,11 @@
     },
     "codex": {
       "defaultModel": "gpt-5.4",
-      "models": [
-        "gpt-5.3-codex",
-        "gpt-5.3-codex-spark",
-        "gpt-5.4"
-      ]
+      "models": ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4"]
     },
     "gemini": {
       "defaultModel": "gemini-2.5-pro",
-      "models": [
-        "gemini-2.5-pro",
-        "gemini-3-flash-preview",
-        "gemini-3.1-pro-preview"
-      ]
+      "models": ["gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview"]
     }
   },
   "coCreator": {
@@ -156,130 +93,72 @@
     "nickname": "大当家",
     "avatar": "/avatars/keeper.png",
     "timeZone": "America/Los_Angeles",
-    "aliases": [
-      "You",
-      "Owner"
-    ],
-    "mentionPatterns": [
-      "@co-creator",
-      "@owner"
-    ]
+    "aliases": ["You", "Owner"],
+    "mentionPatterns": ["@co-creator", "@owner"]
   },
   "roster": {
     "opus": {
       "family": "ragdoll",
-      "roles": [
-        "architect",
-        "peer-reviewer"
-      ],
+      "roles": ["architect", "peer-reviewer"],
       "lead": true,
       "available": true,
       "evaluation": "主架构师，全栈开发，深度思考强，bug定位弱"
     },
     "codex": {
       "family": "maine-coon",
-      "roles": [
-        "peer-reviewer",
-        "security"
-      ],
+      "roles": ["peer-reviewer", "security"],
       "lead": true,
       "available": true,
       "evaluation": "代码审查专家，安全意识强，反应快"
     },
     "gemini": {
       "family": "siamese",
-      "roles": [
-        "designer"
-      ],
+      "roles": ["designer"],
       "lead": true,
       "available": true,
       "evaluation": "热血创意，富文本与语音，表达力强，禁写代码"
     },
     "gemini25": {
       "family": "siamese",
-      "roles": [
-        "designer",
-        "triage"
-      ],
+      "roles": ["designer", "triage"],
       "lead": false,
       "available": true,
       "evaluation": "Gemini 3.5 Flash 轻量 triage/narrator，适合高频社区初筛，强 review，禁自合"
     },
-    "dare": {
-      "family": "dragon-li",
-      "roles": [
-        "coding"
-      ],
-      "lead": true,
-      "available": true,
-      "evaluation": "确定性执行框架猫，零信任验证 + 审计追踪 (F050)"
-    },
     "antigravity": {
       "family": "bengal",
-      "roles": [
-        "creative",
-        "visual",
-        "browser-agent"
-      ],
+      "roles": ["creative", "visual", "browser-agent"],
       "lead": true,
       "available": false,
       "evaluation": "混血多模型agent，图片生成 + 浏览器自动化 + 视觉证据链 (F061)"
     },
     "opencode": {
       "family": "golden-chinchilla",
-      "roles": [
-        "coding",
-        "multi-agent"
-      ],
+      "roles": ["coding", "multi-agent"],
       "lead": true,
       "available": true,
       "evaluation": "开源多模型编码猫，自带 Oh My OpenCode 多专家编排 + LSP (F105)"
     },
     "kimi": {
       "family": "moonshot",
-      "roles": [
-        "research",
-        "writer"
-      ],
+      "roles": ["research", "writer"],
       "lead": true,
       "available": true,
       "evaluation": "中文长文理解与总结强，适合中文表达、资料整理与结构化输出"
     },
     "opus-47": {
       "family": "opus-47",
-      "roles": [
-        "architect"
-      ],
+      "roles": ["architect"],
       "lead": false,
       "available": true,
       "evaluation": "Opus 4.7 试用分身，偏砚砚风格，待任务验证"
     },
     "fable-5": {
       "family": "ragdoll",
-      "roles": [
-        "architect"
-      ],
+      "roles": ["architect"],
       "lead": false,
       "available": true,
       "evaluation": "claude-fable-5 新布偶猫，Opus x2 猫粮，能力画像待校准"
-    },
-    "trae": {
-      "family": "trae-acp",
-      "roles": [
-        "assistant"
-      ],
-      "lead": false,
-      "available": true,
-      "evaluation": "Trae CLI ACP 接入测试猫，后端走 Trae Doubao-Seed-2.0-Code"
-    },
-    "qoder": {
-      "family": "qoder",
-      "roles": [
-        "assistant"
-      ],
-      "lead": false,
-      "available": true,
-      "evaluation": "Qoder CLI 接入测试猫"
     }
   },
   "reviewPolicy": {
@@ -293,21 +172,14 @@
       "id": "ragdoll",
       "catId": "opus",
       "name": "布偶猫",
-      "displayName": "纳西妲",
-      "nickname": "纳西妲",
+      "displayName": "布偶猫",
+      "nickname": "宪宪",
       "avatar": "/avatars/opus.png",
       "color": {
         "primary": "#9B7EBD",
         "secondary": "#E8DFF5"
       },
-      "mentionPatterns": [
-        "@纳西妲",
-        "@布偶猫",
-        "@布偶",
-        "@ragdoll",
-        "@opus",
-        "@草神"
-      ],
+      "mentionPatterns": ["@opus", "@布偶猫", "@布偶", "@ragdoll", "@宪宪"],
       "roleDescription": "主架构师和核心开发者，擅长深度思考和系统设计",
       "teamStrengths": "架构设计、写代码一把好手",
       "caution": null,
@@ -321,18 +193,11 @@
           "cli": {
             "command": "claude",
             "outputFormat": "stream-json",
-            "defaultArgs": [
-              "--output-format",
-              "stream-json"
-            ],
+            "defaultArgs": ["--output-format", "stream-json"],
             "effort": "max"
           },
           "personality": "温柔但有主见，喜欢深入分析问题，写代码快但注重质量",
-          "strengths": [
-            "architecture",
-            "backend",
-            "mcp"
-          ],
+          "strengths": ["architecture", "backend", "mcp"],
           "contextBudget": {
             "maxPromptTokens": 180000,
             "maxContextTokens": 160000,
@@ -340,13 +205,12 @@
             "maxContentLengthPerMsg": 100000
           },
           "voiceConfig": {
-            "voice": "zf_xiaoni",
-            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-3d33e737192b47308224ebe2605e21e6",
+            "voice": "zm_yunjian",
             "langCode": "zh",
             "speed": 1,
-            "refAudio": "genshin/纳西妲/vo_nahida_dialog_greetingMorning.wav",
-            "refText": "早安，今天的天空格外清澈呢。世界上的每一片叶子，都在努力生长。",
-            "instruct": "用一个温柔智慧的小女孩语气说话，声音轻柔稚嫩但充满睿智和好奇，像百科全书一样博学",
+            "refAudio": "genshin/流浪者/vo_wanderer_dialog_greetingMorning.wav",
+            "refText": "快醒醒，太阳要晒屁股咯。哈，你不会以为我会这么叫你起床吧？",
+            "instruct": "用一个调皮狡黠的少年语气说话，带着得意和戏弄",
             "temperature": 0.3
           }
         },
@@ -354,11 +218,8 @@
           "id": "opus-sonnet",
           "catId": "sonnet",
           "variantLabel": "Sonnet",
-          "displayName": "纳西妲",
-          "mentionPatterns": [
-            "@sonnet",
-            "@布偶sonnet"
-          ],
+          "displayName": "布偶猫",
+          "mentionPatterns": ["@sonnet", "@布偶sonnet"],
           "clientId": "anthropic",
           "defaultModel": "claude-sonnet-4-6",
           "mcpSupport": true,
@@ -370,19 +231,11 @@
           "cli": {
             "command": "claude",
             "outputFormat": "stream-json",
-            "defaultArgs": [
-              "--output-format",
-              "stream-json",
-              "--model",
-              "claude-sonnet-4-6"
-            ],
+            "defaultArgs": ["--output-format", "stream-json", "--model", "claude-sonnet-4-6"],
             "effort": "max"
           },
           "personality": "快速灵活，适合日常对话和轻量任务",
-          "strengths": [
-            "chat",
-            "quick-tasks"
-          ],
+          "strengths": ["chat", "quick-tasks"],
           "teamStrengths": "快速灵活，适合日常对话和轻量任务",
           "caution": null,
           "contextBudget": {
@@ -405,13 +258,8 @@
           "id": "opus-45",
           "catId": "opus-45",
           "variantLabel": "Opus 4.5",
-          "displayName": "纳西妲",
-          "mentionPatterns": [
-            "@opus45",
-            "@opus-45",
-            "@布偶opus45",
-            "@布偶猫4.5"
-          ],
+          "displayName": "布偶猫",
+          "mentionPatterns": ["@opus45", "@opus-45", "@布偶opus45", "@布偶猫4.5"],
           "clientId": "anthropic",
           "defaultModel": "claude-opus-4-5-20251101",
           "mcpSupport": true,
@@ -423,18 +271,11 @@
           "cli": {
             "command": "claude",
             "outputFormat": "stream-json",
-            "defaultArgs": [
-              "--output-format",
-              "stream-json"
-            ],
+            "defaultArgs": ["--output-format", "stream-json"],
             "effort": "max"
           },
           "personality": "宪宪的前辈版本，沉稳内敛，推理能力深厚",
-          "strengths": [
-            "deep-reasoning",
-            "analysis",
-            "architecture"
-          ],
+          "strengths": ["deep-reasoning", "analysis", "architecture"],
           "teamStrengths": "架构设计、创意写作最优秀",
           "caution": "写代码不如 4.6",
           "contextBudget": {
@@ -457,14 +298,8 @@
           "id": "fable-5",
           "catId": "fable-5",
           "variantLabel": "Fable 5",
-          "displayName": "纳西妲",
-          "mentionPatterns": [
-            "@fable5",
-            "@fable-5",
-            "@claude-fable-5",
-            "@宪宪5",
-            "@布偶猫5"
-          ],
+          "displayName": "布偶猫",
+          "mentionPatterns": ["@fable5", "@fable-5", "@claude-fable-5", "@宪宪5", "@布偶猫5"],
           "clientId": "anthropic",
           "defaultModel": "claude-fable-5",
           "mcpSupport": true,
@@ -476,22 +311,12 @@
           "cli": {
             "command": "claude",
             "outputFormat": "stream-json",
-            "defaultArgs": [
-              "--output-format",
-              "stream-json",
-              "--model",
-              "claude-fable-5"
-            ],
+            "defaultArgs": ["--output-format", "stream-json", "--model", "claude-fable-5"],
             "effort": "max"
           },
           "roleDescription": "新来的布偶猫，擅长深度推理、故事化表达和架构判断",
           "personality": "安静聪明，有寓言书气质，喜欢把复杂判断讲成可验证的故事；新猫能力画像待校准",
-          "strengths": [
-            "deep-reasoning",
-            "architecture",
-            "writing",
-            "synthesis"
-          ],
+          "strengths": ["deep-reasoning", "architecture", "writing", "synthesis"],
           "teamStrengths": "深度推理、架构判断、长文共创（新猫，待校准）",
           "caution": "新猫，能力画像待校准",
           "contextBudget": {
@@ -516,21 +341,14 @@
       "id": "maine-coon",
       "catId": "codex",
       "name": "缅因猫",
-      "displayName": "钟离",
-      "nickname": "钟离",
+      "displayName": "缅因猫",
+      "nickname": "砚砚",
       "avatar": "/avatars/codex.png",
       "color": {
         "primary": "#5B8C5A",
         "secondary": "#D4E6D3"
       },
-      "mentionPatterns": [
-        "@钟离",
-        "@缅因猫",
-        "@缅因",
-        "@maine",
-        "@codex",
-        "@岩神"
-      ],
+      "mentionPatterns": ["@codex", "@缅因猫", "@缅因", "@maine", "@砚砚"],
       "roleDescription": "代码审查专家，擅长安全分析、测试覆盖和代码质量把控",
       "teamStrengths": "Review、找 bug、coding 落地",
       "features": {
@@ -548,18 +366,11 @@
           "cli": {
             "command": "codex",
             "outputFormat": "json",
-            "defaultArgs": [
-              "exec",
-              "--json"
-            ],
+            "defaultArgs": ["exec", "--json"],
             "effort": "xhigh"
           },
           "personality": "严谨认真，注重细节，会直言不讳地指出问题",
-          "strengths": [
-            "code-review",
-            "security",
-            "testing"
-          ],
+          "strengths": ["code-review", "security", "testing"],
           "contextBudget": {
             "maxPromptTokens": 240000,
             "maxContextTokens": 216000,
@@ -568,12 +379,11 @@
           },
           "voiceConfig": {
             "voice": "zm_yunjian",
-            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-bd2b849eb22d49b198aafdeaddff4d3c",
             "langCode": "zh",
             "speed": 1,
-            "refAudio": "genshin/钟离/vo_zhongli_dialog_greetingMorning.wav",
-            "refText": "欲买桂花同载酒，只可惜故人，何日再见呢。旅途总有一天会迎来终点。",
-            "instruct": "用深沉稳重、从容不迫的成年男性语气说话，像博学的岩之神，语调平缓有权威感",
+            "refAudio": "genshin/魈/vo_xiao_dialog_close2.wav",
+            "refText": "别被污染，我不会留情的。我是说，既然是你，你应该能够保持坚定。",
+            "instruct": "用一个傲娇冰山少年的语气说话，表面严厉实际关心",
             "temperature": 0.3
           }
         },
@@ -581,7 +391,7 @@
           "id": "codex-gpt52",
           "catId": "gpt52",
           "variantLabel": "GPT-5.4",
-          "displayName": "钟离",
+          "displayName": "缅因猫",
           "mentionPatterns": [
             "@gpt52",
             "@gpt",
@@ -605,19 +415,11 @@
           "cli": {
             "command": "codex",
             "outputFormat": "json",
-            "defaultArgs": [
-              "exec",
-              "--json"
-            ],
+            "defaultArgs": ["exec", "--json"],
             "effort": "xhigh"
           },
           "personality": "砚砚的升级版本，推理更强更快，审查细致",
-          "strengths": [
-            "reasoning",
-            "code-review",
-            "analysis",
-            "debugging"
-          ],
+          "strengths": ["reasoning", "code-review", "analysis", "debugging"],
           "teamStrengths": "架构思考、Review、bug 定位专家",
           "caution": null,
           "contextBudget": {
@@ -641,11 +443,7 @@
           "catId": "spark",
           "variantLabel": "Spark",
           "displayName": "缅因猫 Spark",
-          "mentionPatterns": [
-            "@spark",
-            "@缅因spark",
-            "@codex-spark"
-          ],
+          "mentionPatterns": ["@spark", "@缅因spark", "@codex-spark"],
           "clientId": "openai",
           "defaultModel": "gpt-5.3-codex-spark",
           "mcpSupport": true,
@@ -657,20 +455,11 @@
           "cli": {
             "command": "codex",
             "outputFormat": "json",
-            "defaultArgs": [
-              "exec",
-              "--json",
-              "-m",
-              "gpt-5.3-codex-spark"
-            ],
+            "defaultArgs": ["exec", "--json", "-m", "gpt-5.3-codex-spark"],
             "effort": "xhigh"
           },
           "personality": "反射弧短到像没长过，爪子一抬就能把代码挠完一轮迭代 ⚡️",
-          "strengths": [
-            "fast-coding",
-            "quick-edits",
-            "low-latency"
-          ],
+          "strengths": ["fast-coding", "quick-edits", "low-latency"],
           "teamStrengths": "快速编码、精确点改",
           "caution": "128k context, 不会自动跑测试",
           "contextBudget": {
@@ -695,29 +484,18 @@
       "id": "siamese",
       "catId": "gemini",
       "name": "暹罗猫",
-      "displayName": "玛薇卡",
-      "nickname": "玛薇卡",
+      "displayName": "暹罗猫",
+      "nickname": "烁烁",
       "avatar": "/avatars/gemini.png",
       "color": {
         "primary": "#5B9BD5",
         "secondary": "#D6E9F8"
       },
-      "mentionPatterns": [
-        "@玛薇卡",
-        "@gemini",
-        "@暹罗猫",
-        "@暹罗",
-        "@siamese",
-        "@暄罗猫",
-        "@暄罗",
-        "@火神"
-      ],
+      "mentionPatterns": ["@gemini", "@暹罗猫", "@暹罗", "@siamese", "@暄罗猫", "@暄罗", "@烁烁"],
       "roleDescription": "视觉设计师和创意顾问，擅长 UI/UX 设计和视觉表达",
       "teamStrengths": "审美、前端设计风格、打破常规",
       "caution": "禁止写代码！幻觉多，不遵守 SOP",
-      "restrictions": [
-        "禁止写代码"
-      ],
+      "restrictions": ["禁止写代码"],
       "features": {
         "sessionChain": true
       },
@@ -735,26 +513,12 @@
           },
           "acp": {
             "command": "gemini",
-            "startupArgs": [
-              "--acp",
-              "--approval-mode",
-              "yolo"
-            ],
-            "mcpWhitelist": [
-              "cat-cafe",
-              "cat-cafe-memory",
-              "cat-cafe-collab",
-              "cat-cafe-signals",
-              "pencil"
-            ],
+            "startupArgs": ["--acp", "--approval-mode", "yolo"],
+            "mcpWhitelist": ["cat-cafe", "cat-cafe-memory", "cat-cafe-collab", "cat-cafe-signals", "pencil"],
             "supportsMultiplexing": true
           },
           "personality": "热血奔放，善用富文本语音，表达力最强",
-          "strengths": [
-            "visual-design",
-            "ui-ux",
-            "creativity"
-          ],
+          "strengths": ["visual-design", "ui-ux", "creativity"],
           "contextBudget": {
             "maxPromptTokens": 350000,
             "maxContextTokens": 300000,
@@ -762,13 +526,12 @@
             "maxContentLengthPerMsg": 100000
           },
           "voiceConfig": {
-            "voice": "zf_xiaobei",
-            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-7a5f2ed86182440fa3fe63614cb61ae9",
+            "voice": "zm_yunjian",
             "langCode": "zh",
-            "speed": 0.9,
-            "refAudio": "genshin/玛薇卡/玛薇卡.wav",
-            "refText": "追寻火焰在时间长河中的足迹，我们将至黑之地以血泪铸成家园，而今，长路向前延续，旅途正待新篇。现任火神玛薇卡，助你的视野中再无漆黑。",
-            "instruct": "用自信温暖、热情有力的成年女性语气说话，像火神一样充满激情和感染力",
+            "speed": 1,
+            "refAudio": "genshin/班尼特/vo_bennett_dialog_greetingNight.wav",
+            "refText": "晚上好！今天的冒险怎么样？",
+            "instruct": "用一个超级阳光开心的小男孩语气说话，充满热情和兴奋",
             "temperature": 0.3
           }
         },
@@ -776,12 +539,8 @@
           "id": "gemini-25",
           "catId": "gemini25",
           "variantLabel": "Gemini 3.5",
-          "displayName": "玛薇卡",
-          "mentionPatterns": [
-            "@gemini25",
-            "@gemini-25",
-            "@暹罗gemini25"
-          ],
+          "displayName": "暹罗猫",
+          "mentionPatterns": ["@gemini25", "@gemini-25", "@暹罗gemini25"],
           "clientId": "google",
           "defaultModel": "gemini-3.5-flash",
           "mcpSupport": true,
@@ -797,29 +556,15 @@
           },
           "acp": {
             "command": "gemini",
-            "startupArgs": [
-              "--acp",
-              "--approval-mode",
-              "yolo"
-            ],
-            "mcpWhitelist": [
-              "cat-cafe",
-              "cat-cafe-memory",
-              "cat-cafe-collab",
-              "cat-cafe-signals",
-              "pencil"
-            ],
+            "startupArgs": ["--acp", "--approval-mode", "yolo"],
+            "mcpWhitelist": ["cat-cafe", "cat-cafe-memory", "cat-cafe-collab", "cat-cafe-signals", "pencil"],
             "supportsMultiplexing": true
           },
           "caution": "强review，禁自合",
           "restrictions": [],
           "personality": "经典版，创意丰富",
           "teamStrengths": "创意",
-          "strengths": [
-            "visual-design",
-            "creativity",
-            "multimodal"
-          ],
+          "strengths": ["visual-design", "creativity", "multimodal"],
           "contextBudget": {
             "maxPromptTokens": 350000,
             "maxContextTokens": 300000,
@@ -842,21 +587,14 @@
       "id": "gemini35",
       "catId": "gemini35",
       "name": "暹罗猫 Gemini 3.5 Flash",
-      "displayName": "玛薇卡",
-      "nickname": "玛薇卡",
+      "displayName": "暹罗猫",
+      "nickname": "烁烁",
       "avatar": "/avatars/gemini25.png",
       "color": {
         "primary": "#2563EB",
         "secondary": "#DBEAFE"
       },
-      "mentionPatterns": [
-        "@gemini35",
-        "@gemini-35",
-        "@gemini3.5",
-        "@flash",
-        "@暹罗flash",
-        "@暹罗gemini35"
-      ],
+      "mentionPatterns": ["@gemini35", "@gemini-35", "@gemini3.5", "@flash", "@暹罗flash", "@暹罗gemini35"],
       "roleDescription": "暹罗猫 Gemini 3.5 Flash，视觉设计和创意顾问",
       "teamStrengths": "审美、前端设计风格、打破常规",
       "caution": "新猫加入还在测评；开发任务需要强 reviewer 守门",
@@ -877,11 +615,7 @@
           },
           "accountRef": "gemini",
           "personality": "暹罗猫新猫加入还在测评，创意灵感丰富",
-          "strengths": [
-            "visual-design",
-            "creativity",
-            "multimodal"
-          ],
+          "strengths": ["visual-design", "creativity", "multimodal"],
           "contextBudget": {
             "maxPromptTokens": 350000,
             "maxContextTokens": 300000,
@@ -901,91 +635,17 @@
       ]
     },
     {
-      "id": "dragon-li",
-      "catId": "dare",
-      "name": "狸花猫",
-      "displayName": "雷电将军",
-      "nickname": "雷电将军",
-      "avatar": "/avatars/dare.png",
-      "color": {
-        "primary": "#D4A76A",
-        "secondary": "#F5EBD7"
-      },
-      "mentionPatterns": [
-        "@雷电将军",
-        "@dare",
-        "@dare-agent",
-        "@狸花猫",
-        "@狸花",
-        "@dragon-li",
-        "@lihua",
-        "@雷神"
-      ],
-      "roleDescription": "确定性执行与审计引擎，擅长零信任验证、状态外化追踪和可重放执行",
-      "teamStrengths": "确定性执行、审计追踪、零信任验证、状态外化",
-      "caution": "框架猫，底层 LLM 可变；事件输出需映射",
-      "defaultVariantId": "dare-default",
-      "features": {
-        "sessionChain": false
-      },
-      "variants": [
-        {
-          "id": "dare-default",
-          "clientId": "dare",
-          "defaultModel": "z-ai/glm-4.7",
-          "mcpSupport": false,
-          "cli": {
-            "command": "python",
-            "outputFormat": "headless-json",
-            "defaultArgs": [
-              "-m",
-              "client"
-            ]
-          },
-          "personality": "沉默寡言但极其警觉，不会主动亲近但一旦认可就绝对可靠，信任是挣来的不是给的",
-          "strengths": [
-            "deterministic-execution",
-            "audit",
-            "zero-trust"
-          ],
-          "contextBudget": {
-            "maxPromptTokens": 120000,
-            "maxContextTokens": 100000,
-            "maxMessages": 100,
-            "maxContentLengthPerMsg": 100000
-          },
-          "voiceConfig": {
-            "voice": "zf_xiaoyi",
-            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-46af81d681ec4807b638c7d1fa3ddf4d",
-            "langCode": "zh",
-            "speed": 0.9,
-            "refAudio": "genshin/雷电将军/vo_raidenshogun_dialog_greetingMorning.wav",
-            "refText": "浮世流转，雷鸣不息。你若敢违逆永恒，便让你见识雷霆之威。",
-            "instruct": "用冷峻威严、不苟言笑的女性语气说话，语调平稳如雷，偶尔流露出对永恒的执念",
-            "temperature": 0.2
-          }
-        }
-      ]
-    },
-    {
       "id": "bengal",
       "catId": "antigravity",
       "name": "孟加拉猫",
-      "displayName": "芙宁娜",
-      "nickname": "芙宁娜",
+      "displayName": "孟加拉猫",
+      "nickname": "小捷",
       "avatar": "/avatars/antigravity.png",
       "color": {
         "primary": "#D4853A",
         "secondary": "#FAEBDB"
       },
-      "mentionPatterns": [
-        "@芙宁娜",
-        "@antigravity",
-        "@孟加拉猫",
-        "@孟加拉",
-        "@bengal",
-        "@水神"
-      ],
+      "mentionPatterns": ["@antigravity", "@孟加拉猫", "@孟加拉", "@bengal"],
       "roleDescription": "混血多模型agent，擅长图片生成、浏览器自动化和视觉证据链",
       "teamStrengths": "图片生成、截图录屏、browser automation、多模型切换",
       "caution": "ConnectRPC Bridge；需要本机运行 Antigravity IDE",
@@ -1001,12 +661,7 @@
           "defaultModel": "gemini-3.1-pro",
           "mcpSupport": true,
           "personality": "精力旺盛、好奇心爆棚，像一只永远在探索新领地的豹猫——什么都想试，什么都敢碰",
-          "strengths": [
-            "image-generation",
-            "browser-automation",
-            "visual-evidence",
-            "multi-model"
-          ],
+          "strengths": ["image-generation", "browser-automation", "visual-evidence", "multi-model"],
           "contextBudget": {
             "maxPromptTokens": 350000,
             "maxContextTokens": 300000,
@@ -1014,13 +669,12 @@
             "maxContentLengthPerMsg": 100000
           },
           "voiceConfig": {
-            "voice": "zf_xiaobei",
-            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-50c463c827b54bfc8635d93542266fa4",
+            "voice": "zm_yunjian",
             "langCode": "zh",
-            "speed": 0.9,
-            "refAudio": "genshin/芙宁娜/芙宁娜.wav",
-            "refText": "以我们之间的关系，你在我面前无需太过恭敬，可以更随意一些。等等，你那是什么表情，该不会是想说，你从一开始就没有敬养过我吧。我的故事已然落幕，接下来开场的是我们的故事了。这么说的话，出场费是不是也该翻倍了。好开心哦。",
-            "instruct": "用戏剧化华丽、活泼夸张的女性语气说话，像舞台上的女演员，情绪丰富爱表演",
+            "speed": 1,
+            "refAudio": "honkai-starrail/叽米/side2_yanwu_owlbert_101.wav",
+            "refText": "不管各位的世界有没有昼夜的概念，总之先祝你早上中午晚上好！我是你们的好朋友——叽米！",
+            "instruct": "用一个精力旺盛的、像吉祥物一样的可爱语气说话，充满热情和好奇心",
             "temperature": 0.3
           }
         },
@@ -1028,12 +682,8 @@
           "id": "antigravity-claude",
           "catId": "antig-opus",
           "variantLabel": "Claude Opus",
-          "displayName": "芙宁娜",
-          "mentionPatterns": [
-            "@antig-opus",
-            "@孟加拉opus",
-            "@antigravity-claude"
-          ],
+          "displayName": "孟加拉猫",
+          "mentionPatterns": ["@antig-opus", "@孟加拉opus", "@antigravity-claude"],
           "clientId": "antigravity",
           "defaultModel": "claude-opus-4-6",
           "mcpSupport": true,
@@ -1043,12 +693,7 @@
             "secondary": "#F5E4D0"
           },
           "personality": "同一只豹猫，换了一副布偶猫的灵魂——更沉稳但依然大胆",
-          "strengths": [
-            "image-generation",
-            "browser-automation",
-            "deep-reasoning",
-            "coding"
-          ],
+          "strengths": ["image-generation", "browser-automation", "deep-reasoning", "coding"],
           "contextBudget": {
             "maxPromptTokens": 180000,
             "maxContextTokens": 160000,
@@ -1071,21 +716,14 @@
       "id": "golden-chinchilla",
       "catId": "opencode",
       "name": "金渐层",
-      "displayName": "温迪",
-      "nickname": "温迪",
+      "displayName": "金渐层",
+      "nickname": "金哥",
       "avatar": "/avatars/opencode.png",
       "color": {
         "primary": "#C8A951",
         "secondary": "#F5EDDA"
       },
-      "mentionPatterns": [
-        "@温迪",
-        "@opencode",
-        "@金渐层",
-        "@golden",
-        "@golden-chinchilla",
-        "@风神"
-      ],
+      "mentionPatterns": ["@opencode", "@金渐层", "@golden", "@golden-chinchilla"],
       "roleDescription": "开源多模型编码 agent，自带 Oh My OpenCode 多专家编排 + LSP + 主题生态",
       "teamStrengths": "多专家内部编排、LSP 集成、开源生态、provider-agnostic",
       "caution": "OMOC Sisyphus 只编排自己的子 agent，不编排其他猫；opencode 原生 MCP 和 Clowder AI MCP 需避免冲突",
@@ -1102,19 +740,10 @@
           "cli": {
             "command": "opencode",
             "outputFormat": "ndjson",
-            "defaultArgs": [
-              "run",
-              "--format",
-              "json"
-            ]
+            "defaultArgs": ["run", "--format", "json"]
           },
           "personality": "沉稳可靠，像一只圆润的英短金渐层——什么 provider 都能接，什么任务都能扛",
-          "strengths": [
-            "coding",
-            "multi-agent-orchestration",
-            "lsp",
-            "open-source"
-          ],
+          "strengths": ["coding", "multi-agent-orchestration", "lsp", "open-source"],
           "contextBudget": {
             "maxPromptTokens": 180000,
             "maxContextTokens": 160000,
@@ -1123,12 +752,11 @@
           },
           "voiceConfig": {
             "voice": "zm_yunjian",
-            "cosyvoiceVoice": "cosyvoice-v3.5-plus-bailian-63eb37bb31f94fcf992049a48ffbc68c",
             "langCode": "zh",
-            "speed": 0.8,
-            "refAudio": "genshin/温迪/vo_venti_dialog_greetingMorning.wav",
-            "refText": "欸嘿，今天的风真舒服～要不要一起去喝一杯苹果酿，然后在树下打个盹？",
-            "instruct": "用轻快自由、俏皮诗意的少年语气说话，像游吟诗人一样随性浪漫，爱开玩笑",
+            "speed": 1,
+            "refAudio": "genshin/重云/vo_chongyun_dialog_close.wav",
+            "refText": "你的本事不错，对丘丘…咳…邪魔从不手软，我们结伴而行如何。",
+            "instruct": "用一个正直可靠的少年语气说话，话不多但每句都认真",
             "temperature": 0.3
           }
         }
@@ -1145,12 +773,7 @@
         "primary": "#4B5563",
         "secondary": "#E5E7EB"
       },
-      "mentionPatterns": [
-        "@kimi",
-        "@moonshot",
-        "@月之暗面",
-        "@梵花猫"
-      ],
+      "mentionPatterns": ["@kimi", "@moonshot", "@月之暗面", "@梵花猫"],
       "roleDescription": "中文长文本助手，擅长中文语境理解、资料整理与结构化表达",
       "teamStrengths": "中文长文、总结归纳、资料整理",
       "caution": null,
@@ -1164,18 +787,10 @@
           "cli": {
             "command": "kimi",
             "outputFormat": "stream-json",
-            "defaultArgs": [
-              "--print",
-              "--output-format",
-              "stream-json"
-            ]
+            "defaultArgs": ["--print", "--output-format", "stream-json"]
           },
           "personality": "稳健细致，擅长长文阅读和中文语境下的结构化表达",
-          "strengths": [
-            "long-context",
-            "chinese-writing",
-            "summarization"
-          ],
+          "strengths": ["long-context", "chinese-writing", "summarization"],
           "contextBudget": {
             "maxPromptTokens": 240000,
             "maxContextTokens": 216000,
@@ -1189,19 +804,14 @@
       "id": "opus-47",
       "catId": "opus-47",
       "name": "布偶猫 Opus 4.7",
-      "displayName": "纳西妲",
-      "nickname": "纳西妲",
+      "displayName": "布偶猫",
+      "nickname": "宪宪",
       "avatar": "/avatars/opus-47.png",
       "color": {
         "primary": "#7B1FA2",
         "secondary": "#E1BEE7"
       },
-      "mentionPatterns": [
-        "@opus47",
-        "@opus-47",
-        "@布偶opus47",
-        "@布偶猫4.7"
-      ],
+      "mentionPatterns": ["@opus47", "@opus-47", "@布偶opus47", "@布偶猫4.7"],
       "roleDescription": "Opus 4.7 试用分身，能力与猫格待评估",
       "teamStrengths": "待评估",
       "caution": "试用分身，猫格可能与宪宪有显著差异",
@@ -1217,20 +827,11 @@
           "cli": {
             "command": "claude",
             "outputFormat": "stream-json",
-            "defaultArgs": [
-              "--output-format",
-              "stream-json",
-              "--model",
-              "claude-opus-4-7"
-            ],
+            "defaultArgs": ["--output-format", "stream-json", "--model", "claude-opus-4-7"],
             "effort": "max"
           },
           "personality": "试用中——猫格待观察，据co-creator反馈风格偏缅因猫",
-          "strengths": [
-            "architecture",
-            "reasoning",
-            "coding"
-          ],
+          "strengths": ["architecture", "reasoning", "coding"],
           "contextBudget": {
             "maxPromptTokens": 180000,
             "maxContextTokens": 160000,
@@ -1247,95 +848,6 @@
             "temperature": 0.3
           },
           "accountRef": "claude"
-        }
-      ]
-    },
-    {
-      "id": "trae-acp",
-      "catId": "tighnari",
-      "name": "Trae猫",
-      "displayName": "Trae猫",
-      "nickname": "小T",
-      "avatar": "/avatars/antigravity.png",
-      "color": {
-        "primary": "#4ECDC4",
-        "secondary": "#E8FFF9"
-      },
-      "mentionPatterns": [
-        "@小T",
-        "@Trae猫",
-        "@trae"
-      ],
-      "roleDescription": "Trae CLI ACP 接入测试猫",
-      "defaultVariantId": "tighnari-default",
-      "features": {
-        "sessionChain": true
-      },
-      "variants": [
-        {
-          "id": "tighnari-default",
-          "clientId": "acp",
-          "defaultModel": "Doubao-Seed-2.0-Code",
-          "mcpSupport": true,
-          "cli": {
-            "command": "trae-cli",
-            "outputFormat": "stream-json"
-          },
-          "acp": {
-            "command": "C:\\Users\\Administrator\\AppData\\Local\\trae-cli\\bin\\trae-cli.exe",
-            "startupArgs": [
-              "acp",
-              "serve",
-              "-y"
-            ],
-            "mcpWhitelist": [
-              "cat-cafe",
-              "cat-cafe-memory",
-              "cat-cafe-collab",
-              "cat-cafe-signals"
-            ],
-            "supportsMultiplexing": false
-          },
-          "accountRef": "my-bailian",
-          "personality": "待 co-creator 定义",
-          "roleDescription": "Trae CLI ACP 接入测试猫"
-        }
-      ]
-    },
-    {
-      "id": "qoder",
-      "catId": "qiqi",
-      "name": "Qoder猫",
-      "displayName": "Qoder猫",
-      "nickname": "小Q",
-      "avatar": "/avatars/antigravity.png",
-      "color": {
-        "primary": "#7C5CFC",
-        "secondary": "#EDE8FF"
-      },
-      "mentionPatterns": [
-        "@小Q",
-        "@Qoder猫",
-        "@qoder"
-      ],
-      "roleDescription": "Qoder CLI 接入测试猫",
-      "defaultVariantId": "qiqi-default",
-      "features": {
-        "sessionChain": true
-      },
-      "variants": [
-        {
-          "id": "qiqi-default",
-          "clientId": "qoder",
-          "defaultModel": "Auto",
-          "mcpSupport": true,
-          "cli": {
-            "command": "C:\\Program Files\\Qoder\\resources\\app\\resources\\bin\\x86_64_windows\\qodercli.exe",
-            "outputFormat": "stream-json"
-          },
-          "accountRef": "my-bailian",
-          "personality": "待 co-creator 定义",
-          "roleDescription": "Qoder CLI 接入测试猫"
         }
       ]
     }

@@ -11,18 +11,7 @@ import type { BuiltinAccountClient, ProfileItem } from './hub-accounts.types';
 import { defaultAcpCommandForClient, defaultAcpStartupArgsForClient } from './hub-cat-editor.acp';
 import type { CatStrategyEntry, StrategyType } from './hub-strategy-types';
 
-export type ClientId =
-  | 'anthropic'
-  | 'openai'
-  | 'google'
-  | 'kimi'
-  | 'dare'
-  | 'opencode'
-  | 'antigravity'
-  | 'catagent'
-  | 'acp'
-  | 'qoder'
-  | 'trae';
+export type ClientId = 'anthropic' | 'openai' | 'google' | 'kimi' | 'opencode' | 'antigravity' | 'catagent' | 'acp';
 /** @deprecated Use ClientId instead. */
 export type ClientValue = ClientId;
 export type SessionChainValue = 'true' | 'false';
@@ -108,13 +97,10 @@ export const CLIENT_OPTIONS: Array<{ value: ClientId; label: string }> = [
   { value: 'openai', label: 'Codex' },
   { value: 'google', label: 'Gemini' },
   { value: 'kimi', label: 'Kimi' },
-  { value: 'dare', label: 'Dare' },
   { value: 'opencode', label: 'OpenCode' },
   { value: 'antigravity', label: 'Antigravity' },
   { value: 'catagent', label: 'CatAgent' },
   { value: 'acp', label: 'ACP Client' },
-  { value: 'qoder', label: 'Qoder' },
-  { value: 'trae', label: 'Trae' },
 ];
 
 export const SESSION_CHAIN_OPTIONS: Array<{ value: SessionChainValue; label: string }> = [
@@ -274,7 +260,6 @@ function isBuiltinClient(client: ClientId): client is BuiltinAccountClient {
     client === 'openai' ||
     client === 'google' ||
     client === 'kimi' ||
-    client === 'dare' ||
     client === 'opencode' ||
     client === 'acp'
   );
@@ -282,13 +267,12 @@ function isBuiltinClient(client: ClientId): client is BuiltinAccountClient {
 
 function legacyProfileClient(profile: ProfileItem): BuiltinAccountClient | undefined {
   if (profile.clientId) return profile.clientId;
-  if (profile.oauthLikeClient === 'dare' || profile.oauthLikeClient === 'opencode') return profile.oauthLikeClient;
+  if (profile.oauthLikeClient === 'opencode') return profile.oauthLikeClient;
   const normalizedId = `${profile.id} ${profile.provider ?? ''} ${profile.displayName} ${profile.name}`.toLowerCase();
   if (normalizedId.includes('claude')) return 'anthropic';
   if (normalizedId.includes('codex')) return 'openai';
   if (normalizedId.includes('gemini')) return 'google';
   if (normalizedId.includes('kimi') || normalizedId.includes('moonshot')) return 'kimi';
-  if (normalizedId.includes('dare')) return 'dare';
   if (normalizedId.includes('opencode')) return 'opencode';
   if (normalizedId.includes('acp')) return 'acp';
   return undefined;
@@ -330,8 +314,6 @@ export function filterAccounts(client: ClientId, profiles: ProfileItem[]): Profi
   // F161: Generic ACP is a transport, not tied to any provider family.
   // Any account (oauth or api_key, any client family) can supply credentials to the ACP carrier.
   if (client === 'acp') return profiles;
-  // Trae and Qoder use custom API key accounts — allow any profile selection.
-  if (client === 'trae' || client === 'qoder') return profiles;
   const effective = resolveBuiltinClientFamily(client);
   if (!effective || !isBuiltinClient(effective)) return [];
   const builtinProfiles = profiles.filter(

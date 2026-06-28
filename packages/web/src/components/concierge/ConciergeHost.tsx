@@ -34,12 +34,12 @@ import { ConciergeBall } from './ConciergeBall';
 import { ConciergePanel } from './ConciergePanel';
 import { ConciergeToolbar } from './ConciergeToolbar';
 
-/** Ball button dimensions (floating character: 96×96 transparent sprite) */
-const BALL_WIDTH = 96;
-const BALL_HEIGHT = 96;
+/** Ball button dimensions (V3: 72×72 squircle) */
+const BALL_SIZE = 72;
 /** Default margin from viewport edge — matches original Tailwind `bottom-6 right-6` (1.5rem = 24px) */
 const EDGE_MARGIN = 24;
-/** Minimum drag distance (px) to distinguish drag from click (INV-P1) */
+/** Minimum drag distance (px) to distinguish drag from click (INV-P1)
+ *  BUG-UX-5: root fix is removing pointerEvents:'none' (below); threshold stays at 5. */
 const DRAG_THRESHOLD = 5;
 
 export function ConciergeHost() {
@@ -81,8 +81,8 @@ export function ConciergeHost() {
   const defaultPosition = useMemo(() => {
     if (typeof window === 'undefined') return { x: 0, y: 0 };
     return {
-      x: window.innerWidth - BALL_WIDTH - EDGE_MARGIN,
-      y: window.innerHeight - BALL_HEIGHT - EDGE_MARGIN,
+      x: window.innerWidth - BALL_SIZE - EDGE_MARGIN,
+      y: window.innerHeight - BALL_SIZE - EDGE_MARGIN,
     };
   }, []);
 
@@ -92,8 +92,8 @@ export function ConciergeHost() {
     const raw = ballPosition ?? defaultPosition;
     if (typeof window === 'undefined') return raw;
     return {
-      x: Math.max(0, Math.min(raw.x, window.innerWidth - BALL_WIDTH)),
-      y: Math.max(0, Math.min(raw.y, window.innerHeight - BALL_HEIGHT)),
+      x: Math.max(0, Math.min(raw.x, window.innerWidth - BALL_SIZE)),
+      y: Math.max(0, Math.min(raw.y, window.innerHeight - BALL_SIZE)),
     };
   }, [ballPosition, defaultPosition]);
 
@@ -103,8 +103,8 @@ export function ConciergeHost() {
       const pos = useConciergeStore.getState().ballPosition;
       if (!pos) return; // default position auto-adapts
       const clamped = {
-        x: Math.max(0, Math.min(pos.x, window.innerWidth - BALL_WIDTH)),
-        y: Math.max(0, Math.min(pos.y, window.innerHeight - BALL_HEIGHT)),
+        x: Math.max(0, Math.min(pos.x, window.innerWidth - BALL_SIZE)),
+        y: Math.max(0, Math.min(pos.y, window.innerHeight - BALL_SIZE)),
       };
       if (clamped.x !== pos.x || clamped.y !== pos.y) {
         void setBallPosition(clamped);
@@ -184,12 +184,15 @@ export function ConciergeHost() {
       <Rnd
         data-testid="concierge-ball-wrapper"
         position={clampedPosition}
-        size={{ width: BALL_WIDTH, height: BALL_HEIGHT }}
+        size={{ width: BALL_SIZE, height: BALL_SIZE }}
         enableResizing={false}
         bounds="window"
         onDragStart={handleDragStart}
         onDragStop={handleDragStop}
-        style={{ position: 'fixed', zIndex: 30, pointerEvents: 'none', background: 'transparent' }}
+        style={{ position: 'fixed', zIndex: 30 }}
+        // BUG-UX-5 fix: removed pointerEvents:'none' — it blocked react-rnd's
+        // drag detection from receiving mousedown directly on the wrapper.
+        // The ball button already fills the full 72×72 area.
       >
         {/* Layer 1: Cat body */}
         <ConciergeBall ballState={effectiveBallState} />
