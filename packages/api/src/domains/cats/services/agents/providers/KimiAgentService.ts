@@ -99,9 +99,9 @@ export class KimiAgentService implements AgentService {
     const isLegacy = resolveCliCommand('kimi-cli') !== null;
     const cliSupportsThinking = isLegacy && (supportsThinking || modelConfig.defaultThinking);
 
-    const args: string[] = isLegacy
-      ? ['--print', '--output-format', 'stream-json']
-      : ['--output-format', 'stream-json'];
+    // Both legacy (Python kimi-cli) and new (TS kimi) use --print + --output-format stream-json.
+    // New kimi (v1.47+) supports the same flags; --output-format is a sub-option of --print.
+    const args: string[] = ['--print', '--output-format', 'stream-json'];
     if (options?.sessionId) {
       args.push('--session', options.sessionId);
       metadata.sessionId = options.sessionId;
@@ -113,23 +113,23 @@ export class KimiAgentService implements AgentService {
         timestamp: Date.now(),
       };
     }
-    if (isLegacy) {
-      args.push('--work-dir', workingDirectory);
-      if (cliSupportsThinking) {
-        args.push('--thinking');
-      }
-      if (tempMcpConfig) {
-        args.push('--mcp-config-file', tempMcpConfig);
-      } else {
-        args.push(...buildProjectMcpArgs(workingDirectory));
-      }
-      for (const dir of imageAccessDirs) {
-        args.push('--add-dir', dir);
-      }
+    // Both legacy and new kimi support --work-dir, --add-dir, --mcp-config-file
+    args.push('--work-dir', workingDirectory);
+    if (isLegacy && cliSupportsThinking) {
+      args.push('--thinking');
+    }
+    if (tempMcpConfig) {
+      args.push('--mcp-config-file', tempMcpConfig);
+    } else if (isLegacy) {
+      args.push(...buildProjectMcpArgs(workingDirectory));
+    }
+    for (const dir of imageAccessDirs) {
+      args.push('--add-dir', dir);
     }
     if (!apiKeyEnv && effectiveModel) {
       args.push('--model', effectiveModel);
     }
+    // Legacy uses --prompt; new kimi uses -p (short form)
     if (isLegacy) {
       args.push('--prompt', effectivePrompt);
     } else {
