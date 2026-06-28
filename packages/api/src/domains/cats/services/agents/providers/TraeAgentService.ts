@@ -370,10 +370,19 @@ export class TraeAgentService implements L0InjectableAgentService {
     // Output format
     args.push('--output-format', 'stream-json');
 
-    // Session resume
-    if (sessionId) {
-      args.push('--resume', sessionId);
-    }
+    // Session resume: DISABLED for Trae CLI v0.120.40.
+    // Bug: `--resume <sessionId> -p "prompt"` causes the model to receive the
+    // session ID as the user message instead of the `-p` prompt content.
+    // The `-p` prompt is silently discarded when `--resume` is active.
+    // This was confirmed by manual testing (2026-06-28):
+    //   trae-cli --resume 7cd54245... -p "请说你好" --output-format stream-json -y
+    // → model sees user message "7cd54245..." instead of "请说你好".
+    // Workaround: start a fresh session every time; L0 + thread context
+    // provide sufficient continuity without CLI-level session resume.
+    // TODO: Re-enable if trae-cli fixes the --resume + -p interaction.
+    // if (sessionId) {
+    //   args.push('--resume', sessionId);
+    // }
 
     // Model selection — trae-cli v0.120.40's --model flag is broken (exit 1, no output, no stderr).
     // Use -c model.name=<model> config override instead, which works correctly.
