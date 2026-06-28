@@ -98,6 +98,17 @@ export function transformQoderEvent(
       const msg = event.message;
       if (!msg?.content || !Array.isArray(msg.content)) return null;
 
+      // Dedup: Qoder CLI re-emits the same assistant/message (same msg.id) with
+      // different statuses (finished → tool_calling → tool_calling …) each time
+      // the model calls a tool. Only emit text/reasoning from the FIRST occurrence
+      // of a given message.id to prevent repeated paragraphs in the final output.
+      // (Non-tool-call messages only emit one event with status=finished, so they
+      // are unaffected.)
+      if (msg.id) {
+        if (state.seenMessageIds.has(msg.id)) return null;
+        state.seenMessageIds.add(msg.id);
+      }
+
       // Extract usage if present
       if (msg.usage) {
         state.usage = {
@@ -187,8 +198,11 @@ export interface QoderTransformState {
   emittedDone: boolean;
   /** Overflow messages from multi-block assistant events. Caller drains after each transform call. */
   pendingMessages: AgentMessage[];
+  /** Dedup: message IDs already emitted — Qoder re-emits assistant/message with the
+   * same msg.id on each status change (finished → tool_calling), causing text duplication. */
+  seenMessageIds: Set<string>;
 }
 
 export function createQoderTransformState(): QoderTransformState {
-  return { emittedDone: false, pendingMessages: [] };
+  return { emittedDone: false, pendingMessages: [], seenMessageIds: new Set() };
 }
