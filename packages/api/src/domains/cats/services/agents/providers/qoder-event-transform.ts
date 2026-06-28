@@ -99,13 +99,17 @@ export function transformQoderEvent(
       if (!msg?.content || !Array.isArray(msg.content)) return null;
 
       // Dedup: Qoder CLI re-emits the same assistant/message (same msg.id) with
-      // different statuses (finished → tool_calling → tool_calling …) each time
-      // the model calls a tool. Only emit text/reasoning from the FIRST occurrence
-      // of a given message.id to prevent repeated paragraphs in the final output.
-      // (Non-tool-call messages only emit one event with status=finished, so they
-      // are unaffected.)
+      // different statuses each time the model calls a tool:
+      //   1. status=finished   — the canonical complete message (always first)
+      //   2. status=tool_calling — re-emitted per tool invocation (duplicate)
+      // Skip tool_calling re-emissions to prevent repeated paragraphs.
+      // We prefer status=finished because it's the authoritative version; if the
+      // Qoder CLI ever changes emission order (tool_calling before finished), this
+      // guard still works correctly.
+      if (msg.status === 'tool_calling' && msg.id && state.seenMessageIds.has(msg.id)) {
+        return null;
+      }
       if (msg.id) {
-        if (state.seenMessageIds.has(msg.id)) return null;
         state.seenMessageIds.add(msg.id);
       }
 
