@@ -50,6 +50,7 @@ $Provider = if ($env:TTS_PROVIDER) { $env:TTS_PROVIDER } else {
         "edge-tts"  { "edge-tts" }
         "sapi"      { "sapi" }
         "piper"     { "piper" }
+        "cosyvoice" { "cosyvoice" }
         "zh_CN-*"   { "piper" }
         "en_US-*"   { "piper" }
         "en_GB-*"   { "piper" }
