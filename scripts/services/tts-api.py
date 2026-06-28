@@ -425,6 +425,31 @@ class CosyVoiceAdapter(TtsAdapter):
         if speed != 1.0:
             payload["input"]["speed"] = speed
 
+        # F103 clone mode: pass ref_audio/ref_text/instruct/temperature to Dashscope API.
+        # When using a pre-registered voice_id (cosyvoice-*-bailian-*), the voice already
+        # contains the cloned timbre — ref_audio/ref_text are not needed and would require
+        # a publicly accessible URL that Dashscope servers can reach. Skip them for bailian IDs.
+        is_bailian_voice = resolved_voice.startswith("cosyvoice-") and "-bailian-" in resolved_voice
+        parameters = {}
+        if ref_audio and not is_bailian_voice:
+            # ref_audio must be a URL accessible by Dashscope servers
+            if ref_audio.startswith(("http://", "https://")):
+                parameters["ref_audio"] = ref_audio
+            else:
+                # Convert local absolute path to API-served URL
+                import urllib.parse
+                filename = Path(ref_audio).name
+                api_base = os.environ.get("CAT_CAFE_API_URL", "http://127.0.0.1:3004")
+                parameters["ref_audio"] = f"{api_base}/uploads/{urllib.parse.quote(filename)}"
+        if ref_text and not is_bailian_voice:
+            parameters["ref_text"] = ref_text
+        if instruct:
+            parameters["instruct"] = instruct
+        if temperature != 0.3:
+            parameters["temperature"] = temperature
+        if parameters:
+            payload["parameters"] = parameters
+
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
