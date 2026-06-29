@@ -35,6 +35,7 @@ export function resolveStartupCliConfigContext(
       google: join(projectRoot, '.gemini', 'settings.json'),
       kimi: join(projectRoot, '.kimi', 'mcp.json'),
       antigravity: join(homedir(), '.gemini', 'antigravity', 'mcp_config.json'),
+      qoder: join(projectRoot, '.qoder', 'settings.local.json'),
     },
   };
 }

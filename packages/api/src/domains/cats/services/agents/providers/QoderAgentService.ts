@@ -13,6 +13,8 @@
  */
 
 import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { type CatId, createCatId } from '@cat-cafe/shared';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
@@ -32,6 +34,93 @@ import {
 } from './qoder-event-transform.js';
 
 const log = createModuleLogger('qoder-agent');
+
+// ────────── MCP Server Injection ──────────
+
+/**
+ * Cat-cafe split MCP server entries (same set as CodexAgentService).
+ * Qoder CLI receives these via --mcp-config inline JSON.
+ */
+const CAT_CAFE_MCP_SERVER_ENTRIES = [
+  ['cat-cafe-collab', 'collab.js'],
+  ['cat-cafe-memory', 'memory.js'],
+  ['cat-cafe-signals', 'signals.js'],
+  ['cat-cafe-limb', 'limb.js'],
+  ['cat-cafe-audio', 'audio.js'],
+  ['cat-cafe-finance', 'finance.js'],
+] as const;
+
+const CAT_CAFE_MCP_CALLBACK_ENV_KEYS = [
+  'CAT_CAFE_API_URL',
+  'CAT_CAFE_INVOCATION_ID',
+  'CAT_CAFE_CALLBACK_TOKEN',
+  'CAT_CAFE_THREAD_ID',
+  'CAT_CAFE_USER_ID',
+  'CAT_CAFE_CAT_ID',
+  'CAT_CAFE_SIGNAL_USER',
+] as const;
+
+function resolveAllowedWorkspaceDirsForMcp(workingDirectory?: string): string {
+  const explicitAllowed = process.env.ALLOWED_WORKSPACE_DIRS?.trim();
+  if (explicitAllowed) return explicitAllowed;
+  const threadWorkspace = workingDirectory?.trim();
+  if (threadWorkspace) return resolve(threadWorkspace);
+  const explicitWorkspace = process.env.CAT_CAFE_WORKSPACE_ROOT?.trim();
+  if (explicitWorkspace) return explicitWorkspace;
+  return process.cwd();
+}
+
+/**
+ * Build cat-cafe MCP server config as --mcp-config inline JSON for Qoder CLI.
+ * Qoder CLI 0.1.25+ supports `--mcp-config` flag to load MCP servers from
+ * a JSON string (same schema as .mcp.json: { mcpServers: { name: { command, args, env } } }).
+ *
+ * This mirrors CodexAgentService's `buildCatCafeMcpConfigArgs` but uses Qoder's
+ * --mcp-config flag instead of Codex's --config TOML key-value pairs.
+ */
+function buildCatCafeMcpConfigArgs(workingDirectory?: string, callbackEnv?: Record<string, string>): string[] {
+  const fileDir = dirname(fileURLToPath(import.meta.url));
+  const candidateRoots = [
+    process.env.CAT_CAFE_RUNTIME_ROOT?.trim(),
+    process.cwd(),
+    resolve(fileDir, '../../../../../../../..'),
+  ].filter((root): root is string => !!root);
+
+  let mcpDistDir: string | undefined;
+  for (const root of candidateRoots) {
+    const candidate = resolve(root, 'packages/mcp-server/dist');
+    if (existsSync(resolve(candidate, 'index.js'))) {
+      mcpDistDir = candidate;
+      break;
+    }
+  }
+  if (!mcpDistDir) return [];
+
+  const allowedWorkspaceDirs = resolveAllowedWorkspaceDirsForMcp(workingDirectory);
+  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {};
+
+  for (const [serverName, entrypoint] of CAT_CAFE_MCP_SERVER_ENTRIES) {
+    const serverPath = resolve(mcpDistDir, entrypoint);
+    if (!existsSync(serverPath)) continue;
+
+    const env: Record<string, string> = { ALLOWED_WORKSPACE_DIRS: allowedWorkspaceDirs };
+    for (const key of CAT_CAFE_MCP_CALLBACK_ENV_KEYS) {
+      const value = callbackEnv?.[key];
+      if (value) env[key] = value;
+    }
+
+    mcpServers[serverName] = {
+      command: 'node',
+      args: [serverPath],
+      env,
+    };
+  }
+
+  if (Object.keys(mcpServers).length === 0) return [];
+
+  const mcpConfigJson = JSON.stringify({ mcpServers });
+  return ['--mcp-config', mcpConfigJson];
+}
 
 /** Well-known qodercli binary locations on Windows. */
 const QODER_WIN_PATHS = [
@@ -127,6 +216,17 @@ export class QoderAgentService implements AgentService {
     if (imageArgs.length > 0) {
       args.push(...imageArgs);
     }
+
+    // Cat-cafe MCP server injection via --mcp-config (Qoder CLI 0.1.25+).
+    // Provides cat_cafe_* tool access (collab, memory, signals, limb, audio, finance)
+    // to Qoder-served cats (e.g. 雷电将军, 七七).
+    const catCafeMcpArgs = buildCatCafeMcpConfigArgs(options?.workingDirectory, options?.callbackEnv);
+    if (catCafeMcpArgs.length > 0) {
+      args.push(...catCafeMcpArgs);
+    }
+
+    // Enable experimental MCP tool loading so the agent can discover and use MCP tools
+    args.push('--experimental-mcp-load');
 
     // Print mode + prompt (must be last)
     args.push('-p', effectivePrompt);

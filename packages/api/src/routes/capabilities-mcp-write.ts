@@ -128,6 +128,7 @@ export const capabilitiesMcpWriteRoutes: FastifyPluginAsync<{
     google: string;
     kimi: string;
     antigravity?: string;
+    qoder?: string;
   };
 }> = async (app, opts) => {
   const { getProjectRoot, getCliConfigPaths } = opts;

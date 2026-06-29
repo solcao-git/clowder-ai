@@ -1,13 +1,14 @@
 /**
  * MCP Config Adapters — F041 三猫 CLI 配置读写
  *
- * 读写三种 MCP 配置格式，归一化为 McpServerDescriptor 内部模型。
+ * 读写多种 MCP 配置格式，归一化为 McpServerDescriptor 内部模型。
  *
  * Claude:      .mcp.json                         — { mcpServers: { name: { command, args, env } } }
  * Codex:       .codex/config.toml               — [mcp_servers.<name>] command/args/env/enabled
  * Gemini:      .gemini/settings.json            — { mcpServers: { name: { command, args, env, cwd } } }
  * Antigravity: ~/.gemini/antigravity/mcp_config.json — { mcpServers: { name: { command, args, env, cwd } } }
  * Kimi:        .kimi/mcp.json                   — { mcpServers: { name: { url|command, args, env, headers } } }
+ * Qoder:       .qoder/settings.local.json       — { mcpServers: { name: { command, args, env, type } } }
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -71,6 +72,13 @@ const GEMINI_CAT_CAFE_ENV_PLACEHOLDERS: Readonly<Record<string, string>> = {
   CAT_CAFE_SIGNAL_USER: '${CAT_CAFE_SIGNAL_USER}',
 };
 const KIMI_CAT_CAFE_ENV_PLACEHOLDERS: Readonly<Record<string, string>> = {
+  CAT_CAFE_API_URL: '${CAT_CAFE_API_URL}',
+  CAT_CAFE_INVOCATION_ID: '${CAT_CAFE_INVOCATION_ID}',
+  CAT_CAFE_CALLBACK_TOKEN: '${CAT_CAFE_CALLBACK_TOKEN}',
+  CAT_CAFE_USER_ID: '${CAT_CAFE_USER_ID}',
+  CAT_CAFE_SIGNAL_USER: '${CAT_CAFE_SIGNAL_USER}',
+};
+const QODER_CAT_CAFE_ENV_PLACEHOLDERS: Readonly<Record<string, string>> = {
   CAT_CAFE_API_URL: '${CAT_CAFE_API_URL}',
   CAT_CAFE_INVOCATION_ID: '${CAT_CAFE_INVOCATION_ID}',
   CAT_CAFE_CALLBACK_TOKEN: '${CAT_CAFE_CALLBACK_TOKEN}',
@@ -165,6 +173,14 @@ function ensureKimiCatCafeEnv(name: string, env?: Record<string, string>): Recor
   if (!isCatCafeServer(name)) return env;
   return {
     ...KIMI_CAT_CAFE_ENV_PLACEHOLDERS,
+    ...(env ?? {}),
+  };
+}
+
+function ensureQoderCatCafeEnv(name: string, env?: Record<string, string>): Record<string, string> | undefined {
+  if (!isCatCafeServer(name)) return env;
+  return {
+    ...QODER_CAT_CAFE_ENV_PLACEHOLDERS,
     ...(env ?? {}),
   };
 }
@@ -286,6 +302,22 @@ export async function readAntigravityMcpConfig(filePath: string): Promise<McpSer
 
   return Object.entries(servers as Record<string, Record<string, unknown>>).map(([name, cfg]) =>
     toDescriptor(name, normalizeAntigravityConfig(cfg), true),
+  );
+}
+
+/** Read Qoder .qoder/settings.local.json → McpServerDescriptor[] */
+export async function readQoderMcpConfig(filePath: string): Promise<McpServerDescriptor[]> {
+  const raw = await safeReadFile(filePath);
+  if (!raw) return [];
+
+  const data = safeJsonParse(raw);
+  if (!data) return [];
+
+  const servers = data.mcpServers;
+  if (!servers || typeof servers !== 'object') return [];
+
+  return Object.entries(servers as Record<string, Record<string, unknown>>).map(([name, cfg]) =>
+    toDescriptor(name, cfg, true),
   );
 }
 
@@ -583,6 +615,57 @@ export async function writeAntigravityMcpConfig(filePath: string, servers: McpSe
     const cfg = value as Record<string, unknown>;
     const currentEnv = toStringRecord(cfg.env);
     cfg.env = ensureAntigravityCatCafeEnv(name, currentEnv);
+    existingMcp[name] = cfg;
+  }
+
+  existing.mcpServers = existingMcp;
+  await ensureDir(filePath);
+  await writeFile(filePath, `${JSON.stringify(existing, null, 2)}\n`, 'utf-8');
+}
+
+/** Write McpServerDescriptor[] → Qoder .qoder/settings.local.json */
+export async function writeQoderMcpConfig(filePath: string, servers: McpServerDescriptor[]): Promise<void> {
+  const raw = await safeReadFile(filePath);
+  let existing: Record<string, unknown> = {};
+  if (raw) {
+    const parsed = safeJsonParse(raw);
+    if (parsed) existing = parsed;
+  }
+
+  const existingMcp: Record<string, unknown> =
+    existing.mcpServers && typeof existing.mcpServers === 'object'
+      ? { ...(existing.mcpServers as Record<string, unknown>) }
+      : {};
+
+  // F213 Phase B: L5 cleanup of deprecated managed entries before update.
+  applyDeprecatedManagedCleanup(existingMcp, 'qoder');
+
+  for (const s of servers) {
+    if (!s.enabled) {
+      delete existingMcp[s.name];
+      continue;
+    }
+    // Qoder only supports stdio transport (like Codex/Gemini)
+    if (s.transport === 'streamableHttp') {
+      delete existingMcp[s.name];
+      continue;
+    }
+    if (!s.command || s.command.trim().length === 0) {
+      delete existingMcp[s.name];
+      continue;
+    }
+    const entry: Record<string, unknown> = { command: s.command, args: s.args, type: 'stdio' };
+    const env = ensureQoderCatCafeEnv(s.name, s.env);
+    if (env && Object.keys(env).length > 0) entry.env = env;
+    existingMcp[s.name] = entry;
+  }
+
+  for (const [name, value] of Object.entries(existingMcp)) {
+    if (!isCatCafeServer(name)) continue;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const cfg = value as Record<string, unknown>;
+    const currentEnv = toStringRecord(cfg.env);
+    cfg.env = ensureQoderCatCafeEnv(name, currentEnv);
     existingMcp[name] = cfg;
   }
 
