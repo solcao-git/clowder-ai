@@ -1,4 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { jsonSchemaToZod } from './json-schema-to-zod.js';
+import { callbackPost, getCallbackConfig } from './tools/callback-tools.js';
 import {
   audioTools,
   callbackMemoryTools,
@@ -306,6 +309,11 @@ const A_DESTRUCTIVE: Annotation = {
   destructiveHint: true,
   openWorldHint: false,
 };
+const A_DESTRUCTIVE_OPEN_WORLD: Annotation = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  openWorldHint: true,
+};
 
 /**
  * Explicit annotation table for every cat-cafe MCP tool.
@@ -352,6 +360,7 @@ export const EXPLICIT_TOOL_ANNOTATIONS: Record<string, Annotation> = {
   signal_list_studies: A_READ_LOCAL,
   signal_get_article: A_READ_LOCAL,
   limb_list_available: A_READ_LOCAL,
+  limb_list_tools: A_READ_LOCAL,
   limb_pair_list: A_READ_LOCAL,
   // ── Library reads (dry_run + verify are read-only despite "library_" prefix) ──
   cat_cafe_library_list: A_READ_LOCAL,
@@ -374,6 +383,8 @@ export const EXPLICIT_TOOL_ANNOTATIONS: Record<string, Annotation> = {
   cat_cafe_publish_verdict: A_WRITE_SAFE,
   cat_cafe_register_pr_tracking: A_WRITE_SAFE,
   cat_cafe_register_issue_tracking: A_WRITE_SAFE,
+  cat_cafe_get_thread_metadata: A_READ_LOCAL,
+  cat_cafe_set_thread_metadata: A_WRITE_SAFE,
   cat_cafe_register_scheduled_task: A_WRITE_SAFE,
   cat_cafe_remove_scheduled_task: A_DESTRUCTIVE, // R8.2: "stops the task and deletes it permanently" (schedule-tools.ts:217)
   cat_cafe_register_external_runtime_session: A_WRITE_SAFE,
@@ -384,6 +395,7 @@ export const EXPLICIT_TOOL_ANNOTATIONS: Record<string, Annotation> = {
   cat_cafe_update_workflow: A_WRITE_SAFE,
   cat_cafe_start_guide: A_WRITE_SAFE,
   cat_cafe_guide_control: A_WRITE_SAFE,
+  cat_cafe_set_read_mode: A_WRITE_SAFE, // F236 Phase C: writes ephemeral mode file to /tmp
   cat_cafe_start_vote: A_WRITE_SAFE,
   cat_cafe_submit_game_action: A_WRITE_SAFE,
   cat_cafe_teleport: A_WRITE_SAFE,
@@ -412,7 +424,9 @@ export const EXPLICIT_TOOL_ANNOTATIONS: Record<string, Annotation> = {
   signal_link_thread: A_DESTRUCTIVE,
   signal_generate_podcast: A_WRITE_OPEN_WORLD, // calls external TTS
   // ── Limb actions (write) ───────────────────────────────────────────
-  limb_invoke: A_WRITE_SAFE,
+  // Max-risk rule: limb_invoke_tool routes to plugin commands including
+  // destructive ops (delete_draft, delete_material) + open-world external APIs (WeChat).
+  limb_invoke_tool: A_DESTRUCTIVE_OPEN_WORLD,
   limb_pair_approve: A_WRITE_SAFE,
   // ── Destructive (data loss / unrecoverable) ────────────────────────
   cat_cafe_shell_exec: A_DESTRUCTIVE,
@@ -437,41 +451,112 @@ type RegisteredToolHandler = (args: never) => Promise<{
 }>;
 
 /**
- * Type-erased view of `McpServer.tool`'s 5-arg overload.
- * SDK 1.26.0 strict generics (ZodRawShapeCompat) collide with our generic
- * `Record<string, unknown>` ToolDef.inputSchema; we cast the call site once
- * and keep runtime behaviour identical (SDK reads inputSchema at handler time).
+ * Type-erased registerTool config. SDK 1.26.0 requires Zod schemas for:
+ *   - Tool listing: normalizeObjectSchema() reads .shape for JSON Schema serialization
+ *   - Tool calls: safeParseAsync() validates incoming arguments
+ *
+ * Our tool definitions use plain JSON Schema objects, so jsonSchemaToZod()
+ * converts them to Zod v3 at registration time.
+ * server.registerTool(name, config, cb) bypasses the overload parser entirely.
  */
-type TypeErasedToolRegistration = (
-  name: string,
-  description: string,
-  inputSchema: Record<string, unknown>,
+type RegisterToolConfig = {
+  description: string;
+  inputSchema: z.ZodObject<z.ZodRawShape>;
   annotations: {
     readOnlyHint: boolean;
     destructiveHint: boolean;
     openWorldHint: boolean;
-  },
-  cb: RegisteredToolHandler,
-) => void;
+  };
+};
+
+// ── F254 Phase B1: In-memory freshness notice state (per MCP server process = per invocation) ──
+const freshnessNoticeState = { toolCallCount: 0, noticeDeliveredCount: 0, lastNoticeToolCallNum: 0 };
+const FRESHNESS_NOTICE_INTERVAL = 5;
+const FRESHNESS_MAX_NOTICES = 3;
+
+/**
+ * F254 B1: Check if a freshness notice should be piggybacked on this tool result.
+ * Frequency-gated in-memory (every 5 read-only calls, max 3 per invocation).
+ * Only calls the API when the gate passes — minimizes HTTP overhead.
+ */
+async function maybeFreshnessNotice(toolName: string, isReadOnly: boolean): Promise<string | null> {
+  freshnessNoticeState.toolCallCount++;
+
+  if (!isReadOnly) return null;
+  if (freshnessNoticeState.noticeDeliveredCount >= FRESHNESS_MAX_NOTICES) return null;
+  if (freshnessNoticeState.toolCallCount - freshnessNoticeState.lastNoticeToolCallNum < FRESHNESS_NOTICE_INTERVAL) {
+    return null;
+  }
+
+  // Gate passed — call API to check for unseen messages
+  if (!getCallbackConfig()) return null;
+
+  try {
+    const result = await callbackPost('/api/callbacks/freshness-notice-check', {
+      toolName,
+      isReadOnly: true,
+    });
+    if (result.isError) return null;
+
+    const data = JSON.parse((result.content[0] as { text: string }).text);
+    // Advance interval counter after ANY API call, not just successful delivery.
+    // Otherwise quiet threads (no unseen) bypass the interval gate on every call.
+    // (Cloud review R2 P2-R2-2)
+    freshnessNoticeState.lastNoticeToolCallNum = freshnessNoticeState.toolCallCount;
+    if (data?.notice?.text) {
+      freshnessNoticeState.noticeDeliveredCount++;
+      return data.notice.text;
+    }
+  } catch {
+    // Fail-open: notice errors never block tool execution
+  }
+  return null;
+}
 
 function registerTools(server: McpServer, tools: readonly ToolDef[]): void {
-  // 5-arg overload: server.tool(name, description, paramsSchema, annotations, cb)
-  // — MCP SDK 1.26.0 内部 generics 太严，我们 ToolDef.inputSchema 是 Record<string,unknown>
-  // 不匹配 ZodRawShapeCompat → 用 type-erased view 让 TS 通过，runtime 行为不变。
-  // annotations 会通过 list_tools 暴露给 ChatGPT / Claude 客户端。
-  const registerToolErased = server.tool.bind(server) as unknown as TypeErasedToolRegistration;
+  // Use server.registerTool(name, config, cb) — the explicit config-object API.
+  // server.tool()'s overload parser uses isZodRawShapeCompat to detect whether
+  // an arg is inputSchema vs annotations. Our plain JSON Schema objects fail the
+  // Zod check → get mis-parsed as annotations → handler slot shifts → runtime crash.
+  // registerTool() takes { description, inputSchema, annotations } explicitly, no ambiguity.
+  const registerExplicit = server.registerTool.bind(server) as unknown as (
+    name: string,
+    config: RegisterToolConfig,
+    cb: RegisteredToolHandler,
+  ) => void;
   for (const tool of tools) {
     const annotations = inferAnnotations(tool.name);
-    registerToolErased(tool.name, tool.description, tool.inputSchema, annotations, async (args: never) => {
-      const result = await tool.handler(args);
-      return {
-        ...(result as Record<string, unknown>),
-      } as {
-        content: Array<{ type: 'text'; text: string }>;
-        isError?: boolean;
-        [key: string]: unknown;
-      };
-    });
+    // Distinguish Zod raw shape (callback tools) from plain JSON Schema (limb tools).
+    // Zod raw shapes have Zod instances as values; JSON Schema has type/properties keys.
+    const schema = tool.inputSchema;
+    const zodSchema =
+      typeof schema.type === 'string' && typeof schema.properties === 'object' && schema.properties !== null
+        ? jsonSchemaToZod(schema)
+        : z.object(schema as z.ZodRawShape);
+    registerExplicit(
+      tool.name,
+      { description: tool.description, inputSchema: zodSchema, annotations },
+      async (args: never) => {
+        const result = await tool.handler(args);
+        const typed = {
+          ...(result as Record<string, unknown>),
+        } as {
+          content: Array<{ type: 'text'; text: string }>;
+          isError?: boolean;
+          [key: string]: unknown;
+        };
+
+        // F254 B1: Piggyback freshness notice on successful read-only tool results
+        if (!typed.isError && annotations.readOnlyHint) {
+          const noticeText = await maybeFreshnessNotice(tool.name, annotations.readOnlyHint);
+          if (noticeText) {
+            typed.content = [...typed.content, { type: 'text', text: `\n\n${noticeText}` }];
+          }
+        }
+
+        return typed;
+      },
+    );
   }
 }
 
@@ -492,7 +577,7 @@ export function registerSignalToolset(server: McpServer): void {
 //
 // 但 F178 Phase D V3（cloud codex review 2026-06-13 P1）：DESKTOP_MODE=fable-phase0
 // 是 strict-whitelist 模式 + 最高优先级，在 legacy createServer + registerFullToolset
-// 路径下（fable Desktop config 误指 dist/index.js）必须杜绝 limb_invoke /
+// 路径下（fable Desktop config 误指 dist/index.js）必须杜绝 limb_invoke_tool /
 // limb_pair_approve 等设备控制面暴露。defense-in-depth：DESKTOP_FABLE_PHASE0_ALLOWED_TOOLS
 // 不含任何 limb 工具，所以 fable-phase0 mode 下 limb 全 deny。
 const LIMB_TOOL_SOURCES: readonly ToolDef[] = [...limbTools];

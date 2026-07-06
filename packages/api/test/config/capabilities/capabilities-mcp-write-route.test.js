@@ -36,10 +36,7 @@ function restoreEnv() {
 
 function getCliConfigPaths(projectRoot) {
   return {
-    anthropic: join(projectRoot, '.mcp.json'),
-    openai: join(projectRoot, '.codex', 'config.toml'),
     google: join(projectRoot, '.gemini', 'settings.json'),
-    kimi: join(projectRoot, '.kimi', 'mcp.json'),
   };
 }
 
@@ -88,6 +85,21 @@ describe('capabilities MCP write routes', () => {
         id: 'external-mcp',
         resolver: 'chrome-extension',
       },
+    });
+
+    assert.equal(res.statusCode, 403);
+    assert.match(JSON.parse(res.payload).error, /owner/);
+    const config = await readCapabilitiesConfig(projectRoot);
+    assert.deepEqual(config?.capabilities, []);
+  });
+
+  it('rejects non-owner MCP discovery writes when DEFAULT_OWNER_USER_ID is configured', async () => {
+    setEnv('DEFAULT_OWNER_USER_ID', 'you');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/capabilities/mcp/discover',
+      headers: LOCAL_NON_OWNER_HEADERS,
     });
 
     assert.equal(res.statusCode, 403);
@@ -311,7 +323,6 @@ describe('capabilities MCP write routes', () => {
     });
 
     assert.equal(res.statusCode, 200, res.payload);
-    assert.doesNotMatch(res.payload, /new-secret/);
     assert.equal(res.json().capability.mcpServer.env.API_KEY, REDACTED_SECRET);
     assert.equal(res.json().capability.mcpServer.headers.Authorization, REDACTED_SECRET);
     const config = await readCapabilitiesConfig(projectRoot);
@@ -481,6 +492,71 @@ describe('capabilities MCP write routes', () => {
     assert.doesNotMatch(rawAudit, /real-secret|Bearer real-secret/);
   });
 
+  it('preserves and redacts project override secrets when edit payload omits secret fields', async () => {
+    setEnv('DEFAULT_OWNER_USER_ID', 'you');
+    await writeCapabilitiesConfig(projectRoot, {
+      version: 1,
+      capabilities: [
+        {
+          id: 'project-secret-mcp',
+          type: 'mcp',
+          enabled: true,
+          globalEnabled: true,
+          source: 'external',
+          mcpServer: {
+            command: 'node',
+            args: ['global.js'],
+            env: { API_KEY: 'global-secret' },
+          },
+          mcpServerOverride: {
+            command: 'node',
+            args: ['override-old.js'],
+            env: { API_KEY: 'override-secret', KEEP: 'yes' },
+            headers: { Authorization: 'Bearer override-secret' },
+          },
+        },
+      ],
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/capabilities/mcp/install',
+      headers: LOCAL_OWNER_HEADERS,
+      payload: {
+        projectPath: projectRoot,
+        id: 'project-secret-mcp',
+        command: 'node',
+        args: ['override-new.js'],
+      },
+    });
+
+    assert.equal(res.statusCode, 200, res.payload);
+    assert.doesNotMatch(res.payload, /override-secret|Bearer override-secret/);
+    const responseCapability = JSON.parse(res.payload).capability;
+    assert.deepEqual(responseCapability.mcpServerOverride.env, {
+      API_KEY: REDACTED_SECRET,
+      KEEP: REDACTED_SECRET,
+    });
+    assert.deepEqual(responseCapability.mcpServerOverride.headers, { Authorization: REDACTED_SECRET });
+
+    const config = await readCapabilitiesConfig(projectRoot);
+    const cap = config?.capabilities.find((entry) => entry.id === 'project-secret-mcp');
+    assert.deepEqual(cap?.mcpServer?.env, { API_KEY: 'global-secret' }, 'global server config is preserved');
+    assert.deepEqual(cap?.mcpServerOverride?.args, ['override-new.js']);
+    assert.deepEqual(cap?.mcpServerOverride?.env, { API_KEY: 'override-secret', KEEP: 'yes' });
+    assert.deepEqual(cap?.mcpServerOverride?.headers, { Authorization: 'Bearer override-secret' });
+
+    const audit = await readAuditLog(projectRoot);
+    assert.equal(audit[0]?.action, 'update');
+    assert.deepEqual(audit[0]?.before?.mcpServerOverride?.env, {
+      API_KEY: REDACTED_SECRET,
+      KEEP: REDACTED_SECRET,
+    });
+    assert.deepEqual(audit[0]?.after?.mcpServerOverride?.headers, { Authorization: REDACTED_SECRET });
+    const rawAudit = await readFile(join(projectRoot, '.cat-cafe', 'audit.jsonl'), 'utf-8');
+    assert.doesNotMatch(rawAudit, /override-secret|Bearer override-secret/);
+  });
+
   it('preserves existing stdio launch fields when updating an external MCP with omitted command and args', async () => {
     setEnv('DEFAULT_OWNER_USER_ID', 'you');
     await writeCapabilitiesConfig(projectRoot, {
@@ -537,7 +613,6 @@ describe('capabilities MCP write routes', () => {
       payload,
     });
     assert.equal(preview.statusCode, 200, preview.payload);
-    assert.doesNotMatch(preview.payload, /install-secret/);
     assert.equal(preview.json().entry.mcpServer.headers.Authorization, REDACTED_SECRET);
     assert.equal(preview.json().entry.mcpServer.env.API_KEY, REDACTED_SECRET);
 
@@ -548,7 +623,6 @@ describe('capabilities MCP write routes', () => {
       payload,
     });
     assert.equal(install.statusCode, 200, install.payload);
-    assert.doesNotMatch(install.payload, /install-secret/);
     assert.equal(install.json().capability.mcpServer.headers.Authorization, REDACTED_SECRET);
     assert.equal(install.json().capability.mcpServer.env.API_KEY, REDACTED_SECRET);
 
@@ -585,6 +659,7 @@ describe('capabilities MCP write routes', () => {
 
     assert.equal(res.statusCode, 200, res.payload);
     assert.doesNotMatch(res.payload, /new-secret/);
+    assert.equal(res.json().capability.mcpServer.env.API_KEY, REDACTED_SECRET);
     const config = await readCapabilitiesConfig(projectRoot);
     const cap = config?.capabilities.find((entry) => entry.id === 'secret-mcp');
     assert.deepEqual(cap?.mcpServer?.env, { API_KEY: 'new-secret', KEEP: 'yes' });

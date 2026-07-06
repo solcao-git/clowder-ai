@@ -30,10 +30,7 @@ export function resolveStartupCliConfigContext(
   return {
     projectRoot,
     paths: {
-      anthropic: join(projectRoot, '.mcp.json'),
-      openai: join(projectRoot, '.codex', 'config.toml'),
       google: join(projectRoot, '.gemini', 'settings.json'),
-      kimi: join(projectRoot, '.kimi', 'mcp.json'),
       antigravity: join(homedir(), '.gemini', 'antigravity', 'mcp_config.json'),
       qoder: join(projectRoot, '.qoder', 'settings.local.json'),
     },
@@ -59,7 +56,7 @@ export async function regenerateStartupCliConfigs(
       await writeCapabilitiesConfig(projectRoot, config);
     }
 
-    await generateCliConfigs(config, paths);
+    await generateCliConfigs(config, paths, projectRoot);
     return { projectRoot, generated: true, healed: healed.migrated };
   });
 }

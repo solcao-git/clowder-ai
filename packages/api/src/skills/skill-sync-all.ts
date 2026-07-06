@@ -6,9 +6,10 @@
  * with cascade-disabled skills from global state.
  */
 
-import { stat } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
 import type { MountRules } from '@cat-cafe/shared';
 import { readCapabilitiesConfig, withCapabilityLock } from '../config/capabilities/capability-orchestrator.js';
+import { listAllProjectPaths } from '../config/governance/list-all-projects.js';
 import { readMountRules } from '../config/mount/mount-rules-store.js';
 import { type SyncProjectResult, syncProject } from './skill-sync-engine.js';
 
@@ -55,10 +56,12 @@ async function syncAllUnlocked(
   const perProject = new Map<string, SyncProjectResult>();
   const warnings: string[] = [];
 
-  // Read main project config for global state
+  // Read main project config for global state.
+  // pluginId is an identity label, not a filter — all cat-cafe skills
+  // are included uniformly (built-in and plugin alike).
   const mainConfig = await readCapabilitiesConfig(catCafeRoot);
   const mainManagedCaps =
-    mainConfig?.capabilities.filter((cap) => cap.type === 'skill' && cap.source === 'cat-cafe' && !cap.pluginId) ?? [];
+    mainConfig?.capabilities.filter((cap) => cap.type === 'skill' && cap.source === 'cat-cafe') ?? [];
 
   const globalDisabledSkills = new Set(
     mainManagedCaps.filter((cap) => !(cap.globalEnabled ?? cap.enabled)).map((cap) => cap.id),
@@ -72,14 +75,25 @@ async function syncAllUnlocked(
     if (!globalMountPathsBySkill.has(name)) globalMountPathsBySkill.set(name, [...paths]);
   }
 
-  // List registered projects via GovernanceRegistry
+  // Collect custom-source skills (plugins) from global config.
+  // resolve(instanceRoot, skillsSource) — co-creator's formula.
+  const globalCustomSourceSkills = new Map<string, { skillsSource: string; pluginId?: string }>();
+  for (const cap of mainManagedCaps) {
+    if (cap.skillsSource) {
+      globalCustomSourceSkills.set(cap.id, {
+        skillsSource: isAbsolute(cap.skillsSource) ? cap.skillsSource : resolve(catCafeRoot, cap.skillsSource),
+        ...(cap.pluginId ? { pluginId: cap.pluginId } : {}),
+      });
+    }
+  }
+
+  // #712: Unified project enumeration (governance + nested thread-derived).
+  // listAllProjectPaths already excludes catCafeRoot and validates paths.
   let projectPaths: string[];
   try {
-    const { GovernanceRegistry } = await import('../config/governance/governance-registry.js');
-    const entries = await new GovernanceRegistry(catCafeRoot).listAll();
-    projectPaths = entries.map((e) => e.projectPath);
+    projectPaths = await listAllProjectPaths(catCafeRoot);
   } catch (err) {
-    const msg = `Failed to read governance registry: ${(err as Error).message}`;
+    const msg = `Failed to enumerate projects: ${(err as Error).message}`;
     console.warn(`[F228] ${msg}`);
     warnings.push(msg);
     return { perProject, warnings };
@@ -87,31 +101,12 @@ async function syncAllUnlocked(
 
   // Sync each external project (main is handled by the caller)
   for (const projectPath of projectPaths) {
-    if (projectPath === catCafeRoot) continue;
-
-    // Stale registry entries (deleted temp-dirs, old worktrees) are silently
-    // skipped — they are NOT propagation failures. The root cause is a
-    // pre-existing test bug where project-setup tests register temp dirs in
-    // the real governance-registry without cleaning up (tracked separately).
-    try {
-      const pathStat = await stat(projectPath);
-      if (!pathStat.isDirectory()) {
-        console.warn(`[F228] skipping stale registry entry (not a directory): ${projectPath}`);
-        continue;
-      }
-    } catch {
-      console.warn(`[F228] skipping stale registry entry (path missing): ${projectPath}`);
-      continue;
-    }
-
     try {
       const result = await withCapabilityLock(projectPath, async () => {
         const projectMountRules = await readMountRules(projectPath, catCafeRoot);
         const projectConfig = await readCapabilitiesConfig(projectPath);
         const projectManagedCaps =
-          projectConfig?.capabilities.filter(
-            (cap) => cap.type === 'skill' && cap.source === 'cat-cafe' && !cap.pluginId,
-          ) ?? [];
+          projectConfig?.capabilities.filter((cap) => cap.type === 'skill' && cap.source === 'cat-cafe') ?? [];
 
         // F228 scenarios 6/7: global cascade is unconditional.
         // disabledSkills = globalDisabledSkills — global state is authoritative.
@@ -148,6 +143,12 @@ async function syncAllUnlocked(
           disabledSkills: globalDisabledSkills,
           mountPathsBySkill: projectMountPathsBySkill,
           globalMountPathsBySkill,
+          // F228: Always pass the map (even empty) so syncProject can detect
+          // orphaned plugin skills in project config that were removed globally.
+          // An empty map means "no plugin skills exist globally" — any project-local
+          // plugin skill is orphaned and should be cleaned up.
+          globalCustomSourceSkills,
+          mainProjectRoot: catCafeRoot,
           force,
         });
       });

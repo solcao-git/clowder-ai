@@ -692,11 +692,13 @@ describe('DriftResolver (F228 Phase 2B)', () => {
       disabledSkills: [],
       skillMountPaths: {},
       configuredSkills: new Set(),
+      customSourceSkills: new Set(),
     };
     const globalPolicy = {
       disabledSkills: ['tdd'],
       skillMountPaths: {},
       configuredSkills: new Set(['tdd']),
+      customSourceSkills: new Set(),
     };
 
     const merged = mergeSkillMountPolicies(projectPolicy, globalPolicy);
@@ -713,11 +715,13 @@ describe('DriftResolver (F228 Phase 2B)', () => {
       disabledSkills: ['tdd'],
       skillMountPaths: {},
       configuredSkills: new Set(['tdd']),
+      customSourceSkills: new Set(),
     };
     const globalPolicy = {
       disabledSkills: [],
       skillMountPaths: { tdd: ['claude', 'codex'] },
       configuredSkills: new Set(['tdd']),
+      customSourceSkills: new Set(),
     };
 
     const merged = mergeSkillMountPolicies(projectPolicy, globalPolicy);
@@ -738,11 +742,13 @@ describe('DriftResolver (F228 Phase 2B)', () => {
       disabledSkills: [],
       skillMountPaths: { tdd: ['claude', 'codex'] },
       configuredSkills: new Set(['tdd']),
+      customSourceSkills: new Set(),
     };
     const globalPolicy = {
       disabledSkills: ['tdd'],
       skillMountPaths: {},
       configuredSkills: new Set(['tdd']),
+      customSourceSkills: new Set(),
     };
 
     const merged = mergeSkillMountPolicies(projectPolicy, globalPolicy);
@@ -1030,16 +1036,19 @@ describe('DriftResolver (F228 Phase 2B)', () => {
     // Pre-write a valid capabilities.json so syncProject can read config
     await writeCapabilitiesConfig(projectRoot, { version: 2, capabilities: [] });
 
-    // Make capabilities.json read-only so updateConfigAfterSync fails with EACCES.
-    // The .cat-cafe/ directory itself stays writable → backup mkdir succeeds,
-    // but writeFile to capabilities.json throws.
-    const capPath = join(projectRoot, '.cat-cafe', 'capabilities.json');
-    await chmod(capPath, 0o444);
+    // Make .cat-cafe/ directory read-only so atomic writeCapabilitiesConfig fails.
+    // With atomic write (temp file + rename), file-level chmod is insufficient —
+    // rename() needs only directory write permission on POSIX, so we must block
+    // the directory to prevent temp file creation.
+    const catCafeDir = join(projectRoot, '.cat-cafe');
+    const capPath = join(catCafeDir, 'capabilities.json');
+    await chmod(catCafeDir, 0o555);
 
     // syncDrift should fail because final config write is blocked
     await assert.rejects(() => syncDriftCompat(projectRoot, skillsSource, DEFAULT_MOUNT_RULES, {}));
 
     // Restore write permission for cleanup
+    await chmod(catCafeDir, 0o755).catch(() => {});
     await chmod(capPath, 0o644).catch(() => {});
 
     // THE KEY ASSERTION: user-owned conflict blocker must be restored
@@ -1051,6 +1060,55 @@ describe('DriftResolver (F228 Phase 2B)', () => {
     // Verify content integrity, not just existence
     const restored = await readFile(join(userDir, 'local.txt'), 'utf8');
     assert.equal(restored, 'user content that must survive', 'restored content must match original');
+  });
+
+  test('syncDrift keep-project preserves user-owned conflict blocker and returns skipped', async () => {
+    await makeSkill('tdd');
+    // Create user-owned directory blocking the managed mount
+    const userDir = join(projectRoot, '.claude/skills/tdd');
+    await mkdir(userDir, { recursive: true });
+    await writeFile(join(userDir, 'user.md'), 'user version must survive');
+
+    const drift = await checkMount(projectRoot, skillsSource, DEFAULT_MOUNT_RULES);
+    assert.ok(
+      drift.conflicts.some((c) => c.skill === 'tdd'),
+      'fixture must create a tdd conflict',
+    );
+
+    // keep-project: skip conflict, preserve user content
+    const report = await syncDrift(projectRoot, skillsSource, DEFAULT_MOUNT_RULES, drift, {}, 'keep-project');
+
+    assert.deepEqual(report.skipped, ['tdd'], 'conflict should be in skipped');
+    assert.deepEqual(report.overridden, [], 'nothing should be overridden');
+    // User directory must still be there
+    const stat = await lstat(userDir);
+    assert.equal(stat.isDirectory(), true, 'user-owned dir must be preserved under keep-project');
+    assert.equal(stat.isSymbolicLink(), false, 'user-owned dir must not become a symlink');
+    const content = await readFile(join(userDir, 'user.md'), 'utf8');
+    assert.equal(content, 'user version must survive', 'user content must be intact');
+  });
+
+  test('syncDrift use-global overrides conflict blocker (explicit policy)', async () => {
+    await makeSkill('tdd');
+    // Same setup: user-owned blocker
+    const userDir = join(projectRoot, '.claude/skills/tdd');
+    await mkdir(userDir, { recursive: true });
+    await writeFile(join(userDir, 'user.md'), 'user version will be replaced');
+
+    const drift = await checkMount(projectRoot, skillsSource, DEFAULT_MOUNT_RULES);
+    assert.ok(
+      drift.conflicts.some((c) => c.skill === 'tdd'),
+      'fixture must create conflict',
+    );
+
+    // use-global: override user content with managed symlink
+    const report = await syncDrift(projectRoot, skillsSource, DEFAULT_MOUNT_RULES, drift, {}, 'use-global');
+
+    assert.deepEqual(report.overridden, ['tdd'], 'conflict should be overridden');
+    assert.deepEqual(report.skipped, [], 'nothing should be skipped');
+    const linkPath = join(projectRoot, '.claude/skills/tdd');
+    const stat = await lstat(linkPath);
+    assert.equal(stat.isSymbolicLink(), true, 'user dir should be replaced by managed symlink');
   });
 
   test('syncDrift waits for capability lock before moving conflict blockers', async () => {

@@ -54,6 +54,7 @@ const ITEMS_RESPONSE = {
     items: MOCK_ITEMS,
     catFamilies: [{ id: 'ragdoll', name: 'Ragdoll', catIds: ['opus'] }],
     projectPath: '/test/project',
+    knownProjectPaths: ['/tmp/slow-project', '/tmp/fast-project'],
     skillHealth: null,
   }),
 };
@@ -114,7 +115,7 @@ describe('McpManageContent', () => {
   }
 
   function buttonByText(text: string): HTMLButtonElement {
-    const button = Array.from(container.querySelectorAll('button')).find((candidate) =>
+    const button = Array.from(document.body.querySelectorAll('button')).find((candidate) =>
       candidate.textContent?.includes(text),
     );
     expect(button).toBeTruthy();
@@ -125,6 +126,12 @@ describe('McpManageContent', () => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
     setter?.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  async function flushEffects() {
+    await act(async () => {
+      await Promise.resolve();
+    });
   }
 
   it('renders source-style MCP cards without leaking skill sections', async () => {
@@ -146,23 +153,31 @@ describe('McpManageContent', () => {
     expect(container.textContent).toContain('新增 MCP');
   });
 
-  it('requests probed capability data for MCP status and tools', async () => {
+  it('requests capability data without probe (F249: lazy-load tools in modal)', async () => {
     await renderContent();
 
-    expect(mockFetch.mock.calls[0][0]).toBe('/api/capabilities?probe=true');
+    // F249 §8.4: list must NOT probe tools — no probe=true in query.
+    // DriftBanner / useDriftSync may fire their own fetch first, so find by URL not index.
+    const capCall = mockFetch.mock.calls.find(
+      (args: unknown[]) => typeof args[0] === 'string' && (args[0] as string).startsWith('/api/capabilities'),
+    );
+    expect(capCall).toBeTruthy();
+    expect(capCall![0]).toBe('/api/capabilities');
   });
 
-  it('opens managed MCP cards in a read-only modal', async () => {
+  it('opens managed MCP cards in a read-only modal (tools lazy-loaded)', async () => {
     await renderContent();
 
     await act(async () => {
       buttonByText('pencil').click();
     });
 
-    expect(container.querySelector('[data-testid="mcp-config-modal"]')).toBeTruthy();
-    expect(container.textContent).toContain('PENCIL_TOKEN');
-    expect(container.textContent).toContain('draw_frame');
-    expect(container.textContent).not.toContain('保存');
+    expect(document.body.querySelector('[data-testid="mcp-config-modal"]')).toBeTruthy();
+    expect(document.body.textContent).toContain('PENCIL_TOKEN');
+    // F249 §8.4: tools are NOT preloaded in list response — the modal auto-probes
+    // via POST /api/mcp/:id/tools on mount. At render time, tools section
+    // shows placeholder text, not the tool names from the list response.
+    expect(document.body.textContent).not.toContain('保存');
   });
 
   it('omits unchanged redacted env and headers when saving external MCP edits', async () => {
@@ -205,7 +220,7 @@ describe('McpManageContent', () => {
     await act(async () => {
       buttonByText('新增 MCP').click();
     });
-    const inputs = Array.from(container.querySelectorAll('input'));
+    const inputs = Array.from(document.body.querySelectorAll('input'));
     await act(async () => {
       setInputValue(inputs[0] as HTMLInputElement, 'new-mcp');
       setInputValue(inputs[1] as HTMLInputElement, 'npx');
@@ -215,13 +230,13 @@ describe('McpManageContent', () => {
       buttonByText('预览').click();
     });
 
-    expect(container.textContent).toContain('configured owner');
-    expect(container.textContent).not.toContain('DEFAULT_OWNER_USER_ID');
+    expect(document.body.textContent).toContain('configured owner');
+    expect(document.body.textContent).not.toContain('DEFAULT_OWNER_USER_ID');
   });
 
   it('hard-deletes external MCP on uninstall', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-
+    // useConfirm is globally mocked (test-setup.ts) to resolve true,
+    // replacing the old window.confirm spy.
     await renderContent();
 
     const trashButtons = Array.from(container.querySelectorAll('button[title="卸载此 MCP"]'));
@@ -239,8 +254,58 @@ describe('McpManageContent', () => {
     expect(deleteCalls).toHaveLength(1);
     expect(deleteCalls[0][0]).toContain('/api/capabilities/mcp/custom-mcp?');
     expect(deleteCalls[0][0]).toContain('hard=true');
+  });
 
-    confirmSpy.mockRestore();
+  it('syncs all MCP project scopes without calling unsupported global resolve', async () => {
+    mockFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/api/capabilities')) return ITEMS_RESPONSE;
+      if (url === '/api/drift/check') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { type?: string; projectPath?: string };
+        return {
+          ok: true,
+          json: async () => ({
+            result: {
+              issues: [{ id: 'custom-mcp', issueType: 'missing-in-project', message: 'Needs sync' }],
+              driftHash: `hash:${body.projectPath ?? 'global'}`,
+            },
+          }),
+        };
+      }
+      if (url === '/api/drift/resolve' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body ?? '{}')) as { type?: string; projectPath?: string };
+        if (body.type === 'mcp' && !body.projectPath) {
+          return {
+            ok: false,
+            status: 400,
+            json: async () => ({ error: 'Required: projectPath for MCP resolve' }),
+          };
+        }
+        return { ok: true, json: async () => ({ ok: true }) };
+      }
+      return ITEMS_RESPONSE;
+    });
+
+    await renderContent();
+    await flushEffects();
+
+    await act(async () => {
+      buttonByText('查看详情').click();
+    });
+
+    mockFetch.mockClear();
+    await act(async () => {
+      buttonByText('同步全部').click();
+    });
+    await flushEffects();
+
+    const syncCalls = mockFetch.mock.calls.filter(
+      (args: unknown[]) => args[0] === '/api/drift/resolve' && (args[1] as { method?: string })?.method === 'POST',
+    );
+    const bodies = syncCalls.map((args) => JSON.parse(String((args[1] as { body?: string }).body ?? '{}')));
+    expect(bodies.every((body) => body.type === 'mcp' && body.action === 'sync')).toBe(true);
+    expect(bodies.some((body) => !body.projectPath)).toBe(false);
+    expect(bodies.map((body) => body.projectPath).sort()).toEqual(['/tmp/fast-project', '/tmp/slow-project']);
   });
 
   it('renders plugin-owned MCP resources as readonly and routes management to plugins', async () => {
@@ -306,6 +371,7 @@ describe('McpManageContent', () => {
         items: [{ ...MOCK_ITEMS[1], id: 'fast-mcp' }],
         catFamilies: [{ id: 'ragdoll', name: 'Ragdoll', catIds: ['opus'] }],
         projectPath: '/tmp/fast-project',
+        knownProjectPaths: ['/tmp/slow-project', '/tmp/fast-project'],
         skillHealth: null,
       }),
     };
@@ -316,6 +382,9 @@ describe('McpManageContent', () => {
     });
 
     await renderContent();
+    await act(async () => {
+      buttonByText('项目 MCP').click();
+    });
     const selector = container.querySelector('#cap-project-select') as HTMLSelectElement;
     expect(selector).toBeTruthy();
 
@@ -335,6 +404,7 @@ describe('McpManageContent', () => {
         items: [{ ...MOCK_ITEMS[1], id: 'slow-mcp' }],
         catFamilies: [{ id: 'ragdoll', name: 'Ragdoll', catIds: ['opus'] }],
         projectPath: '/tmp/slow-project',
+        knownProjectPaths: ['/tmp/slow-project', '/tmp/fast-project'],
         skillHealth: null,
       });
       await slowJson;

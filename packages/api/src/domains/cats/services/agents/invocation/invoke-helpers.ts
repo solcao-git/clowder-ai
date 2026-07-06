@@ -47,11 +47,20 @@ export function classifyResumeFailure(message: string | undefined): ResumeFailur
   //   (narrowed to "Invalid session identifier" to avoid matching auth/rate-limit
   //   errors that also start with "Error resuming session:")
   // OpenCode: "Session not found"
-  // (Kimi silently accepts any session ID — no error produced)
   if (
     /(No conversation found with session ID|no rollout found|missing_rollout|Invalid session identifier|Session not found)/i.test(
       message,
     )
+  ) {
+    return 'missing_session';
+  }
+  // Kimi: -32603 is a generic JSON-RPC internal error. Only classify as missing_session
+  // when the error message contains evidence of bootstrap CWD deletion:
+  //   os.getcwd() → FileNotFoundError → -32603.
+  // Generic -32603 must be preserved as real errors (return null → transient retry path).
+  if (
+    /ACP error -32603/i.test(message) &&
+    /(FileNotFoundError|os\.getcwd|No such file or directory|bootstrap.*cwd|cwd.*deleted)/i.test(message)
   ) {
     return 'missing_session';
   }
@@ -74,6 +83,20 @@ export function classifyResumeFailure(message: string | undefined): ResumeFailur
 
 export function isMissingClaudeSessionError(message: string | undefined): boolean {
   return classifyResumeFailure(message) === 'missing_session';
+}
+
+/**
+ * clowder-ai#1038: opencode's "Session not found" surfaces in `msg.metadata.cliDiagnostics`
+ * (stderr excerpt), NOT in the formatted `msg.error` string (which is the generic
+ * `opencode CLI: CLI 异常退出 (code: 1, signal: none)`). So `isMissingClaudeSessionError(msg.error)`
+ * misses it and the error would fall into the transient-retry path (Path B), which re-runs the
+ * same stale `--session`. Detect via the classified `reasonCode` instead so it routes to the
+ * session self-heal path (Path A: drop sessionId + retry fresh), mirroring Claude/Codex/Gemini.
+ */
+export function isSessionNotFoundDiagnostic(
+  metadata: { cliDiagnostics?: { reasonCode?: string } } | undefined,
+): boolean {
+  return metadata?.cliDiagnostics?.reasonCode === 'session_not_found';
 }
 
 export function isTransientCliExitCode1(message: string | undefined): boolean {

@@ -48,6 +48,7 @@ const LEGACY_EXCLUSIONS = [
   'capabilities-route\\.test',
   'antigravity-run-command-executor\\.test',
   'f203-phase-i-opencode-l0\\.test',
+  'f236-cc-anchor-hook\\.test',
   'github-schedule-factories\\.test',
   'harness-eval/eval-hub-read-model\\.test',
   'harness-eval/merge-gate-provenance-contract\\.test',
@@ -97,7 +98,7 @@ test('registry preserves metadata for active legacy exclusions and drops stale o
       category: 'source_only',
       owner: '@zts212653',
       introducedBy: '069d0f0fb',
-      expiresOn: '2026-06-30',
+      expiresOn: '2026-07-31',
     },
   );
 });
@@ -113,6 +114,17 @@ test('resolver preserves legacy public test file selection parity', async () => 
   });
 
   assert.deepEqual(resolved.selectedFiles, expected);
+});
+
+test('resolver excludes source-only cc anchor hook coverage from the public gate', async () => {
+  const { resolvePublicTestFiles } = await import(resolverModuleUrl);
+  const resolved = await resolvePublicTestFiles({
+    packageRoot,
+    configPath: registryPath,
+  });
+
+  assert.ok(resolved.excludedFiles.includes('test/f236-cc-anchor-hook.test.js'));
+  assert.ok(!resolved.selectedFiles.includes('test/f236-cc-anchor-hook.test.js'));
 });
 
 test('validator rejects malformed, expired, or zero-match exclusion entries', async () => {
@@ -131,7 +143,7 @@ test('validator rejects malformed, expired, or zero-match exclusion entries', as
               category: 'source_only',
               reason: 'missing owner should fail',
               introducedBy: 'deadbeef0',
-              expiresOn: '2026-06-30',
+              expiresOn: '2026-07-31',
             },
           ],
         },
@@ -175,7 +187,7 @@ test('validator rejects malformed, expired, or zero-match exclusion entries', as
               reason: 'stale entry should fail',
               owner: '@zts212653',
               introducedBy: 'deadbeef2',
-              expiresOn: '2026-06-30',
+              expiresOn: '2026-07-31',
             },
           ],
         },

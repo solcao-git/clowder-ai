@@ -25,6 +25,12 @@ export interface CapabilityBoardItem {
   triggers?: string[];
   category?: string;
   mounts?: Record<string, boolean>;
+  mountHealth?: {
+    enabledMountPoints: string[];
+    mountedCount: number;
+    requiredCount: number;
+    allMounted: boolean;
+  };
   tools?: { name: string; description?: string }[];
   connectionStatus?: 'connected' | 'disconnected' | 'unknown';
   mcpServer?: {
@@ -42,12 +48,17 @@ export interface CapabilityBoardItem {
   lockVersion?: { source: string; version: string; installedAt: string; installedBy: string };
   pluginId?: string;
   mountPaths?: string[];
+  requiresMcp?: Array<{ id: string; status: 'ready' | 'missing' | 'unresolved' }>;
+  /** Which external config file this MCP was discovered from (e.g. "claude"). */
+  discoveredFrom?: string;
 }
 
 export interface CatFamily {
   id: string;
   name: string;
   catIds: string[];
+  /** Optional display names keyed by catId — falls back to raw catId when absent. */
+  catNames?: Record<string, string>;
 }
 
 export interface SkillHealthSummary {

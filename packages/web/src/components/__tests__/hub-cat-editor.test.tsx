@@ -50,6 +50,7 @@ const emptyAcpFields = {
   acpStartupArgs: '',
   acpMaxLiveProcesses: '',
   acpIdleTtlMinutes: '',
+  mcpSupport: true,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -279,6 +280,20 @@ describe('HubCatEditor', () => {
 
     const payload = buildCatPayload(baseForm, existingCat) as Record<string, unknown>;
     expect(payload.mcpSupport).toBe(true);
+
+    const acpPayload = buildCatPayload(
+      {
+        ...baseForm,
+        clientId: 'acp',
+        accountRef: 'claude',
+        defaultModel: 'acp-model',
+        acpEnabled: true,
+        acpCommand: 'custom-acp-agent',
+        acpStartupArgs: '--acp',
+      },
+      { ...existingCat, clientId: 'openai' },
+    ) as Record<string, unknown>;
+    expect(acpPayload.mcpSupport).toBe(true);
   });
 
   it('buildCatPayload seeds default Antigravity command args when the field is still blank', () => {
@@ -405,6 +420,7 @@ describe('HubCatEditor', () => {
       maxContentLengthPerMsg: '',
       ...emptyVoiceFields,
       acpEnabled: true,
+      mcpSupport: true,
       acpTransport: 'stdio',
       acpCommand: 'opencode',
       acpStartupArgs: '--acp --mode agent',
@@ -450,6 +466,7 @@ describe('HubCatEditor', () => {
       maxContentLengthPerMsg: '',
       ...emptyVoiceFields,
       acpEnabled: true,
+      mcpSupport: true,
       acpTransport: 'stdio',
       acpCommand: 'opencode',
       acpStartupArgs: 'acp',
@@ -541,6 +558,7 @@ describe('HubCatEditor', () => {
       maxContentLengthPerMsg: '',
       ...emptyVoiceFields,
       acpEnabled: true,
+      mcpSupport: true,
       acpTransport: 'stdio',
       acpCommand: 'deepseek-cli',
       acpStartupArgs: '--acp',
@@ -594,6 +612,7 @@ describe('HubCatEditor', () => {
       maxContentLengthPerMsg: '',
       ...emptyVoiceFields,
       acpEnabled: true,
+      mcpSupport: true,
       acpTransport: 'stdio',
       acpCommand: 'opencode',
       acpStartupArgs: 'acp',
@@ -654,6 +673,7 @@ describe('HubCatEditor', () => {
       maxContentLengthPerMsg: '',
       ...emptyVoiceFields,
       acpEnabled: true,
+      mcpSupport: true,
       acpTransport: 'stdio',
       acpCommand: 'kimi',
       acpStartupArgs: 'acp',
@@ -712,6 +732,7 @@ describe('HubCatEditor', () => {
       maxContentLengthPerMsg: '',
       ...emptyVoiceFields,
       acpEnabled: true,
+      mcpSupport: true,
       acpTransport: 'stdio',
       acpCommand: 'some-acp-agent',
       acpStartupArgs: 'acp',
@@ -2589,7 +2610,8 @@ describe('HubCatEditor', () => {
     const payload = JSON.parse(String(patchCall?.[1]?.body));
     expect(payload.clientId).toBe('antigravity');
     expect(payload.accountRef).toBeNull();
-    expect(payload.mcpSupport).toBe(true);
+    // #712: mcpSupport is omitted from PATCH when the value hasn't changed (both default to true)
+    expect(payload.mcpSupport).toBeUndefined();
   });
 
   it('sends contextBudget=null when clearing existing runtime budget', async () => {

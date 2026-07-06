@@ -26,9 +26,19 @@ import {
   validateModelFormatForProvider,
   validateRuntimeProviderBinding,
 } from '../config/account-resolver.js';
+import {
+  inheritFullyBlockedMcpCapabilitiesForNewCat,
+  removeDeletedCatFromBlockedMcps,
+} from '../config/capabilities/capability-orchestrator.js';
 import { resolveBoundAccountRefForCat } from '../config/cat-account-binding.js';
-import { bootstrapCatCatalog, resolveCatCatalogPath } from '../config/cat-catalog-store.js';
-import { getAcpConfig, getRoster, loadCatConfig, toAllCatConfigs } from '../config/cat-config-loader.js';
+import { bootstrapCatCatalog } from '../config/cat-catalog-store.js';
+import {
+  getAcpConfig,
+  getRoster,
+  loadCatConfig,
+  loadResolvedCatConfig,
+  toAllCatConfigs,
+} from '../config/cat-config-loader.js';
 import { configEventBus, createChangeSetId } from '../config/config-event-bus.js';
 import { resolveProjectTemplatePath } from '../config/project-template-path.js';
 import { getResolvedCats } from '../config/resolved-cats.js';
@@ -93,23 +103,21 @@ function resolveGenericAcpMcpSupport(
   acpConfig: AcpRouteConfig | null | undefined,
 ): boolean | undefined {
   if (explicitMcpSupport !== undefined) return explicitMcpSupport;
-  return (acpConfig?.mcpWhitelist?.length ?? 0) > 0 ? true : undefined;
+  return acpConfig ? true : undefined;
 }
 
 function resolveGenericAcpMcpSupportForPatch(
   explicitMcpSupport: boolean | undefined,
   acpConfig: AcpRouteConfig | null | undefined,
   isClientSwitchToGenericAcp: boolean,
-  currentAcpConfig: { mcpWhitelist?: string[] } | undefined,
 ): boolean | undefined {
   if (explicitMcpSupport !== undefined) return explicitMcpSupport;
   if (acpConfig !== undefined && acpConfig !== null) {
-    if (acpConfig.mcpWhitelist !== undefined) return acpConfig.mcpWhitelist.length > 0;
-    if (isClientSwitchToGenericAcp) return false;
-    if ((currentAcpConfig?.mcpWhitelist?.length ?? 0) > 0) return false;
+    if (acpConfig.mcpWhitelist !== undefined && acpConfig.mcpWhitelist.length > 0) return true;
+    if (isClientSwitchToGenericAcp) return true;
     return undefined;
   }
-  return isClientSwitchToGenericAcp ? false : undefined;
+  return isClientSwitchToGenericAcp ? true : undefined;
 }
 
 const catIdSchema = z
@@ -211,7 +219,8 @@ const updateCatSchema = z.object({
   clientId: clientSchema.optional(),
   defaultModel: modelSchema.optional(),
   mcpSupport: z.boolean().optional(),
-  cli: cliSchema.optional(),
+  // F247 KD-17: nullable to allow removing cli (cloud-only Remote MCP cats skip local dispatch).
+  cli: cliSchema.nullable().optional(),
   commandArgs: z.array(z.string().min(1)).optional(),
   cliConfigArgs: z.array(z.string().min(1)).optional(),
   provider: z.string().min(1).nullable().optional(),
@@ -241,7 +250,9 @@ interface CatResponseMetadata {
 function buildCatResponseMetadataResolver(projectRoot: string) {
   let roster: Record<string, RosterEntry> = {};
   try {
-    roster = getRoster(loadCatConfig(resolveCatCatalogPath(projectRoot)));
+    const templatePath = resolveProjectTemplatePath(projectRoot);
+    bootstrapCatCatalog(projectRoot, templatePath);
+    roster = getRoster(loadResolvedCatConfig(templatePath));
   } catch {
     roster = {};
   }
@@ -256,7 +267,7 @@ function defaultCliForClient(client: ClientId): { command: string; outputFormat:
     case 'openai':
       return { command: 'codex', outputFormat: 'json' };
     case 'google':
-      return { command: 'gemini', outputFormat: 'stream-json' };
+      return { command: 'agy', outputFormat: 'plainText' };
     case 'kimi':
       return { command: 'kimi', outputFormat: 'stream-json' };
     case 'opencode':
@@ -319,13 +330,16 @@ function resolveNextCli(params: {
   effectiveClient: ClientId;
   hasCommandArgsPatch: boolean;
   nextCommandArgs: string[];
-}): CliConfig | undefined {
+}): CliConfig | null | undefined {
   const { body, currentCat, effectiveClient, hasCommandArgsPatch, nextCommandArgs } = params;
   const isClientSwitch = body.clientId !== undefined && body.clientId !== currentCat.clientId;
   const defaultCli = defaultCliForClient(effectiveClient);
   const defaultEffort = getDefaultCliEffortForProvider(effectiveClient);
 
   if (body.cli !== undefined) {
+    // F247 KD-17: explicit null means remove cli (cloud-only mode, Remote MCP cat).
+    // Forward null untouched; updateRuntimeCat will delete variant.cli.
+    if (body.cli === null) return null;
     const baseCli =
       isClientSwitch || !currentCat.cli
         ? {
@@ -468,7 +482,7 @@ async function toCatResponse(
 }
 
 async function reconcileCatRegistry(projectRoot: string, managedIdsBefore: ReadonlySet<string>) {
-  const runtimeCats = toAllCatConfigs(loadCatConfig(resolve(projectRoot, '.cat-cafe', 'cat-catalog.json')));
+  const runtimeCats = toAllCatConfigs(loadResolvedCatConfig(resolveProjectTemplatePath(projectRoot)));
   const extraCats = catRegistry.getAllConfigs();
   catRegistry.reset();
   for (const [id, config] of Object.entries(runtimeCats)) {
@@ -482,10 +496,66 @@ async function reconcileCatRegistry(projectRoot: string, managedIdsBefore: Reado
 
 function getManagedCatalogIds(projectRoot: string): Set<string> {
   try {
-    return new Set(Object.keys(toAllCatConfigs(loadCatConfig(resolve(projectRoot, '.cat-cafe', 'cat-catalog.json')))));
+    return new Set(Object.keys(toAllCatConfigs(loadResolvedCatConfig(resolveProjectTemplatePath(projectRoot)))));
   } catch {
     return new Set();
   }
+}
+
+/**
+ * #712: Inherit fully-blocked MCP state for all projects with capabilities.json.
+ *
+ * When a new cat is added, any MCP entry where ALL existing cats are in blockedCats
+ * should also block the new cat (the MCP is effectively fully disabled). The main
+ * call site only handles projectRoot; this function covers all other projects
+ * via the unified listAllProjectPaths (#712).
+ */
+async function inheritBlockedMcpForAllProjects(
+  alreadyHandledRoot: string,
+  newCatId: string,
+  existingCatIds: ReadonlySet<string>,
+): Promise<void> {
+  const catCafeRoot = resolveProjectRoot();
+  const { listAllProjectPaths } = await import('../config/governance/list-all-projects.js');
+
+  // listAllProjectPaths already excludes catCafeRoot, deduplicates, and validates.
+  // We also need catCafeRoot itself if it differs from alreadyHandledRoot.
+  const allPaths = await listAllProjectPaths(catCafeRoot);
+  if (resolve(catCafeRoot) !== resolve(alreadyHandledRoot)) {
+    allPaths.unshift(catCafeRoot);
+  }
+
+  // Filter out the already-handled root (caller already did this one)
+  const resolvedHandled = resolve(alreadyHandledRoot);
+  const toProcess = allPaths.filter((p) => resolve(p) !== resolvedHandled);
+
+  await Promise.all(
+    toProcess.map((p) => inheritFullyBlockedMcpCapabilitiesForNewCat(p, newCatId, existingCatIds).catch(() => {})),
+  );
+}
+
+/**
+ * #712: Remove a deleted cat from blockedCats across all projects.
+ *
+ * Counterpart to inheritBlockedMcpForAllProjects — when a cat is deleted,
+ * its ID should be cleaned from every MCP's blockedCats to avoid ghost entries.
+ */
+async function cleanupBlockedMcpForAllProjects(projectRoot: string, deletedCatId: string): Promise<void> {
+  const catCafeRoot = resolveProjectRoot();
+  const { listAllProjectPaths } = await import('../config/governance/list-all-projects.js');
+
+  const allPaths = await listAllProjectPaths(catCafeRoot);
+  // Also include catCafeRoot itself (listAllProjectPaths excludes it)
+  allPaths.unshift(catCafeRoot);
+  // And the active projectRoot if different
+  if (resolve(projectRoot) !== resolve(catCafeRoot)) {
+    const resolvedProject = resolve(projectRoot);
+    if (!allPaths.some((p) => resolve(p) === resolvedProject)) {
+      allPaths.push(projectRoot);
+    }
+  }
+
+  await Promise.all(allPaths.map((p) => removeDeletedCatFromBlockedMcps(p, deletedCatId).catch(() => {})));
 }
 
 interface CatsRoutesOptions {
@@ -660,7 +730,13 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
           acp: body.acp,
         });
       } else {
-        const resolvedCli = buildResolvedCliConfig(body.clientId, defaultCliForClient(body.clientId), body.cli);
+        // F247 KD-17: cloud-only providers (Remote MCP) skip local CLI dispatch.
+        // Caller signals cloud-only via provider="openai-chatgpt-pro" (future: more cloud markers).
+        const explicitProviderForCloud = 'provider' in body ? body.provider : undefined;
+        const isCloudOnlyProvider = explicitProviderForCloud === 'openai-chatgpt-pro';
+        const resolvedCli = isCloudOnlyProvider
+          ? undefined
+          : buildResolvedCliConfig(body.clientId, defaultCliForClient(body.clientId), body.cli);
         createRuntimeCat(projectRoot, {
           catId: body.catId,
           name: body.name,
@@ -685,8 +761,10 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
             (body.clientId === 'anthropic' ||
               body.clientId === 'openai' ||
               body.clientId === 'google' ||
+              body.clientId === 'kimi' ||
               body.clientId === 'opencode'),
-          cli: resolvedCli,
+          // F247 KD-17: cli omitted when cloud-only (Remote MCP) provider.
+          ...(resolvedCli ? { cli: resolvedCli } : {}),
           ...(body.cliConfigArgs ? { cliConfigArgs: body.cliConfigArgs } : {}),
           ...(body.provider || providerNameForValidation
             ? { provider: body.provider ?? providerNameForValidation }
@@ -701,6 +779,12 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
       return { error: message };
     }
 
+    await inheritFullyBlockedMcpCapabilitiesForNewCat(projectRoot, body.catId, managedIdsBefore);
+    // #712: Also inherit fully-blocked MCP state for all governance-registered projects.
+    // Without this, only the active project's capabilities.json gets the new cat added
+    // to blockedCats — other projects' fully-disabled MCPs silently become enabled for
+    // the new member.
+    await inheritBlockedMcpForAllProjects(projectRoot, body.catId, managedIdsBefore);
     const resolved = await reconcileCatRegistry(projectRoot, managedIdsBefore);
     await configEventBus.emitChangeAsync({
       source: 'cat-config',
@@ -845,7 +929,7 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
       });
       const nextGenericAcpMcpSupport =
         effectiveClient === 'acp'
-          ? resolveGenericAcpMcpSupportForPatch(body.mcpSupport, body.acp, isClientSwitch, currentAcpConfig)
+          ? resolveGenericAcpMcpSupportForPatch(body.mcpSupport, body.acp, isClientSwitch)
           : body.mcpSupport;
       updateRuntimeCat(projectRoot, request.params.id, {
         ...(body.name !== undefined ? { name: body.name } : {}),
@@ -948,6 +1032,10 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
         }
         throw err;
       }
+      // #712: Remove deleted cat from blockedCats across all projects.
+      // Without this, the deleted cat's ID lingers as a ghost entry in MCP
+      // access control, which is harmless at runtime but confusing in the UI.
+      await cleanupBlockedMcpForAllProjects(projectRoot, request.params.id);
       await reconcileCatRegistry(projectRoot, managedIdsBefore);
       await configEventBus.emitChangeAsync({
         source: 'cat-config',

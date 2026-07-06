@@ -396,7 +396,7 @@ if (-not $SkipInstaller) {
         if (Test-Path $unofficial) {
             Copy-Item $unofficial $zhIsl
         } else {
-            $url = "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
+            $url = "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl"
             Invoke-WebRequest -Uri $url -OutFile $zhIsl -ErrorAction Stop
         }
         Write-Host "  Installed ChineseSimplified.isl" -ForegroundColor Gray

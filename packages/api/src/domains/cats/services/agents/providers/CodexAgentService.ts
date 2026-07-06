@@ -15,10 +15,22 @@
  *   turn.started / turn.completed / 其余 item 事件 → 跳过
  */
 
-import { existsSync } from 'node:fs';
-import { dirname, join, parse, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type CatId, createCatId } from '@cat-cafe/shared';
+import {
+  resolveBinaryRoot,
+  resolvePencilCommand,
+  resolveServersForCat,
+} from '../../../../../config/capabilities/capability-orchestrator.js';
+import {
+  CAT_CAFE_SPLIT_ENTRYPOINTS,
+  MCP_CALLBACK_ENV_KEYS,
+  resolveCatCafeNodeCommand,
+} from '../../../../../config/capabilities/mcp-constants.js';
 import { getCatContextWindowConfig, getCatEffort } from '../../../../../config/cat-config-loader.js';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { getCodexApprovalPolicy, getCodexSandboxMode } from '../../../../../config/codex-cli.js';
@@ -28,6 +40,7 @@ import { formatCliExitError } from '../../../../../utils/cli-format.js';
 import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/cli-resolve.js';
 import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
+import { findMonorepoRoot } from '../../../../../utils/monorepo-root.js';
 import { sanitizeCliStderr } from '../../../../../utils/sanitize-cli-stderr.js';
 import { AuditEventTypes, getEventAuditLog } from '../../orchestration/EventAuditLog.js';
 import { CliRawArchive } from '../../session/CliRawArchive.js';
@@ -213,28 +226,6 @@ function stripReservedSystemConfigs(args: string[], catId: string): string[] {
  * Ensure Codex subprocess always receives cat-cafe MCP server config
  * based on the current thread working directory.
  */
-// F193 Phase C: split-only. Legacy `cat-cafe` (all-in-one via
-// registerFullToolset) is no longer auto-provisioned because it exposes
-// tool surfaces now hosted directly by split servers — keeping both would
-// duplicate split tool surfaces in Codex sessions (cloud round 6 P1).
-const CAT_CAFE_MCP_SERVER_ENTRIES = [
-  ['cat-cafe-collab', 'collab.js'],
-  ['cat-cafe-memory', 'memory.js'],
-  ['cat-cafe-signals', 'signals.js'],
-  ['cat-cafe-limb', 'limb.js'],
-  ['cat-cafe-audio', 'audio.js'],
-  ['cat-cafe-finance', 'finance.js'],
-] as const;
-const CAT_CAFE_MCP_CALLBACK_ENV_KEYS = [
-  'CAT_CAFE_API_URL',
-  'CAT_CAFE_INVOCATION_ID',
-  'CAT_CAFE_CALLBACK_TOKEN',
-  'CAT_CAFE_THREAD_ID',
-  'CAT_CAFE_USER_ID',
-  'CAT_CAFE_CAT_ID',
-  'CAT_CAFE_SIGNAL_USER',
-] as const;
-
 function resolveAllowedWorkspaceDirsForMcp(workingDirectory?: string): string {
   const explicitAllowed = process.env.ALLOWED_WORKSPACE_DIRS?.trim();
   if (explicitAllowed) return explicitAllowed;
@@ -245,29 +236,128 @@ function resolveAllowedWorkspaceDirsForMcp(workingDirectory?: string): string {
   return process.cwd();
 }
 
-function pushCatCafeMcpEnvConfig(
-  args: string[],
-  serverName: string,
-  allowedWorkspaceDirs: string,
-  callbackEnv?: Record<string, string>,
-): void {
-  args.push('--config', `mcp_servers.${serverName}.env.ALLOWED_WORKSPACE_DIRS=${toTomlString(allowedWorkspaceDirs)}`);
+const WINDOWS_ABSOLUTE_PATH_PATTERN = /^(?:[A-Za-z]:[\\/]|\\\\)/;
 
-  for (const key of CAT_CAFE_MCP_CALLBACK_ENV_KEYS) {
-    const value = callbackEnv?.[key];
-    if (!value) continue;
-    args.push('--config', `mcp_servers.${serverName}.env.${key}=${toTomlString(value)}`);
-  }
+function isAbsoluteMcpPath(value: string): boolean {
+  return isAbsolute(value) || WINDOWS_ABSOLUTE_PATH_PATTERN.test(value);
 }
 
-function buildCatCafeMcpConfigArgs(workingDirectory?: string, callbackEnv?: Record<string, string>): string[] {
+function resolveCodexMcpWorkingDir(workingDir: string | undefined, projectRoot: string): string | undefined {
+  const trimmed = workingDir?.trim();
+  if (!trimmed) return undefined;
+  if (isAbsolute(trimmed)) return resolve(trimmed);
+  if (WINDOWS_ABSOLUTE_PATH_PATTERN.test(trimmed)) return trimmed;
+  return resolve(projectRoot, trimmed);
+}
+
+function resolveCodexMcpArgs(
+  args: readonly string[] | undefined,
+  workingDir: string | undefined,
+  projectRoot: string,
+): string[] {
+  return (args ?? []).map((arg) => {
+    if (isAbsoluteMcpPath(arg) || arg.startsWith('-')) return arg;
+    if (workingDir) {
+      const fromWorkDir = resolve(workingDir, arg);
+      if (existsSync(fromWorkDir)) return fromWorkDir;
+    }
+    const fromRoot = resolve(projectRoot, arg);
+    if (existsSync(fromRoot)) return fromRoot;
+    return arg;
+  });
+}
+
+function isPathLikeMcpCommand(command: string): boolean {
+  return isAbsoluteMcpPath(command) || command.startsWith('.') || command.includes('/') || command.includes('\\');
+}
+
+function resolveCodexMcpCommand(command: string, workingDir: string | undefined, projectRoot: string): string {
+  if (!isPathLikeMcpCommand(command) || isAbsoluteMcpPath(command)) return command;
+  if (workingDir) {
+    const fromWorkDir = resolve(workingDir, command);
+    if (existsSync(fromWorkDir)) return fromWorkDir;
+  }
+  const fromRoot = resolve(projectRoot, command);
+  if (existsSync(fromRoot)) return fromRoot;
+  return command;
+}
+
+function writeCodexMcpEnvWrapper(spec: {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd?: string;
+}): { command: string; args: string[] } {
+  const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-codex-mcp-'));
+  const wrapperPath = join(dir, 'mcp-env-wrapper.mjs');
+  const specPath = join(dir, 'mcp-env-spec.json');
+  writeFileSync(
+    wrapperPath,
+    [
+      "import { spawn } from 'node:child_process';",
+      "import { readFileSync, rmSync } from 'node:fs';",
+      "import { dirname } from 'node:path';",
+      'const specPath = process.argv[2];',
+      'const wrapperPath = process.argv[1];',
+      "const spec = JSON.parse(readFileSync(specPath, 'utf8'));",
+      'try { rmSync(specPath, { force: true }); } catch {}',
+      'const child = spawn(spec.command, spec.args ?? [], {',
+      '  cwd: spec.cwd || process.cwd(),',
+      '  env: { ...process.env, ...(spec.env ?? {}) },',
+      "  stdio: 'inherit',",
+      '});',
+      'const cleanup = () => {',
+      '  try { rmSync(wrapperPath, { force: true }); } catch {}',
+      '  try { rmSync(dirname(wrapperPath), { recursive: true, force: true }); } catch {}',
+      '};',
+      "child.on('error', (err) => {",
+      '  cleanup();',
+      '  console.error(err?.stack || String(err));',
+      '  process.exit(1);',
+      '});',
+      "child.on('exit', (code, signal) => {",
+      '  cleanup();',
+      '  if (signal) process.kill(process.pid, signal);',
+      '  process.exit(code ?? 0);',
+      '});',
+      '',
+    ].join('\n'),
+    { encoding: 'utf8', mode: 0o600 },
+  );
+  writeFileSync(specPath, JSON.stringify(spec), { encoding: 'utf8', mode: 0o600 });
+  return { command: resolveCatCafeNodeCommand(), args: [wrapperPath, specPath] };
+}
+
+/**
+ * #712: Build Codex MCP CLI --config args from capabilities.json at invoke time.
+ *
+ * Reads capabilities.json to inject ALL enabled MCP servers (builtins + externals)
+ * and explicitly disables off-capabilities servers so stale .codex/config.toml
+ * entries don't leak through.
+ *
+ * Pencil resolver entries are resolved at invoke time via resolvePencilCommand
+ * (same pattern as ClaudeAgentService). streamableHttp is supported via
+ * --config mcp_servers.X.url=... injection.
+ */
+async function buildCatCafeMcpArgs(
+  callbackEnv?: Record<string, string>,
+  workingDirectory?: string,
+): Promise<{ args: string[]; bearerEnv: Record<string, string> }> {
+  if (!callbackEnv) return { args: [], bearerEnv: {} };
+
+  /** Bearer tokens extracted from headers — keyed by env var name, valued by token. */
+  const bearerEnv: Record<string, string> = {};
+
+  const runtimeRoot = resolveBinaryRoot();
   const fileDir = dirname(fileURLToPath(import.meta.url));
+  const moduleRepoRoot = findMonorepoRoot(fileDir);
   // The thread workingDirectory is the user's project/workspace. Clowder AI MCP
   // binaries are runtime-owned, so resolving from workingDirectory can pick a
   // fork checkout with incomplete node_modules and silently drop all MCP tools.
   const candidateRoots = [
-    process.env.CAT_CAFE_RUNTIME_ROOT?.trim(),
+    runtimeRoot,
     process.cwd(),
+    moduleRepoRoot,
     // file path: packages/api/src/domains/cats/services/agents/providers/CodexAgentService.ts
     // repo root = dirname(fileURLToPath(import.meta.url)) up to .../cat-cafe
     resolve(fileDir, '../../../../../../../..'),
@@ -281,29 +371,15 @@ function buildCatCafeMcpConfigArgs(workingDirectory?: string, callbackEnv?: Reco
       break;
     }
   }
-  if (!mcpDistDir) return [];
+  if (!mcpDistDir) return { args: [], bearerEnv: {} };
 
+  const binaryProjectRoot = resolve(mcpDistDir, '../../..');
+  const capabilitiesProjectRoot = binaryProjectRoot;
+  const catId = callbackEnv.CAT_CAFE_CAT_ID;
   const args: string[] = [];
   const allowedWorkspaceDirs = resolveAllowedWorkspaceDirsForMcp(workingDirectory);
 
-  // F213 (2026-05-26, post 砚砚 review P2 fix): L4 per-invocation dummy disabled
-  // override for the legacy `cat-cafe` server. L5 startup cleanup
-  // (`mcp-config-adapters.ts` writers + `deprecated-managed-servers.ts` registry)
-  // only writes to `<projectRoot>/.codex/config.toml`, so legacy entries in
-  // user-level (`~/.codex/config.toml`), `$CODEX_HOME/config.toml`, or system
-  // (`/etc/codex/config.toml`) config files survive cleanup. Without this L4
-  // override, codex would load those surviving legacy entries with no
-  // callback env → fail closed.
-  //
-  // Dummy disabled form (echo + legacy-shim + enabled=false) verified by 砚砚
-  // strict-npm-Codex reproducer: passes config parse (complete transport
-  // definition, not partial) + codex skips server startup (enabled=false).
-  // Per-invocation `--config` is the highest priority override, beating any
-  // legacy entry from any source. This is L4's runtime safety net for the
-  // case L5 cleanup cannot prove ownership.
-  //
-  // See ADR-036 amendment 2026-05-26 + `docs/features/F213-stale-mcp-config-cleanup.md`
-  // + `docs/discussions/2026-05-26-codex-mcp-legacy-deprecation/README.md` §6.2.
+  // F213: L4 per-invocation dummy disabled override for legacy `cat-cafe` server.
   args.push(
     '--config',
     'mcp_servers.cat-cafe.command="echo"',
@@ -313,25 +389,261 @@ function buildCatCafeMcpConfigArgs(workingDirectory?: string, callbackEnv?: Reco
     'mcp_servers.cat-cafe.enabled=false',
   );
 
-  for (const [serverName, entrypoint] of CAT_CAFE_MCP_SERVER_ENTRIES) {
-    const serverPath = resolve(mcpDistDir, entrypoint);
-    if (!existsSync(serverPath)) continue;
+  // #712: Read capabilities.json and inject ALL enabled MCP servers at invoke time.
+  let resolved = false;
+  const enabledServers: string[] = [];
+  const disabledServers: string[] = [];
+  try {
+    // F249: Project config is the single truth source for MCP resolution.
+    // Try project first; fall back to global for uninitialized projects.
+    let capConfig = null;
+    // #712 P2-2: track which root supplied the config so relative paths
+    // in external MCP entries resolve against the correct base directory.
+    let configSourceRoot = capabilitiesProjectRoot;
+    let accessScope: 'global' | 'project' = 'global';
+    if (workingDirectory && workingDirectory !== capabilitiesProjectRoot) {
+      try {
+        const projectRaw = readFileSync(join(workingDirectory, '.cat-cafe', 'capabilities.json'), 'utf-8');
+        const parsed = JSON.parse(projectRaw);
+        if (parsed?.version === 1 || parsed?.version === 2) {
+          capConfig = parsed;
+          configSourceRoot = workingDirectory;
+          accessScope = 'project';
+        }
+      } catch {
+        /* No project config — fall back to global */
+      }
+    }
+    if (!capConfig) {
+      const raw = readFileSync(join(capabilitiesProjectRoot, '.cat-cafe', 'capabilities.json'), 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed?.version === 1 || parsed?.version === 2) capConfig = parsed;
+      configSourceRoot = capabilitiesProjectRoot;
+    }
+    if (capConfig && catId) {
+      for (const s of resolveServersForCat(capConfig, catId, { accessScope }) as Array<{
+        name: string;
+        enabled: boolean;
+        command: string;
+        args?: string[];
+        env?: Record<string, string>;
+        resolver?: string;
+        transport?: string;
+        url?: string;
+        headers?: Record<string, string>;
+        source: string;
+        workingDir?: string;
+      }>) {
+        // Suppress disabled servers with a complete dummy shape so any stale
+        // .codex/config.toml entries cannot revive. Bare `enabled=false` fails
+        // Codex ≥0.142 schema validation (requires transport fields); including
+        // command+args satisfies the schema — same principle as the legacy
+        // `cat-cafe` shim above (L371-379).
+        if (!s.enabled) {
+          disabledServers.push(s.name);
+          const dummyToml = /^[A-Za-z0-9_-]+$/.test(s.name) ? s.name : `"${s.name}"`;
+          if (s.transport === 'streamableHttp' && s.url) {
+            // URL-based disabled: emit url + enabled=false to avoid transport
+            // conflict with stale config.toml URL entries — overlaying stdio
+            // fields (command/args) on an existing URL TOML table causes Codex
+            // CLI error "url is not supported for stdio".
+            args.push(
+              '--config',
+              `mcp_servers.${dummyToml}.url=${toTomlString(s.url)}`,
+              '--config',
+              `mcp_servers.${dummyToml}.enabled=false`,
+            );
+          } else {
+            args.push(
+              '--config',
+              `mcp_servers.${dummyToml}.command="echo"`,
+              '--config',
+              `mcp_servers.${dummyToml}.args=[${toTomlString('disabled-shim')}]`,
+              '--config',
+              `mcp_servers.${dummyToml}.enabled=false`,
+            );
+          }
+          continue;
+        }
+        // Pencil: resolver-backed entry — resolve the binary at invoke time
+        // (same pattern as ClaudeAgentService). The resolver scans the local
+        // machine for the latest Pencil MCP binary and returns {command, args}.
+        if (s.resolver === 'pencil') {
+          const tomlName = /^[A-Za-z0-9_-]+$/.test(s.name) ? s.name : `"${s.name}"`;
+          const pencil = await resolvePencilCommand({ projectRoot: configSourceRoot });
+          if (pencil) {
+            enabledServers.push(s.name);
+            const argsToml = pencil.args.map(toTomlString).join(', ');
+            args.push(
+              '--config',
+              `mcp_servers.${tomlName}.command=${toTomlString(pencil.command)}`,
+              '--config',
+              `mcp_servers.${tomlName}.args=[${argsToml}]`,
+              '--config',
+              `mcp_servers.${tomlName}.enabled=true`,
+            );
+          } else {
+            // No pencil installation found — emit disabled dummy to prevent
+            // stale .codex/config.toml entries from reviving an old binary.
+            disabledServers.push(s.name);
+            args.push(
+              '--config',
+              `mcp_servers.${tomlName}.command="echo"`,
+              '--config',
+              `mcp_servers.${tomlName}.args=[${toTomlString('disabled-shim')}]`,
+              '--config',
+              `mcp_servers.${tomlName}.enabled=false`,
+            );
+          }
+          continue;
+        }
 
-    args.push(
-      '--config',
-      `mcp_servers.${serverName}.command="node"`,
-      '--config',
-      `mcp_servers.${serverName}.args=[${toTomlString(serverPath)}]`,
-      '--config',
-      `mcp_servers.${serverName}.enabled=true`,
-      '--config',
-      `mcp_servers.${serverName}.default_tools_approval_mode="approve"`,
-    );
+        // streamableHttp: inject URL directly (Codex CLI supports `--url` / `mcp_servers.X.url`).
+        // Auth: Codex uses `bearer_token_env_var` (not arbitrary headers). If the
+        // descriptor has an `Authorization: Bearer <token>` header, we extract
+        // the token into an env var and point `bearer_token_env_var` at it.
+        if (s.transport === 'streamableHttp' && s.url) {
+          enabledServers.push(s.name);
+          const tomlName = /^[A-Za-z0-9_-]+$/.test(s.name) ? s.name : `"${s.name}"`;
+          args.push(
+            '--config',
+            `mcp_servers.${tomlName}.url=${toTomlString(s.url)}`,
+            '--config',
+            `mcp_servers.${tomlName}.enabled=true`,
+          );
+          // Map Authorization: Bearer <token> → bearer_token_env_var (#1074)
+          // Header lookup is case-insensitive (HTTP headers are case-insensitive per RFC 7230).
+          const rawAuthHeader = s.headers
+            ? Object.entries(s.headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1]
+            : undefined;
+          if (rawAuthHeader) {
+            // Resolve ${ENV_VAR} placeholders before extraction — same semantics as
+            // mcp-probe.ts resolveEnvVarsInRecord (supports `Bearer ${TOKEN}` patterns).
+            const authHeader = rawAuthHeader.replace(/\$\{([^}]+)\}/g, (_, name) => process.env[name] ?? '');
+            const bearerMatch = /^Bearer\s+(.+)$/i.exec(authHeader);
+            if (bearerMatch) {
+              // Env var name must be collision-proof: distinct MCP names that differ
+              // only by punctuation (e.g. `foo-bar` vs `foo_bar`) would otherwise
+              // map to the same env var, routing one server's token to another.
+              // Append a short stable hash of the raw name for uniqueness.
+              const sanitized = s.name.replace(/[^A-Za-z0-9]/g, '_').toUpperCase();
+              const hash = createHash('sha256').update(s.name).digest('hex').slice(0, 8);
+              const envVarName = `CLOWDER_MCP_BEARER_${sanitized}_${hash}`;
+              bearerEnv[envVarName] = bearerMatch[1];
+              args.push('--config', `mcp_servers.${tomlName}.bearer_token_env_var=${toTomlString(envVarName)}`);
+            }
+          }
+          continue;
+        }
 
-    pushCatCafeMcpEnvConfig(args, serverName, allowedWorkspaceDirs, callbackEnv);
+        let cmd: string | undefined;
+        let cmdArgs: string[] | undefined;
+        let envEntries: Record<string, string> | undefined;
+        // Managed split: source='cat-cafe' + name in entrypoint map.
+        // Same-repo external migration shapes (F193): source='external' but
+        // binary suffix matches our own split entrypoint — these arise from
+        // ensureCatCafeMainServer when hasAnyId prevents managed entry creation.
+        // Both MUST resolve binary from current mcpDistDir (not the entry's
+        // args[0], which may hold a stale worktree absolute path) and receive
+        // managed env injection (callback env, workspace dirs, approval mode).
+        const isManagedCatCafe = s.source === 'cat-cafe' && CAT_CAFE_SPLIT_ENTRYPOINTS.has(s.name);
+        const isSameRepoSplit =
+          !isManagedCatCafe &&
+          s.source === 'external' &&
+          CAT_CAFE_SPLIT_ENTRYPOINTS.has(s.name) &&
+          typeof s.args?.[0] === 'string' &&
+          s.args[0].replace(/\\/g, '/').endsWith(`packages/mcp-server/dist/${CAT_CAFE_SPLIT_ENTRYPOINTS.get(s.name)}`);
+        const isCatCafe = isManagedCatCafe || isSameRepoSplit;
+        const workingDir = resolveCodexMcpWorkingDir(s.workingDir, configSourceRoot);
+
+        if (isCatCafe) {
+          const ep = CAT_CAFE_SPLIT_ENTRYPOINTS.get(s.name)!;
+          const epPath = resolve(mcpDistDir!, ep);
+          if (!existsSync(epPath)) continue;
+          cmd = resolveCatCafeNodeCommand();
+          cmdArgs = [epPath];
+        } else if (s.command) {
+          cmd = resolveCodexMcpCommand(s.command, workingDir, configSourceRoot);
+          cmdArgs = resolveCodexMcpArgs(s.args, workingDir, configSourceRoot);
+          if (s.env && Object.keys(s.env).length > 0) envEntries = s.env;
+        }
+        if (!cmd) continue;
+        if (envEntries) {
+          const wrapped = writeCodexMcpEnvWrapper({
+            command: cmd,
+            args: cmdArgs ?? [],
+            env: envEntries,
+            ...(workingDir ? { cwd: workingDir } : {}),
+          });
+          cmd = wrapped.command;
+          cmdArgs = wrapped.args;
+        }
+        enabledServers.push(s.name);
+
+        const tomlName = /^[A-Za-z0-9_-]+$/.test(s.name) ? s.name : `"${s.name}"`;
+        args.push(
+          '--config',
+          `mcp_servers.${tomlName}.command=${toTomlString(cmd)}`,
+          '--config',
+          `mcp_servers.${tomlName}.args=[${(cmdArgs ?? []).map(toTomlString).join(', ')}]`,
+          '--config',
+          `mcp_servers.${tomlName}.enabled=true`,
+        );
+        if (isCatCafe) {
+          args.push('--config', `mcp_servers.${tomlName}.default_tools_approval_mode="approve"`);
+          args.push(
+            '--config',
+            `mcp_servers.${tomlName}.env.ALLOWED_WORKSPACE_DIRS=${toTomlString(allowedWorkspaceDirs)}`,
+          );
+          for (const key of MCP_CALLBACK_ENV_KEYS) {
+            const value = callbackEnv[key];
+            if (value) args.push('--config', `mcp_servers.${tomlName}.env.${key}=${toTomlString(value)}`);
+          }
+        }
+      }
+      resolved = true;
+    }
+  } catch {
+    // best-effort fallback below
   }
 
-  return args;
+  if (!resolved) {
+    for (const [serverName, entrypoint] of CAT_CAFE_SPLIT_ENTRYPOINTS) {
+      const serverPath = resolve(mcpDistDir, entrypoint);
+      if (!existsSync(serverPath)) continue;
+      args.push(
+        '--config',
+        `mcp_servers.${serverName}.command=${toTomlString(resolveCatCafeNodeCommand())}`,
+        '--config',
+        `mcp_servers.${serverName}.args=[${toTomlString(serverPath)}]`,
+        '--config',
+        `mcp_servers.${serverName}.enabled=true`,
+        '--config',
+        `mcp_servers.${serverName}.default_tools_approval_mode="approve"`,
+      );
+      args.push(
+        '--config',
+        `mcp_servers.${serverName}.env.ALLOWED_WORKSPACE_DIRS=${toTomlString(allowedWorkspaceDirs)}`,
+      );
+      for (const key of MCP_CALLBACK_ENV_KEYS) {
+        const value = callbackEnv[key];
+        if (!value) continue;
+        args.push('--config', `mcp_servers.${serverName}.env.${key}=${toTomlString(value)}`);
+      }
+    }
+  }
+  log.debug(
+    {
+      provider: 'codex',
+      catId,
+      resolvedFrom: resolved ? 'capabilities.json' : 'fallback',
+      enabledServers,
+      disabledServers,
+      totalArgs: args.length,
+    },
+    '#712: MCP invoke-time injection',
+  );
+  return { args, bearerEnv };
 }
 
 export function isGitRepositoryPath(workingDirectory: string): boolean {
@@ -467,7 +779,11 @@ export class CodexAgentService implements AgentService {
           `model_auto_compact_token_limit=${ctxConfig.autoCompactTokenLimit}`,
         ]
       : [];
-    const catCafeMcpArgs = buildCatCafeMcpConfigArgs(options?.workingDirectory, options?.callbackEnv);
+    // #712: Inject ALL enabled MCP servers from capabilities.json at invoke time.
+    const { args: catCafeMcpArgs, bearerEnv: mcpBearerEnv } = await buildCatCafeMcpArgs(
+      options?.callbackEnv,
+      options?.workingDirectory,
+    );
     const gitRepoArgs = buildGitRepoArgs(options?.workingDirectory);
     // User-defined CLI args from the member editor (#567) — passed as-is, no implicit wrapping.
     // Each entry is split by whitespace (e.g. "--config model_reasoning_effort=\"low\"").
@@ -671,6 +987,12 @@ export class CodexAgentService implements AgentService {
           if (customBaseUrl && (k === 'OPENAI_BASE_URL' || k === 'OPENAI_API_BASE')) continue;
           codexEnv[k] = v;
         }
+      }
+
+      // #1074: Inject bearer token env vars extracted from streamableHttp headers.
+      // Codex CLI reads bearer_token_env_var from process env at connect time.
+      for (const [k, v] of Object.entries(mcpBearerEnv)) {
+        codexEnv[k] = v;
       }
 
       const semanticCompletionController = new AbortController();

@@ -52,7 +52,13 @@ export {
   isAgentKeyFailureReason,
 } from './agent-key-reasons.js';
 // Approval Hub types (F246 统一审批中心)
-export type { ApprovalFeatureId, ApprovalItem, ApprovalItemStatus } from './approval-hub.js';
+export type {
+  ApprovalFeatureId,
+  ApprovalItem,
+  ApprovalItemStatus,
+  SettledApprovalItem,
+  SettledStatus,
+} from './approval-hub.js';
 // Authorization types (猫猫授权系统)
 export type {
   AuthorizationAuditEntry,
@@ -160,9 +166,11 @@ export type {
   GovernanceRule,
   LockVersion,
   McpDeleteParams,
+  McpEnvEntry,
   McpInstallPreview,
   McpInstallRequest,
   McpServerDescriptor,
+  McpSyncState,
   McpToolInfo,
   McpTransport,
   ProbeState,
@@ -303,7 +311,13 @@ export type {
   TriagePlanStatus,
   TriagePlanTarget,
 } from './concierge.js';
-export { CONCIERGE_CONFIG_DEFAULTS } from './concierge.js';
+export {
+  BALL_SIZE_DEFAULT,
+  BALL_SIZE_MAX,
+  BALL_SIZE_MIN,
+  CONCIERGE_CONFIG_DEFAULTS,
+  clampBallSize,
+} from './concierge.js';
 // Unified Config Field types (F240 KD-15 — shared by Plugin + IM Connector)
 export type {
   ActionDef,
@@ -481,6 +495,15 @@ export {
   generateSessionId,
   generateThreadId,
 } from './ids.js';
+// F237: Injection Trace types (v0 — observability layer)
+export type {
+  DeliveryChannel,
+  InjectionStage,
+  InjectionTraceDetail,
+  InjectionTraceSummary,
+  ObservedSegment,
+  StageDeliveryDecision,
+} from './injection-trace.js';
 // Intent Card + Need Audit types (F076 需求翻译官)
 export type {
   CreateIntentCardInput,
@@ -520,6 +543,8 @@ export type {
   LimbActionLogEntry,
   LimbAuthLevel,
   LimbCapability,
+  LimbCommandParamSchema,
+  LimbCommandSchema,
   LimbInvokeResult,
   LimbLease,
   LimbNodeRecord,
@@ -759,6 +784,16 @@ export {
   type SopDefinition,
   type SopDefinitionId,
 } from './sop-definition.generated.js';
+// F252: Story Annotation types (Phase D — annotations at arbitrary timeline points)
+export type { AnnotationSet, StoryAnnotation } from './story-annotation.js';
+// F252: Story Rendering types (Phase C BFF → Frontend)
+export type {
+  CausalEdgeDTO,
+  FeatureStoryRenderingDTO,
+  SwimlaneDTO,
+  TimelineMilestoneDTO,
+  TrajectoryMarkerDTO,
+} from './story-rendering.js';
 // STT types (F088 Phase 6 — Speech-to-Text)
 export type { ISttProvider, SttTranscribeRequest, SttTranscribeResult } from './stt.js';
 // Study types (F091 Signal Study Mode)

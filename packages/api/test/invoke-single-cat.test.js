@@ -2570,6 +2570,14 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       ),
       'invalid_thinking_signature',
     );
+    // Kimi: generic -32603 must NOT be classified as missing_session (PR #1058 P1-3)
+    assert.equal(classifyResumeFailure('prompt_failure: ACP error -32603: Internal error'), null);
+    // Only -32603 with bootstrap CWD/FileNotFoundError evidence → missing_session
+    assert.equal(
+      classifyResumeFailure('ACP error -32603: Internal error: FileNotFoundError: [Errno 2] No such file or directory'),
+      'missing_session',
+    );
+    assert.equal(classifyResumeFailure('ACP error -32603: os.getcwd() failed'), 'missing_session');
     assert.equal(classifyResumeFailure('upstream timeout'), null);
   });
 
@@ -2713,6 +2721,80 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(optionsSeen[0].cliSessionId, 'stale-sess', 'first attempt should have cliSessionId');
     // Retry after self-heal should NOT carry stale cliSessionId
     assert.equal(optionsSeen[1].cliSessionId, undefined, 'retry should clear cliSessionId');
+  });
+
+  it('clowder-ai#1038: opencode "Session not found" (in cliDiagnostics) self-heals to fresh session', async () => {
+    // opencode's stale-session signal surfaces in metadata.cliDiagnostics.reasonCode, NOT in
+    // msg.error (which is the generic exit-1 string with a [session_not_found] suffix). Without
+    // the reasonCode route, isMissingClaudeSessionError(msg.error) misses it and the error would
+    // fall into transient retry (Path B), re-running the same stale --session forever.
+    let invokeCount = 0;
+    const sessionDeletes = [];
+    const optionsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push({ ...options });
+        invokeCount++;
+        if (invokeCount === 1) {
+          yield {
+            type: 'error',
+            catId: 'opus',
+            error: 'opencode CLI: CLI 异常退出 (code: 1, signal: none) [session_not_found]',
+            metadata: {
+              cliDiagnostics: {
+                reasonCode: 'session_not_found',
+                publicSummary: 'CLI session 找不到',
+                publicHint: '已自动新建会话重试本轮',
+                debugRef: { command: 'opencode', exitCode: 1, signal: null },
+              },
+            },
+            timestamp: Date.now(),
+          };
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+          return;
+        }
+        yield { type: 'session_init', catId: 'opus', sessionId: 'new-sess', timestamp: Date.now() };
+        yield { type: 'text', catId: 'opus', content: 'recovered', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    deps.sessionManager = {
+      get: async () => 'stale-sess',
+      store: async () => {},
+      delete: async (u, c, t) => {
+        sessionDeletes.push(`${u}:${c}:${t}`);
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'user-1038',
+        threadId: 'thread-1038',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(invokeCount, 2, 'should re-invoke once after stale-session diagnostic');
+    assert.equal(optionsSeen[0].sessionId, 'stale-sess', 'first attempt should resume stale session');
+    assert.equal(optionsSeen[1].sessionId, undefined, 'retry should drop --session (fresh)');
+    assert.equal(optionsSeen[0].cliSessionId, 'stale-sess', 'first attempt carries cliSessionId');
+    assert.equal(optionsSeen[1].cliSessionId, undefined, 'retry clears cliSessionId');
+    assert.deepEqual(sessionDeletes, ['user-1038:opus:thread-1038'], 'should delete stale session before retry');
+    assert.ok(
+      msgs.some((m) => m.type === 'text' && m.content === 'recovered'),
+      'should recover and stream retry result',
+    );
+    assert.equal(
+      msgs.some((m) => m.type === 'error' && m.metadata?.cliDiagnostics?.reasonCode === 'session_not_found'),
+      false,
+      'stale-session error should be suppressed when retry succeeds',
+    );
   });
 
   it('F-BLOAT cloud P1: self-heal retry re-injects systemPrompt when session drops', async () => {
@@ -5707,6 +5789,9 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const mcpDir = join(root, 'packages', 'mcp-server', 'dist');
     await mkdir(mcpDir, { recursive: true });
     await writeFile(join(mcpDir, 'index.js'), '// stub mcp server', 'utf-8');
+    for (const entry of ['collab.js', 'memory.js', 'signals.js', 'limb.js']) {
+      await writeFile(join(mcpDir, entry), '// stub split server', 'utf-8');
+    }
 
     const anthropicProfile = await createProviderProfile(root, {
       provider: 'anthropic',
@@ -5782,13 +5867,19 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-ant-mcp-key');
     assert.ok(seenRuntimeConfig, 'runtime config must be parseable');
     assert.ok(seenRuntimeConfig.mcp, 'runtime config must contain mcp section');
-    const mcpCafe = seenRuntimeConfig.mcp['cat-cafe'];
-    assert.equal(mcpCafe.type, 'local');
-    assert.equal(mcpCafe.command.length, 2);
-    assert.equal(mcpCafe.command[0], 'node');
+    assert.equal(seenRuntimeConfig.mcp['cat-cafe'], undefined, 'monolith must not be injected');
+    const mcpCollab = seenRuntimeConfig.mcp['cat-cafe-collab'];
+    assert.ok(mcpCollab, 'split server cat-cafe-collab expected');
+    assert.equal(mcpCollab.type, 'local');
+    assert.equal(mcpCollab.command.length, 2);
+    const nodeBin91 = mcpCollab.command[0];
     assert.ok(
-      mcpCafe.command[1].endsWith('/packages/mcp-server/dist/index.js'),
-      `mcp command[1] must point to mcp-server entry: ${mcpCafe.command[1]}`,
+      nodeBin91 === 'node' || nodeBin91.endsWith('/node') || nodeBin91.endsWith('\\node.exe'),
+      `command[0] must be a node binary: ${nodeBin91}`,
+    );
+    assert.ok(
+      mcpCollab.command[1].endsWith('/packages/mcp-server/dist/collab.js'),
+      `mcp command[1] must point to split entrypoint: ${mcpCollab.command[1]}`,
     );
     // Config file should be cleaned up after invocation
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
@@ -5809,6 +5900,9 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
       const envMcpPath = join(externalMcpDir, 'index.js');
       await writeFile(envMcpPath, '// stub mcp server from env', 'utf-8');
+      for (const entry of ['collab.js', 'memory.js', 'signals.js', 'limb.js']) {
+        await writeFile(join(externalMcpDir, entry), '// stub split server', 'utf-8');
+      }
 
       const anthropicProfile = await createProviderProfile(root, {
         provider: 'anthropic',
@@ -5892,10 +5986,16 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-ant-mcp-env-key');
       assert.ok(seenRuntimeConfig, 'runtime config must be parseable');
       assert.ok(seenRuntimeConfig.mcp, 'runtime config must contain mcp section');
-      const mcpCafe = seenRuntimeConfig.mcp['cat-cafe'];
-      assert.equal(mcpCafe.type, 'local');
-      assert.equal(mcpCafe.command[0], 'node');
-      assert.equal(mcpCafe.command[1], envMcpPath);
+      assert.equal(seenRuntimeConfig.mcp['cat-cafe'], undefined, 'monolith must not be injected');
+      const mcpCollab = seenRuntimeConfig.mcp['cat-cafe-collab'];
+      assert.ok(mcpCollab, 'split server cat-cafe-collab expected');
+      assert.equal(mcpCollab.type, 'local');
+      const nodeBin92 = mcpCollab.command[0];
+      assert.ok(
+        nodeBin92 === 'node' || nodeBin92.endsWith('/node') || nodeBin92.endsWith('\\node.exe'),
+        `command[0] must be a node binary: ${nodeBin92}`,
+      );
+      assert.ok(mcpCollab.command[1].endsWith('collab.js'), 'must point to split entrypoint');
       await assert.rejects(readFile(seenConfigPath, 'utf-8'));
     },
   );
@@ -5910,6 +6010,9 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const mcpDir = join(root, 'packages', 'mcp-server', 'dist');
     await mkdir(mcpDir, { recursive: true });
     await writeFile(join(mcpDir, 'index.js'), '// stub mcp server', 'utf-8');
+    for (const entry of ['collab.js', 'memory.js', 'signals.js', 'limb.js']) {
+      await writeFile(join(mcpDir, entry), '// stub split server', 'utf-8');
+    }
 
     // Create a subscription-mode profile (no API key)
     const subscriptionProfile = await createProviderProfile(root, {
@@ -5996,7 +6099,11 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         undefined,
         'non-api_key runtime config must not reference missing CAT_CAFE_OC_BASE_URL',
       );
-      assert.ok(runtimeConfig.mcp?.['cat-cafe'], 'MCP config must still be present for subscription path');
+      assert.equal(runtimeConfig.mcp?.['cat-cafe'], undefined, 'monolith must not be injected for subscription path');
+      assert.ok(
+        runtimeConfig.mcp?.['cat-cafe-collab'],
+        'split server cat-cafe-collab must be present for subscription path',
+      );
     } finally {
       process.chdir(previousCwd);
       catRegistry.reset();

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -482,7 +482,7 @@ describe('PATCH capabilities logic', () => {
 // ────────── Resolve per-cat with overrides ──────────
 
 describe('resolveServersForCat with overrides', () => {
-  it('override disabled wins over global enabled', async () => {
+  it('legacy overrides no longer disable MCPs after F249 blockedCats migration', async () => {
     const { resolveServersForCat } = await import('../dist/config/capabilities/capability-orchestrator.js');
 
     /** @type {any} */
@@ -501,13 +501,13 @@ describe('resolveServersForCat with overrides', () => {
     };
 
     const codex = resolveServersForCat(config, 'codex');
-    assert.equal(codex[0].enabled, false);
+    assert.equal(codex[0].enabled, true, 'legacy overrides are ignored after F249 blockedCats migration');
 
     const opus = resolveServersForCat(config, 'opus');
-    assert.equal(opus[0].enabled, true);
+    assert.equal(opus[0].enabled, true, 'enabled=true migrates to globalEnabled=true when globalEnabled is absent');
   });
 
-  it('override enabled wins over global disabled', async () => {
+  it('legacy overrides do not re-enable globally disabled MCPs after F249 blockedCats migration', async () => {
     const { resolveServersForCat } = await import('../dist/config/capabilities/capability-orchestrator.js');
 
     /** @type {any} */
@@ -517,7 +517,7 @@ describe('resolveServersForCat with overrides', () => {
         {
           id: 'tool',
           type: 'mcp',
-          enabled: false,
+          globalEnabled: false,
           source: 'external',
           mcpServer: { command: 'echo', args: [] },
           overrides: [{ catId: 'opus', enabled: true }],
@@ -526,10 +526,164 @@ describe('resolveServersForCat with overrides', () => {
     };
 
     const opus = resolveServersForCat(config, 'opus');
-    assert.equal(opus[0].enabled, true);
+    assert.equal(opus[0].enabled, false, 'legacy overrides cannot re-enable globally disabled MCPs');
 
     const codex = resolveServersForCat(config, 'codex');
     assert.equal(codex[0].enabled, false);
+  });
+
+  it('returns project-only MCPs from single project config (R4 P1-1)', async () => {
+    const { resolveServersForCat } = await import('../dist/config/capabilities/capability-orchestrator.js');
+
+    // F249: resolver takes a single project config — no global+project merge
+    /** @type {any} */
+    const projectConfig = {
+      version: 1,
+      capabilities: [
+        {
+          id: 'global-tool',
+          type: 'mcp',
+          source: 'external',
+          mcpServer: { command: 'echo', args: ['global'] },
+          blockedCats: [],
+        },
+        {
+          id: 'project-only-tool',
+          type: 'mcp',
+          source: 'external',
+          mcpServer: { command: 'echo', args: ['project-only'] },
+          blockedCats: [],
+        },
+      ],
+    };
+
+    const servers = resolveServersForCat(projectConfig, 'opus');
+    const names = servers.map((s) => s.name);
+    assert.ok(names.includes('global-tool'), 'synced global tool present');
+    assert.ok(names.includes('project-only-tool'), 'project-only tool must be returned');
+    assert.equal(servers.find((s) => s.name === 'project-only-tool').enabled, true);
+  });
+
+  it('applies blockedCats to project MCPs (R4 P1-1)', async () => {
+    const { resolveServersForCat } = await import('../dist/config/capabilities/capability-orchestrator.js');
+
+    // F249: resolver takes single project config directly
+    /** @type {any} */
+    const projectConfig = {
+      version: 1,
+      capabilities: [
+        {
+          id: 'project-tool',
+          type: 'mcp',
+          source: 'external',
+          mcpServer: { command: 'echo', args: ['project'] },
+          blockedCats: ['codex'],
+        },
+      ],
+    };
+
+    const codex = resolveServersForCat(projectConfig, 'codex');
+    assert.equal(codex.length, 1, 'blocked cat still sees the descriptor for board derivation');
+    assert.equal(codex[0].enabled, false, 'blocked cat must not be enabled');
+
+    const opus = resolveServersForCat(projectConfig, 'opus');
+    assert.equal(opus.length, 1, 'unblocked cat must see project-only tool');
+    assert.equal(opus[0].name, 'project-tool');
+  });
+
+  it('single config preserves blockedCats per-tool (R4 P1-1)', async () => {
+    const { resolveServersForCat } = await import('../dist/config/capabilities/capability-orchestrator.js');
+
+    // F249: resolver takes a single project config — no global+project merge
+    /** @type {any} */
+    const projectConfig = {
+      version: 1,
+      capabilities: [
+        {
+          id: 'shared-tool',
+          type: 'mcp',
+          source: 'external',
+          mcpServer: { command: 'echo', args: ['shared'] },
+          blockedCats: ['codex'],
+        },
+        {
+          id: 'local-only',
+          type: 'mcp',
+          source: 'external',
+          mcpServer: { command: 'echo', args: ['local'] },
+          blockedCats: [],
+        },
+      ],
+    };
+
+    // codex: shared-tool disabled, local-only accessible
+    const codex = resolveServersForCat(projectConfig, 'codex');
+    assert.equal(codex.length, 2);
+    assert.equal(codex.find((s) => s.name === 'shared-tool')?.enabled, false);
+    assert.equal(codex.find((s) => s.name === 'local-only')?.enabled, true);
+
+    // opus: both accessible
+    const opus = resolveServersForCat(projectConfig, 'opus');
+    assert.equal(opus.length, 2);
+    const opusNames = opus.map((s) => s.name);
+    assert.ok(opusNames.includes('shared-tool'));
+    assert.ok(opusNames.includes('local-only'));
+  });
+
+  it('project enabled derives from blockedCats, not globalEnabled (R5 P1 regression)', async () => {
+    const { resolveServersForCat } = await import('../dist/config/capabilities/capability-orchestrator.js');
+
+    // F249: resolver takes a single project config. Project enabled derives from
+    // blockedCats, regardless of what globalEnabled says.
+    /** @type {any} */
+    const projectUnblocked = {
+      version: 1,
+      capabilities: [
+        {
+          id: 'tool-a',
+          type: 'mcp',
+          source: 'external',
+          globalEnabled: false,
+          mcpServer: { command: 'echo', args: ['a'] },
+          blockedCats: [],
+        },
+      ],
+    };
+
+    // Board derives enabled from cats: any cat enabled → item enabled
+    const catIds = ['opus', 'codex'];
+    const cats = {};
+    for (const catId of catIds) {
+      const servers = resolveServersForCat(projectUnblocked, catId, { accessScope: 'project' });
+      const server = servers.find((s) => s.name === 'tool-a');
+      cats[catId] = server?.enabled ?? false;
+    }
+    const boardEnabled = Object.values(cats).some(Boolean);
+    assert.equal(boardEnabled, true, 'blockedCats=[] → board item enabled must be true');
+
+    // Converse: all cats blocked → item disabled
+    /** @type {any} */
+    const projectBlocked = {
+      version: 1,
+      capabilities: [
+        {
+          id: 'tool-a',
+          type: 'mcp',
+          source: 'external',
+          mcpServer: { command: 'echo', args: ['a'] },
+          blockedCats: ['opus', 'codex'],
+        },
+      ],
+    };
+
+    const blockedCats = {};
+    for (const catId of catIds) {
+      const servers = resolveServersForCat(projectBlocked, catId, { accessScope: 'project' });
+      const server = servers.find((s) => s.name === 'tool-a');
+      blockedCats[catId] = server?.enabled ?? false;
+    }
+    const blockedEnabled = Object.values(blockedCats).some(Boolean);
+    assert.equal(blockedEnabled, false, 'blockedCats=[all] → board item enabled must be false');
   });
 });
 
@@ -933,12 +1087,82 @@ describe('GET /api/capabilities (Fastify)', () => {
       const debugging = (body.items ?? []).find((item) => item.type === 'skill' && item.id === 'debugging');
       assert.ok(debugging, 'debugging skill should be present');
       assert.deepEqual(debugging.mounts, { claude: true, codex: true, gemini: true, kimi: false });
+      assert.deepEqual(debugging.mountHealth, {
+        enabledMountPoints: ['claude', 'codex', 'gemini', 'kimi'],
+        mountedCount: 3,
+        requiredCount: 3,
+        allMounted: true,
+      });
     } finally {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
       await app.close();
       await rm(projectDir, { recursive: true, force: true });
       await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves project-local plugin skillsSource against selected project for capability health', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { capabilitiesRoutes } = await import('../dist/routes/capabilities.js');
+
+    const rawProjectDir = join('/tmp', `cap-route-test-plugin-source-${Date.now()}`);
+    await mkdir(rawProjectDir, { recursive: true });
+    const projectDir = await realpath(rawProjectDir);
+    const pluginId = 'test-project-local-source-plugin';
+    const skillName = 'project-local-source-skill';
+    const skillsSource = join(projectDir, 'plugins', pluginId, 'skills');
+    const skillSourceDir = join(skillsSource, skillName);
+
+    await mkdir(skillSourceDir, { recursive: true });
+    await writeFile(join(skillSourceDir, 'SKILL.md'), '# Project Local Source Skill\n');
+    for (const provider of ['claude', 'codex', 'gemini', 'kimi']) {
+      const skillsDir = join(projectDir, `.${provider}`, 'skills');
+      const linkPath = join(skillsDir, skillName);
+      await mkdir(skillsDir, { recursive: true });
+      await symlink(relative(dirname(linkPath), skillSourceDir), linkPath);
+    }
+    await writeCapabilitiesConfig(projectDir, {
+      version: 2,
+      capabilities: [
+        {
+          id: skillName,
+          type: 'skill',
+          enabled: true,
+          source: 'cat-cafe',
+          pluginId,
+          skillsSource: relative(projectDir, skillsSource),
+          mountPaths: ['claude', 'codex', 'gemini', 'kimi'],
+        },
+      ],
+    });
+
+    const app = Fastify();
+    await app.register(capabilitiesRoutes);
+    await app.ready();
+
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/capabilities?projectPath=${encodeURIComponent(projectDir)}`,
+        headers: AUTH_HEADERS,
+      });
+
+      assert.equal(res.statusCode, 200);
+      const body = res.json();
+      const target = (body.items ?? []).find((item) => item.type === 'skill' && item.id === skillName);
+      assert.ok(target, 'project-local plugin skill should be listed');
+      assert.equal(target.pluginId, pluginId);
+      assert.deepEqual(target.mounts, { claude: true, codex: true, gemini: true, kimi: true });
+      assert.deepEqual(target.mountHealth, {
+        enabledMountPoints: ['claude', 'codex', 'gemini', 'kimi'],
+        mountedCount: 4,
+        requiredCount: 4,
+        allMounted: true,
+      });
+    } finally {
+      await app.close();
+      await rm(projectDir, { recursive: true, force: true });
     }
   });
 
@@ -1796,7 +2020,7 @@ describe('GET /api/capabilities (Fastify)', () => {
 
     const pluginId = `cap-prune-${Date.now()}`;
     const repoRoot = findRepoRoot();
-    const pluginDir = join(repoRoot, 'plugins', pluginId);
+    const pluginDir = join(repoRoot, 'packages', 'api', 'src', 'plugins', pluginId);
     await mkdir(join(pluginDir, 'skills', 'current'), { recursive: true });
     await writeFile(
       join(pluginDir, 'plugin.yaml'),
@@ -2149,6 +2373,76 @@ describe('GET /api/capabilities (Fastify)', () => {
     await app.close();
   });
 
+  it('project board returns the active MCP override instead of the stale global server', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { capabilitiesRoutes } = await import('../dist/routes/capabilities.js');
+
+    const app = Fastify();
+    app.addHook('preHandler', async (request) => {
+      const raw = request.headers['x-test-session-user'];
+      if (typeof raw === 'string' && raw.trim()) {
+        request.sessionUserId = raw.trim();
+      }
+    });
+    await app.register(capabilitiesRoutes);
+    await app.ready();
+
+    const projectDir = join('/tmp', `cap-route-test-project-override-${Date.now()}`);
+    const prevOwner = process.env.DEFAULT_OWNER_USER_ID;
+    process.env.DEFAULT_OWNER_USER_ID = 'you';
+    await mkdir(projectDir, { recursive: true });
+    try {
+      await writeCapabilitiesConfig(projectDir, {
+        version: 1,
+        capabilities: [
+          {
+            id: 'override-mcp',
+            type: 'mcp',
+            enabled: true,
+            globalEnabled: true,
+            source: 'external',
+            mcpServer: {
+              command: 'node',
+              args: ['global.js'],
+              env: { GLOBAL_TOKEN: 'global-secret' },
+            },
+            mcpServerOverride: {
+              command: 'node',
+              args: ['project.js'],
+              env: { PROJECT_TOKEN: 'project-secret' },
+            },
+          },
+        ],
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/capabilities?projectPath=${encodeURIComponent(projectDir)}`,
+        headers: {
+          ...OWNER_SESSION_HEADERS,
+          host: 'localhost:3004',
+          origin: 'http://localhost:3003',
+        },
+      });
+      assert.equal(res.statusCode, 200, res.payload);
+
+      const body = res.json();
+      const item = body.items.find((i) => i.type === 'mcp' && i.id === 'override-mcp');
+      assert.ok(item, 'Override MCP item should exist');
+      assert.equal(item.hasOverride, true);
+      assert.equal(item.mcpServer.command, 'node');
+      assert.deepEqual(item.mcpServer.args, ['project.js']);
+      assert.deepEqual(item.mcpServer.env, { PROJECT_TOKEN: REDACTED_SECRET });
+      assert.deepEqual(item.mcpServer.envKeys, ['PROJECT_TOKEN']);
+      assert.doesNotMatch(res.payload, /project-secret|global-secret|global.js|GLOBAL_TOKEN/);
+    } finally {
+      if (prevOwner === undefined) delete process.env.DEFAULT_OWNER_USER_ID;
+      else process.env.DEFAULT_OWNER_USER_ID = prevOwner;
+      await rm(projectDir, { recursive: true, force: true });
+      await app.close();
+    }
+  });
+
   it('extracts skill metadata from project-level .kimi/skills SKILL.md', async () => {
     const Fastify = (await import('fastify')).default;
     const { capabilitiesRoutes } = await import('../dist/routes/capabilities.js');
@@ -2201,6 +2495,81 @@ describe('GET /api/capabilities (Fastify)', () => {
         ['test-trigger', 'kimi-test'],
         'Should extract triggers from project .kimi/skills SKILL.md',
       );
+    } finally {
+      await rm(projectDir, { recursive: true, force: true });
+      await app.close();
+    }
+  });
+
+  it('project board item enabled reflects blockedCats, not globalEnabled (R5 P1 route-level regression)', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { capabilitiesRoutes } = await import('../dist/routes/capabilities.js');
+
+    // External project: globalEnabled=false synced, but blockedCats=[] → all cats have access
+    const projectDir = await makeTmpDir('r5-regression');
+    await writeCapabilitiesConfig(projectDir, {
+      version: 1,
+      capabilities: [
+        {
+          id: 'r5-test-tool',
+          type: 'mcp',
+          enabled: false,
+          globalEnabled: false,
+          source: 'external',
+          mcpServer: { command: 'echo', args: ['r5'] },
+          blockedCats: [],
+        },
+      ],
+    });
+
+    const app = Fastify();
+    await app.register(capabilitiesRoutes);
+    await app.ready();
+
+    try {
+      // Request with projectPath → isExternalProject=true
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/capabilities?projectPath=${encodeURIComponent(projectDir)}`,
+        headers: AUTH_HEADERS,
+      });
+      assert.equal(res.statusCode, 200, res.payload);
+      const body = res.json();
+      const item = body.items.find((entry) => entry.id === 'r5-test-tool');
+      assert.ok(item, 'r5-test-tool board item must exist');
+
+      // R5 fix: enabled derived from resolver (blockedCats=[]) → true
+      // Old bug: enabled = globalEnabled ?? cap.enabled = false
+      assert.equal(item.enabled, true, 'globalEnabled=false + blockedCats=[] → board enabled must be true');
+      assert.equal(item.globalEnabled, false, 'globalEnabled still reflects global state');
+
+      // Converse: all cats blocked → item disabled
+      const allCatIds = body.catFamilies.flatMap((f) => f.catIds);
+      assert.ok(allCatIds.length > 0, 'test requires registered cats');
+      await writeCapabilitiesConfig(projectDir, {
+        version: 1,
+        capabilities: [
+          {
+            id: 'r5-test-tool',
+            type: 'mcp',
+            enabled: false,
+            globalEnabled: false,
+            source: 'external',
+            mcpServer: { command: 'echo', args: ['r5'] },
+            blockedCats: allCatIds,
+          },
+        ],
+      });
+
+      const res2 = await app.inject({
+        method: 'GET',
+        url: `/api/capabilities?projectPath=${encodeURIComponent(projectDir)}`,
+        headers: AUTH_HEADERS,
+      });
+      assert.equal(res2.statusCode, 200);
+      const item2 = res2.json().items.find((entry) => entry.id === 'r5-test-tool');
+      assert.ok(item2, 'r5-test-tool board item must exist after blockedCats update');
+      assert.equal(item2.enabled, false, 'blockedCats=[allCatIds] → board enabled must be false');
     } finally {
       await rm(projectDir, { recursive: true, force: true });
       await app.close();
@@ -2594,7 +2963,7 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       assert.equal(res.statusCode, 200, res.payload);
       assert.equal(await realpath(linkPath), await realpath(externalSource));
       const config = await readCapabilitiesConfig(projectDir);
-      assert.equal(config?.capabilities[0]?.enabled, false);
+      assert.equal(config?.capabilities[0]?.globalEnabled, false);
     } finally {
       await app.close();
       await rm(projectDir, { recursive: true, force: true });
@@ -2786,9 +3155,8 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       });
       assert.equal(missingOwner.statusCode, 200, missingOwner.payload);
       let config = await readCapabilitiesConfig(projectDir);
-      // scope=cat writes per-cat override, not cap.enabled
-      const override = config?.capabilities[0]?.overrides?.find((o) => o.catId === 'ragdoll');
-      assert.equal(override?.enabled, false);
+      // scope=cat writes the F249 blockedCats list, not legacy overrides.
+      assert.equal(config?.capabilities[0]?.blockedCats?.includes('ragdoll'), true);
 
       const nonLocalMissingOwner = await patchCapability(app, projectDir, {
         ...OWNER_SESSION_HEADERS,
@@ -2855,11 +3223,10 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       assert.match(JSON.parse(ownerNonLocal.payload).error, /direct localhost/i);
 
       config = await readCapabilitiesConfig(projectDir);
-      // scope=cat writes per-cat override; cap.enabled stays true.
-      // Verify the override from the first successful call persists and
+      // scope=cat writes blockedCats; cap.enabled/globalEnabled stay unchanged.
+      // Verify the blockedCats entry from the first successful call persists and
       // the failed auth attempts didn't mutate it further.
-      const finalOverride = config?.capabilities[0]?.overrides?.find((o) => o.catId === 'ragdoll');
-      assert.equal(finalOverride?.enabled, false);
+      assert.equal(config?.capabilities[0]?.blockedCats?.includes('ragdoll'), true);
     } finally {
       await app.close();
       await rm(projectDir, { recursive: true, force: true });
@@ -2886,9 +3253,8 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       assert.equal(res.json().capability.mcpServer.headers.Authorization, REDACTED_SECRET);
 
       const config = await readCapabilitiesConfig(projectDir);
-      // scope=cat writes per-cat override, cap.enabled stays true
-      const redactOverride = config?.capabilities[0]?.overrides?.find((o) => o.catId === 'ragdoll');
-      assert.equal(redactOverride?.enabled, false);
+      // scope=cat writes blockedCats, cap.enabled/globalEnabled stay unchanged.
+      assert.equal(config?.capabilities[0]?.blockedCats?.includes('ragdoll'), true);
       assert.equal(config?.capabilities[0]?.mcpServer?.env?.API_KEY, 'raw-secret');
       assert.equal(config?.capabilities[0]?.mcpServer?.headers?.Authorization, 'Bearer raw-secret');
 
@@ -2973,11 +3339,11 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
     process.env.DEFAULT_OWNER_USER_ID = 'you';
     const projectDir = await makeTmpDir('patch-preserve-user-skill-on-enable');
     const mainProjectRoot = findRepoRoot();
-    const mainConfig = await readCapabilitiesConfig(mainProjectRoot);
-    const skillName = mainConfig?.capabilities.find(
-      (cap) => cap.type === 'skill' && cap.source === 'cat-cafe' && cap.enabled,
-    )?.id;
-    assert.ok(skillName, 'expected at least one globally enabled cat-cafe skill in the main config');
+    const skillName = 'debugging';
+    assert.ok(
+      existsSync(join(mainProjectRoot, 'cat-cafe-skills', skillName, 'SKILL.md')),
+      'expected debugging to exist as a first-party Clowder AI skill',
+    );
     const localSkillDir = join(projectDir, `.claude/skills/${skillName}`);
     await mkdir(localSkillDir, { recursive: true });
     await writeFile(join(localSkillDir, 'SKILL.md'), `# user ${skillName}\n`);
@@ -3345,9 +3711,9 @@ describe('PATCH /api/capabilities write auth (Fastify)', () => {
       const external = config?.capabilities.find(
         (cap) => cap.type === 'skill' && cap.id === 'debugging' && cap.source === 'external',
       );
-      assert.equal(external?.enabled, false, 'external skill should be toggled');
+      assert.equal(external?.globalEnabled, false, 'external skill should be toggled');
       assert.deepEqual(external?.mountPaths, ['claude'], 'external mount policy should be preserved');
-      assert.equal(firstParty?.enabled, true, 'first-party Clowder AI skill must stay enabled');
+      assert.equal(firstParty?.globalEnabled, true, 'first-party Clowder AI skill must stay enabled');
       assert.deepEqual(firstParty?.mountPaths, ['claude'], 'first-party mount policy must be preserved');
     } finally {
       await app.close();

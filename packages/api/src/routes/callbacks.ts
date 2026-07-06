@@ -28,6 +28,17 @@ import { resolveCatTarget } from '../domains/cats/services/agents/routing/cat-ta
 import { extractRichFromText } from '../domains/cats/services/agents/routing/rich-block-extract.js';
 import { buildVoteNotification } from '../domains/cats/services/agents/routing/vote-intercept.js';
 import { getSenderName } from '../domains/cats/services/context/ContextAssembler.js';
+import { checkFreshnessForNotice } from '../domains/cats/services/freshness/checkFreshnessForNotice.js';
+import {
+  checkFreshnessForPostMessage,
+  createQueueChecker,
+} from '../domains/cats/services/freshness/checkFreshnessForPostMessage.js';
+import { FreshnessAttentionEventLog } from '../domains/cats/services/freshness/FreshnessAttentionEventLog.js';
+import { FreshnessInvocationStateStore } from '../domains/cats/services/freshness/FreshnessInvocationStateStore.js';
+import {
+  descriptorFromDriver,
+  descriptorFromProviderFallback,
+} from '../domains/cats/services/freshness/RuntimeCapabilityDescriptor.js';
 import type { AgentRouter } from '../domains/cats/services/index.js';
 import type { EventAuditLog } from '../domains/cats/services/orchestration/EventAuditLog.js';
 import type { IRuntimeSessionStore } from '../domains/cats/services/runtime-session/RuntimeSessionStore.js';
@@ -510,10 +521,14 @@ export interface CallbackRoutesOptions {
   featIndexProvider?: () => Promise<FeatIndexEntry[]>;
   /** F073 P1: workflow SOP store for bulletin board */
   workflowSopStore?: import('../domains/cats/services/stores/ports/WorkflowSopStore.js').IWorkflowSopStore;
+  /** #872 P2: keep evidence index in sync when set-thread-metadata changes title. */
+  indexBuilder?: { markThreadDirty(threadId: string): void; flushDirtyThreads?(): number | Promise<number> };
   /** F102: DI memory services — SQLite-backed evidence store */
   evidenceStore: IEvidenceStore;
   markerQueue: IMarkerQueue;
   reflectionService: IReflectionService;
+  /** F254 Phase B: Raw Redis client for freshness notice event log + state store */
+  redis?: any;
   holdBallDeps?: HoldBallRouteDeps;
   /** Queue auto-dequeue on A2A invocation completion */
   queueProcessor?: {
@@ -565,6 +580,8 @@ const postMessageSchema = z.object({
   targetCats: z.array(z.string().min(1)).optional(),
   // F246 Phase B: effect-class for cross-thread dispatch (assign_work → Approval Hub)
   effectClass: z.enum(['fyi', 'coordinate', 'investigate', 'assign_work']).optional(),
+  // F254 Phase A: acknowledge held — escape hatch to force-send despite unseen messages
+  acknowledgeHeld: z.boolean().optional(),
 });
 
 const threadContextQuerySchema = z.object({
@@ -575,6 +592,8 @@ const threadContextQuerySchema = z.object({
   after: z.coerce.number().int().min(0).max(50).optional(),
   catId: z.string().min(1).optional(),
   keyword: z.string().min(1).optional(),
+  // F236 Track-1: cat-controlled response mode — anchor (default, token-lean) vs full (complete bodies)
+  responseMode: z.enum(['anchor', 'full']).optional(),
 });
 
 const listThreadsQuerySchema = z.object({
@@ -587,6 +606,27 @@ const listLabelsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).optional(),
 });
 
+const refItemSchema = z.object({ repo: z.string().min(1).max(200), number: z.number().int().positive() });
+const setThreadMetadataSchema = z.object({
+  // P2: match PATCH /api/threads/:id invariants — trim + min(1) + max
+  title: z.string().trim().min(1).max(200).optional(),
+  labels: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
+  // #872 cloud-review P2 (R4): cap per-request payload sizes to prevent unbounded growth.
+  // These are low-frequency anchors; generous caps that no real usage should hit.
+  worktrees: z.array(z.string().max(500)).max(20).optional(),
+  prs: z.array(refItemSchema).max(50).optional(),
+  issues: z.array(refItemSchema).max(50).optional(),
+  features: z.array(z.string().max(50)).max(50).optional(),
+  notes: z
+    .record(z.string().max(100), z.string().max(2000).nullable())
+    .refine((r) => Object.keys(r).length <= 50, { message: 'Too many notes (max 50)' })
+    .optional(),
+  removeWorktrees: z.array(z.string().max(500)).max(20).optional(),
+  removePrs: z.array(refItemSchema).max(50).optional(),
+  removeIssues: z.array(refItemSchema).max(50).optional(),
+  removeFeatures: z.array(z.string().max(50)).max(50).optional(),
+});
+
 const featIndexQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
   featId: z.string().min(1).optional(),
@@ -596,6 +636,8 @@ const featIndexQuerySchema = z.object({
 const pendingMentionsQuerySchema = z.object({
   // Accept both scalar and repeated query params (Fastify may surface string[]).
   includeAcked: z.union([z.string(), z.array(z.string())]).optional(),
+  // F236 Track-1: cat-controlled response mode — anchor (default, head+tail excerpt) vs full (complete bodies)
+  responseMode: z.enum(['anchor', 'full']).optional(),
 });
 
 const ackMentionsSchema = z.object({
@@ -1151,7 +1193,15 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       return { error: 'Invalid request body', details: parsed.error.issues };
     }
 
-    const { content, threadId, replyTo, clientMessageId, targetCats: explicitTargetCats, effectClass } = parsed.data;
+    const {
+      content,
+      threadId,
+      replyTo,
+      clientMessageId,
+      targetCats: explicitTargetCats,
+      effectClass,
+      acknowledgeHeld,
+    } = parsed.data;
     const { invocationId } = actor;
     // #573: identity for cross-handler dedup. stream + callback for same logical
     // response must broadcast/persist with the same id; QueueProcessor + route-serial
@@ -1326,6 +1376,103 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
         message: 'Work assignment held for operator approval in the Approval Hub.',
         ...(clientMessageId ? { clientMessageId } : {}),
       };
+    }
+
+    // F254 Phase A: Freshness gate — hold post_message if cat has unseen messages
+    // in the target thread. Uses independent seenCursor (NOT deliveryCursor — AC-A9).
+    // Gate is fail-open: no cursor → forward; error → forward (log + continue).
+    //
+    // Placement: AFTER all validation checks that can reject the request —
+    // resolveScopedThreadId (403), cross_post_no_routing (400), assign_work (400).
+    // The gate must not run before these or it would return 'held' instead of
+    // the correct error contract (gpt52 R1-P2 + R2-P2).
+    if (deliveryCursorStore) {
+      try {
+        // Build visibility filter aligned with thread-context's canIncludeContextItem.
+        // ALWAYS applied (not just play mode) — deleted/briefing/undelivered messages
+        // must be excluded in ALL modes to prevent false holds and preview leaks (gpt52 R2-P1).
+        const needsFreshnessPlayFilter = threadStore
+          ? await (async () => {
+              const thread = await threadStore.get(effectiveThreadId);
+              return !!thread && (thread.thinkingMode ?? 'debug') === 'play';
+            })()
+          : false;
+        const freshnessViewer = needsFreshnessPlayFilter
+          ? { type: 'cat' as const, catId: createCatId(actor.catId) }
+          : { type: 'user' as const };
+
+        const messageFilter = (msg: Record<string, unknown>): boolean => {
+          // Baseline visibility (applies in ALL modes):
+          if (msg.deletedAt) return false;
+          if (!isDelivered(msg as unknown as Parameters<typeof isDelivered>[0])) return false;
+          if (msg.origin === 'briefing') return false;
+          // Play-mode visibility:
+          if (needsFreshnessPlayFilter) {
+            if (!canViewMessage(msg as unknown as Parameters<typeof canViewMessage>[0], freshnessViewer)) return false;
+            if (msg.origin === 'stream' && msg.catId && msg.catId !== actor.catId) return false;
+          }
+          return true;
+        };
+
+        // AC-A7: wire event log for recording held/forward decisions (P1 fix gpt52 R1)
+        const freshnessEventLog = opts.redis ? new FreshnessAttentionEventLog(opts.redis) : undefined;
+
+        // F254 AC-C2/C3: Derive RuntimeCapabilityDescriptor from stored carrierTier.
+        // carrierTier is stored in FreshnessInvocationStateStore at invocation start;
+        // when not yet stored (pre-wiring), descriptor is undefined → backward compat.
+        // Provider-only fallback (gpt52 terminal review P1): non-Claude services
+        // don't write carrierTier to Redis, so derive from provider alone for
+        // ASYNC_CLOUD_PROVIDERS (openai).
+        const actorCatConfig = catRegistry.tryGet(actor.catId);
+        const actorProvider = actorCatConfig?.config?.clientId ?? 'unknown';
+        let freshnessDescriptor;
+        if (opts.redis && invocationId) {
+          const freshnessStateStore = new FreshnessInvocationStateStore(opts.redis);
+          const freshnessState = await freshnessStateStore.get(invocationId);
+          if (freshnessState?.carrierTier) {
+            freshnessDescriptor = descriptorFromDriver(actorProvider, freshnessState.carrierTier);
+          } else {
+            freshnessDescriptor = descriptorFromProviderFallback(actorProvider);
+          }
+        } else {
+          freshnessDescriptor = descriptorFromProviderFallback(actorProvider);
+        }
+
+        const freshnessDecision = await checkFreshnessForPostMessage({
+          userId: actor.userId,
+          catId: actor.catId as CatId,
+          threadId: effectiveThreadId,
+          invocationId,
+          // AC-A6: cross_post_message uses its own toolName for audit trail
+          toolName: isCrossThread ? 'cross_post_message' : 'post_message',
+          cursorStore: deliveryCursorStore,
+          messageStore,
+          acknowledgeHeld,
+          messageFilter,
+          eventLog: freshnessEventLog,
+          // F254 queue-aware gate: detect queued messages hidden by isDelivered()
+          queueChecker: opts.invocationQueue ? createQueueChecker(opts.invocationQueue) : undefined,
+          // F254 AC-C3: descriptor parameterizes held/notice behavior per carrier tier
+          descriptor: freshnessDescriptor,
+        });
+        if (freshnessDecision.decision === 'held') {
+          return {
+            status: 'held',
+            reason: 'newer_messages_available',
+            unseenCount: freshnessDecision.unseenCount,
+            previews: freshnessDecision.previews ?? [],
+            omittedCount: freshnessDecision.omittedCount ?? 0,
+            actions: ['read_latest', 'revise', 'send_with_acknowledge'],
+            ...(clientMessageId ? { clientMessageId } : {}),
+          };
+        }
+      } catch (err) {
+        // Fail-open: if freshness check errors, log and continue (don't block the cat)
+        app.log.warn(
+          { err, catId: actor.catId, threadId: effectiveThreadId },
+          '[F254] freshness gate error, fail-open',
+        );
+      }
     }
 
     // At-least-once de-duplication: retries with same clientMessageId are treated as duplicate.
@@ -1768,6 +1915,12 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       deliveryDecision.enqueued,
       deliveryDecision.enqueueAttempted,
     );
+
+    // F254: seenCursor is NOT pushed on send. Sending ≠ reading — advancing the
+    // cursor here would hide messages that arrived between the freshness check and
+    // the actual send (TOCTOU race, gpt52 P1-3). Self-message exclusion in
+    // FreshnessGateService handles the "don't hold on own messages" case.
+
     return {
       status: 'ok',
       threadId: effectiveThreadId,
@@ -1790,10 +1943,12 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       return { error: 'Invalid query parameters' };
     }
 
-    const { includeAcked } = parsed.data;
+    const { includeAcked, responseMode: mentionResponseMode } = parsed.data;
 
     const includeAckedValues = Array.isArray(includeAcked) ? includeAcked : includeAcked ? [includeAcked] : [];
     const shouldIncludeAcked = includeAckedValues.some((v) => v === '1' || v.toLowerCase() === 'true');
+    // F236 Track-1: cat-controlled response mode for pending mentions
+    const isMentionFullMode = mentionResponseMode === 'full';
 
     // DIAG: ghost-thread bug — log which thread this invocation thinks it owns
     app.log.debug(
@@ -1818,13 +1973,25 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
     const mentionViewer = { type: 'cat' as const, catId };
     const mentions = rawMentions.filter((m) => canViewMessage(m, mentionViewer));
     const payload = {
-      // F236 AC-A3: anchor-first — head+tail excerpt + requiresDrill, full body one hop away.
-      mentions: mentions.map((item) =>
-        anchorPendingMention(item, {
+      mentions: mentions.map((item) => {
+        if (isMentionFullMode) {
+          // F236 Track-1 full mode: return complete mention content, no truncation
+          return {
+            id: item.id,
+            from: getSenderName(item.catId),
+            message: item.content,
+            timestamp: item.timestamp,
+            contentLength: item.content.length,
+            requiresDrill: false,
+            ...(shouldIncludeAcked ? { acked: Boolean(lastAckId && item.id <= lastAckId) } : {}),
+          };
+        }
+        // F236 AC-A3: anchor-first — head+tail excerpt + requiresDrill, full body one hop away.
+        return anchorPendingMention(item, {
           from: getSenderName(item.catId),
           ...(shouldIncludeAcked ? { acked: Boolean(lastAckId && item.id <= lastAckId) } : {}),
-        }),
-      ),
+        });
+      }),
     };
     // F236 AC-A1 (R1/砚砚 P1): emit returnedChars for eval-layer payload-shrink accounting.
     const pendingMentionsReturnedChars = JSON.stringify(payload).length;
@@ -1834,18 +2001,28 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
         returnedChars: pendingMentionsReturnedChars,
         count: payload.mentions.length,
         catId: record.catId,
+        responseMode: mentionResponseMode ?? 'anchor',
       },
       '[F236] anchor returned',
     );
-    // F236 Track-1: also emit as OTel metrics (queryable canonical source for eval).
-    recordAnchorReturned({ tool: 'pending-mentions', returnedChars: pendingMentionsReturnedChars });
+    // F236 Track-1: OTel aggregate savings metrics — ONLY for anchor mode.
+    // Full-mode returns complete bodies, recording it would pollute anchor savings (gpt52 R1 P1 fix).
+    if (!isMentionFullMode) {
+      recordAnchorReturned({ tool: 'pending-mentions', returnedChars: pendingMentionsReturnedChars });
+    }
     // F236 Track-2: per-event preview record with correlation keys for drill↔preview open-rate.
     // Both sides use content-only measurement (cloud R4 P1: JSON metadata skew fix).
+    // Adoption eval fields (gpt52 R1 P2): modeResolved/modeSource/catId for bucketing.
+    const mentionModeResolved = isMentionFullMode ? 'full' : 'anchor';
+    const mentionModeSource = mentionResponseMode ? 'explicit' : 'default';
     recordAnchorPreviewEvent({
       tool: 'pending-mentions',
       itemIds: mentions.map((m) => m.id),
       returnedChars: payload.mentions.reduce((sum, m) => sum + m.message.length, 0),
       originalChars: mentions.reduce((sum, m) => sum + m.content.length, 0),
+      modeResolved: mentionModeResolved,
+      modeSource: mentionModeSource,
+      catId: record.catId,
     });
     return payload;
   });
@@ -1938,6 +2115,7 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       after: afterWindow,
       catId: filterCatId,
       keyword,
+      responseMode,
     } = parsed.data;
 
     if (filterCatId && filterCatId !== 'user' && !catRegistry.has(filterCatId)) {
@@ -2167,14 +2345,39 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
     // so external runtimes (Antigravity/Bengal) can access image files.
     const uploadDir = getDefaultUploadDir(process.env.UPLOAD_DIR);
 
+    // F236 Track-1: cat-controlled response mode. anchor (default) = token-lean previews + drillDown;
+    // full = bypass anchor, return complete message bodies (for when the cat knows it needs all content).
+    const isFullMode = responseMode === 'full';
+
     const payload = {
       // TD091: echo threadId so cats know which thread they're in
       threadId: effectiveThreadId,
-      // F236 AC-A1/A2: anchor-first — preview + speaker + injected threadId + drillDown,
-      // contentBlocks omitted (image hints kept), full body one hop away via get_message.
       messages: filtered.map((item) => {
         const imagePaths = extractImagePaths(item.contentBlocks, uploadDir);
         const imageUrls = extractImageUrls(item.contentBlocks);
+
+        if (isFullMode) {
+          // F236 Track-1 full mode: return complete content, no truncation, no drillDown.
+          // Uses `content` field (not `preview`) to signal full body is present.
+          const base: Record<string, unknown> = {
+            id: item.id,
+            threadId: effectiveThreadId,
+            timestamp: item.timestamp,
+            speaker: getSenderName(item.catId),
+            content: item.content,
+            contentLength: item.content.length,
+            truncated: false,
+            ...(imagePaths.length > 0 ? { imagePaths } : {}),
+            ...(imageUrls.length > 0 ? { imageUrls } : {}),
+          };
+          if (keywordTerms.length > 0) {
+            base.relevanceScore = scoreKeywordRelevance(item.content, keywordTerms);
+          }
+          return base;
+        }
+
+        // F236 AC-A1/A2: anchor-first — preview + speaker + injected threadId + drillDown,
+        // contentBlocks omitted (image hints kept), full body one hop away via get_message.
         const anchored = anchorThreadMessage(item, {
           effectiveThreadId,
           speaker: getSenderName(item.catId),
@@ -2194,19 +2397,63 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
     // F236 AC-A1 (R1/砚砚 P1): emit returnedChars so the eval layer can compute payload shrink (省).
     const threadContextReturnedChars = JSON.stringify(payload).length;
     app.log.info(
-      { tool: 'thread-context', returnedChars: threadContextReturnedChars, count: payload.messages.length },
+      {
+        tool: 'thread-context',
+        returnedChars: threadContextReturnedChars,
+        count: payload.messages.length,
+        responseMode: responseMode ?? 'anchor',
+      },
       '[F236] anchor returned',
     );
-    // F236 Track-1: also emit as OTel metrics (queryable canonical source for eval).
-    recordAnchorReturned({ tool: 'thread-context', returnedChars: threadContextReturnedChars });
+    // F236 Track-1: OTel aggregate savings metrics — ONLY for anchor mode.
+    // Full-mode returns complete bodies (returnedChars ≈ originalChars), recording it
+    // would pollute the anchor savings signal (gpt52 R1 P1 fix).
+    if (!isFullMode) {
+      recordAnchorReturned({ tool: 'thread-context', returnedChars: threadContextReturnedChars });
+    }
     // F236 Track-2: per-event preview record with correlation keys for drill↔preview open-rate.
     // Both sides use content-only measurement (cloud R4 P1: JSON metadata skew fix).
+    // In full mode, returnedChars = originalChars (no truncation).
+    // Adoption eval fields (gpt52 R1 P2): modeResolved/modeSource/catId for bucketing.
+    const contentField = isFullMode ? 'content' : 'preview';
+    const modeResolved = isFullMode ? 'full' : 'anchor';
+    const modeSource = responseMode ? 'explicit' : 'default';
     recordAnchorPreviewEvent({
       tool: 'thread-context',
       itemIds: filtered.map((m) => m.id),
-      returnedChars: payload.messages.reduce((sum, m) => sum + m.preview.length, 0),
+      returnedChars: payload.messages.reduce(
+        (sum, m) => sum + ((m as Record<string, unknown>)[contentField] as string).length,
+        0,
+      ),
       originalChars: filtered.reduce((sum, m) => sum + m.content.length, 0),
+      modeResolved,
+      modeSource,
+      catId: principal.catId,
     });
+    // F254 Phase A (AC-A2): push seenCursor when cat reads thread messages.
+    // ONLY on contiguous reads (no keyword, no around-message window, no catId filter).
+    // Sparse reads (keyword filter, messageId window, catId subset) return non-contiguous
+    // subsets — advancing cursor to the last result would mark skipped messages as "seen"
+    // and suppress future freshness holds for messages the cat never read (gpt52 R1-P1-2, R2-P1-2).
+    const isContiguousRead = !keyword && !messageId && !filterCatId;
+    if (deliveryCursorStore && filtered.length > 0 && principal.kind === 'invocation' && isContiguousRead) {
+      const latestSeen = filtered[filtered.length - 1];
+      try {
+        await deliveryCursorStore.ackSeenCursor(
+          principalUserId,
+          principalCatId as CatId,
+          effectiveThreadId,
+          latestSeen.id,
+        );
+      } catch (err) {
+        // Fail-open: don't block thread-context on seenCursor push failure
+        app.log.warn(
+          { err, catId: principalCatId, threadId: effectiveThreadId },
+          '[F254] seenCursor push failed in thread-context',
+        );
+      }
+    }
+
     return payload;
   });
 
@@ -2345,6 +2592,8 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       result.context = contextMsgs.map(projectMsg);
     }
 
+    const contextMessages = Array.isArray(result.context) ? result.context : [];
+
     // F236 AC-B2 (R1/砚砚 P1): record full-drill cost AFTER the whole payload (message +
     // context neighbors + contentBlocks) is assembled, so the cost account isn't undercounted.
     if (isFullDrill) {
@@ -2362,7 +2611,32 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       recordAnchorFullDrill({ tool: 'get-message', fullDrillChars });
       // F236 Track-2: per-event drill record with correlation key for drill↔preview join.
       recordAnchorDrillEvent({ tool: 'get-message', itemId: message.id, fullDrillChars });
+      recordAnchorPreviewEvent({
+        tool: 'get-message',
+        itemIds: [message.id, ...contextMessages.map((m) => m.id)],
+        returnedChars: result.message.content.length + contextMessages.reduce((sum, m) => sum + m.content.length, 0),
+        originalChars: message.content.length + contextMessages.reduce((sum, m) => sum + m.contentLength, 0),
+        modeResolved: 'full',
+        modeSource: 'legacy_equivalent',
+        catId: principal.catId,
+      });
+    } else {
+      recordAnchorPreviewEvent({
+        tool: 'get-message',
+        itemIds: [message.id, ...contextMessages.map((m) => m.id)],
+        returnedChars: result.message.content.length + contextMessages.reduce((sum, m) => sum + m.content.length, 0),
+        originalChars: message.content.length + contextMessages.reduce((sum, m) => sum + m.contentLength, 0),
+        modeResolved: 'anchor',
+        modeSource: 'legacy_equivalent',
+        catId: principal.catId,
+      });
     }
+
+    // F254: seenCursor is NOT pushed on targeted get-message reads.
+    // A targeted read of a single message (by ID) does not mean the cat has seen
+    // all messages up to that point. Advancing the monotonic cursor here would mark
+    // skipped messages as "seen" (gpt52 P1-2 sparse-read invariant).
+    // seenCursor only advances on contiguous thread-context reads (no keyword/window).
 
     return result;
   });
@@ -2437,6 +2711,138 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
     }));
 
     return { labels: result };
+  });
+
+  // #872: Thread Metadata MCP — read
+  app.get('/api/callbacks/thread-metadata', async (request, reply) => {
+    const principal = requireCallbackPrincipal(request, reply);
+    if (!principal) return;
+
+    if (!threadStore) {
+      reply.status(503);
+      return { error: 'Thread store not configured' };
+    }
+
+    const effectiveThreadId = principal.kind === 'invocation' ? principal.threadId : undefined;
+    if (!effectiveThreadId) {
+      reply.status(400);
+      return { error: 'Agent-key callers must use invocation auth for thread metadata' };
+    }
+
+    const thread = await threadStore.get(effectiveThreadId);
+    if (!thread) {
+      reply.status(404);
+      return { error: 'Thread not found' };
+    }
+
+    const meta = thread.threadMetadata;
+    return {
+      threadId: effectiveThreadId,
+      title: thread.title,
+      labels: thread.labels ?? [],
+      ...(meta?.worktrees ? { worktrees: meta.worktrees } : {}),
+      ...(meta?.prs ? { prs: meta.prs } : {}),
+      ...(meta?.issues ? { issues: meta.issues } : {}),
+      ...(meta?.features ? { features: meta.features } : {}),
+      ...(meta?.notes ? { notes: meta.notes } : {}),
+    };
+  });
+
+  // #872: Thread Metadata MCP — write (merge semantics)
+  app.post('/api/callbacks/set-thread-metadata', async (request, reply) => {
+    const principal = requireCallbackPrincipal(request, reply);
+    if (!principal) return;
+
+    const parsed = setThreadMetadataSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.status(400);
+      return { error: 'Invalid request body', details: parsed.error.issues };
+    }
+
+    if (!threadStore) {
+      reply.status(503);
+      return { error: 'Thread store not configured' };
+    }
+
+    const effectiveThreadId = principal.kind === 'invocation' ? principal.threadId : undefined;
+    if (!effectiveThreadId) {
+      reply.status(400);
+      return { error: 'Agent-key callers must use invocation auth for thread metadata' };
+    }
+
+    const thread = await threadStore.get(effectiveThreadId);
+    if (!thread) {
+      reply.status(404);
+      return { error: 'Thread not found' };
+    }
+
+    const { title, labels, ...metadataFields } = parsed.data;
+
+    // #872 cloud-review P2: validate all rejectable inputs BEFORE applying any mutations.
+    // Without this gate, a request with valid title + invalid labels would commit the title
+    // change and then return 400, leaving the thread in a partially-mutated state.
+    if (labels !== undefined) {
+      if (labels.length > 20) {
+        reply.status(400);
+        return { error: 'Too many labels (max 20)' };
+      }
+      if (labels.length > 0 && opts.labelStore) {
+        const userLabels = await opts.labelStore.list(principal.userId);
+        const validIds = new Set(userLabels.map((l) => l.id));
+        const invalid = labels.filter((lid: string) => !validIds.has(lid));
+        if (invalid.length > 0) {
+          reply.status(400);
+          return { error: 'Invalid label IDs', invalidIds: invalid };
+        }
+      }
+    }
+
+    // All validation passed — apply mutations.
+    // #872 cloud-review P2 (R3): failable operations first. atomicMergeThreadMetadata can
+    // throw on CAS exhaustion or unparseable stored data; run it before title/labels so
+    // a throw doesn't leave visible fields partially committed.
+    const hasMetadataUpdate = Object.keys(metadataFields).length > 0;
+    if (hasMetadataUpdate) {
+      try {
+        await threadStore.atomicMergeThreadMetadata(effectiveThreadId, metadataFields);
+      } catch (err) {
+        // #872: total-limits rejection is a client error (deterministic, not retryable).
+        // Surface as 422 so MCP retry helpers don't retry a request that can never succeed.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('total limits exceeded')) {
+          reply.code(422);
+          return { error: msg };
+        }
+        throw err; // CAS exhaustion / unparseable data → still 500
+      }
+    }
+    if (title !== undefined) {
+      await threadStore.updateTitle(effectiveThreadId, title);
+      // #872 P2: refresh evidence index after title change (same as PATCH /api/threads/:id)
+      try {
+        opts.indexBuilder?.markThreadDirty(effectiveThreadId);
+        await opts.indexBuilder?.flushDirtyThreads?.();
+      } catch {
+        // Best-effort: evidence index refresh must not block metadata write
+      }
+    }
+    if (labels !== undefined) {
+      await threadStore.updateLabels(effectiveThreadId, labels);
+    }
+
+    // Return the updated state
+    const updated = await threadStore.get(effectiveThreadId);
+    const meta = updated?.threadMetadata;
+    return {
+      threadId: effectiveThreadId,
+      title: updated?.title ?? thread.title,
+      labels: updated?.labels ?? thread.labels ?? [],
+      ...(meta?.worktrees ? { worktrees: meta.worktrees } : {}),
+      ...(meta?.prs ? { prs: meta.prs } : {}),
+      ...(meta?.issues ? { issues: meta.issues } : {}),
+      ...(meta?.features ? { features: meta.features } : {}),
+      ...(meta?.notes ? { notes: meta.notes } : {}),
+    };
   });
 
   app.get('/api/callbacks/feat-index', async (request, reply) => {
@@ -3275,6 +3681,14 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       router,
       invocationRecordStore,
       ...(invocationTracker ? { invocationTracker } : {}),
+      // F254 AC-A6: pass deliveryCursorStore for freshness gate on multi_mention
+      ...(deliveryCursorStore ? { deliveryCursorStore } : {}),
+      // F254 AC-A7: pass event log for recording held/forward decisions (P1 fix gpt52 R1)
+      ...(opts.redis ? { freshnessEventLog: new FreshnessAttentionEventLog(opts.redis) } : {}),
+      // F254 AC-C2: pass Redis for carrierTier lookup in descriptor derivation
+      ...(opts.redis ? { redis: opts.redis } : {}),
+      // F254 R2: pass threadStore for play-mode visibility filter in freshness gate
+      ...(threadStore ? { threadStore } : {}),
       ...(opts.invocationQueue ? { invocationQueue: opts.invocationQueue } : {}),
       ...(queueProcessor ? { queueProcessor } : {}),
     });
@@ -3283,6 +3697,131 @@ export const callbacksRoutes: FastifyPluginAsync<CallbackRoutesOptions> = async 
       socketManager.setMultiMentionOrchestrator(getMultiMentionOrchestrator());
     }
   }
+
+  // ── F254 Phase B1: Freshness notice check ─────────────────────────
+  // Called by MCP server after read-only tool calls (frequency-gated).
+  // Returns a content-free notice if the cat has unseen messages.
+  // Only works for invocation-kind principals (need threadId + invocationId).
+  app.post('/api/callbacks/freshness-notice-check', async (request, reply) => {
+    const principal = requireCallbackPrincipal(request, reply);
+    if (!principal) return;
+
+    // B1 only works for invocation principals (have threadId + invocationId)
+    if (principal.kind !== 'invocation') {
+      return { notice: null };
+    }
+
+    const body = request.body as { toolName?: string; isReadOnly?: boolean } | undefined;
+    const toolName = body?.toolName ?? 'unknown';
+    const isReadOnly = body?.isReadOnly ?? false;
+
+    const { redis } = opts;
+    if (!redis || !deliveryCursorStore) {
+      return { notice: null };
+    }
+
+    try {
+      // Build messageFilter (must match Phase A — P0 constraint)
+      const needsPlayFilter = threadStore
+        ? await (async () => {
+            const thread = await threadStore.get(principal.threadId);
+            return !!thread && (thread.thinkingMode ?? 'debug') === 'play';
+          })()
+        : false;
+      const freshnessViewer = needsPlayFilter
+        ? { type: 'cat' as const, catId: createCatId(principal.catId) }
+        : { type: 'user' as const };
+
+      const messageFilter = (msg: Record<string, unknown>): boolean => {
+        if (msg.deletedAt) return false;
+        if (!isDelivered(msg as unknown as Parameters<typeof isDelivered>[0])) return false;
+        if (msg.origin === 'briefing') return false;
+        if (needsPlayFilter) {
+          if (!canViewMessage(msg as unknown as Parameters<typeof canViewMessage>[0], freshnessViewer)) return false;
+          if (msg.origin === 'stream' && msg.catId && msg.catId !== principal.catId) return false;
+        }
+        return true;
+      };
+
+      const notice = await checkFreshnessForNotice({
+        userId: principal.userId,
+        catId: principal.catId,
+        threadId: principal.threadId,
+        invocationId: principal.invocationId,
+        toolName,
+        isReadOnly,
+        cursorStore: deliveryCursorStore,
+        messageStore,
+        redis,
+        messageFilter,
+        // F254 queue-aware gate: detect queued messages hidden by isDelivered()
+        queueChecker: opts.invocationQueue ? createQueueChecker(opts.invocationQueue) : undefined,
+        // F254 AC-C2/C3: provider for descriptor derivation (reads carrierTier from state store)
+        provider: catRegistry.tryGet(principal.catId)?.config?.clientId,
+      });
+
+      return { notice };
+    } catch (err) {
+      // Fail-open: notice check errors should never block tool execution
+      app.log.warn({ err, catId: principal.catId, toolName }, '[F254-B1] freshness notice check error, fail-open');
+      return { notice: null };
+    }
+  });
+
+  // ── F254 Phase B2: Freshness hold_ball reminder ────────────────────
+  // Called by MCP server after successful hold_ball. Checks for
+  // unresolved notices (delivered but not acked) and returns a reminder.
+  app.post('/api/callbacks/freshness-hold-ball-reminder', async (request, reply) => {
+    const principal = requireCallbackPrincipal(request, reply);
+    if (!principal) return;
+
+    if (principal.kind !== 'invocation') {
+      return { reminder: null };
+    }
+
+    const { redis } = opts;
+    if (!redis) {
+      return { reminder: null };
+    }
+
+    try {
+      const { FreshnessAttentionEventLog } = await import(
+        '../domains/cats/services/freshness/FreshnessAttentionEventLog.js'
+      );
+      const { FreshnessNoticeService } = await import('../domains/cats/services/freshness/FreshnessNoticeService.js');
+
+      const eventLog = new FreshnessAttentionEventLog(redis);
+      // B2 only needs eventLog (for unresolved query + deferred recording).
+      // stateStore and unseenChecker are unused by checkHoldBallReminder,
+      // but the constructor requires them — provide no-op stubs.
+      const noopStateStore = {
+        get: async () => null,
+        incrementToolCallCount: async () => 0,
+        recordNoticeDelivered: async () => {},
+        getUnresolvedNotices: async () => [],
+      };
+      const noopUnseenChecker = { checkUnseen: async () => null };
+      const service = new FreshnessNoticeService(noopStateStore, eventLog, noopUnseenChecker);
+
+      // P1-2 fix: fetch current seenCursor so notices where
+      // maxMessageId <= cursor are treated as implicitly resolved
+      const currentSeenCursor = deliveryCursorStore
+        ? await deliveryCursorStore.getSeenCursor(principal.userId, principal.catId, principal.threadId)
+        : undefined;
+
+      const reminder = await service.checkHoldBallReminder({
+        invocationId: principal.invocationId,
+        threadId: principal.threadId,
+        catId: principal.catId,
+        currentSeenCursor: currentSeenCursor ?? null,
+      });
+
+      return { reminder };
+    } catch (err) {
+      app.log.warn({ err, catId: principal.catId }, '[F254-B2] hold_ball reminder check error, fail-open');
+      return { reminder: null };
+    }
+  });
 
   // F088 Phase J2: Document generation callback routes
   registerCallbackDocumentRoutes(app, { registry, socketManager });

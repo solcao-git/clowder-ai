@@ -109,7 +109,7 @@ function Invoke-PnpmInstallWithCapturedOutput {
     # Spinner state for live progress display.
     # Use a hashtable so ForEach-Object scriptblock mutations are visible
     # in the outer scope (PowerShell 5.1 closes over reference types but
-    # not value types — $script:scope would also work, but a hashtable
+    # not value types -- $script:scope would also work, but a hashtable
     # is cleaner inside a function that may be dot-sourced).
     $spin = @{
         Chars    = @('-', '\', '|', '/')
@@ -514,7 +514,14 @@ if (Test-Path $envFile) {
     }
     if ($needsSalt) {
         $bytes = [byte[]]::new(32)
-        [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        # RandomNumberGenerator.Fill() is .NET Core 2.0+ only; Windows
+        # PowerShell 5.1 (which this installer explicitly supports, see the
+        # Step 1 PSVersion check) runs on .NET Framework where only the
+        # instance GetBytes() exists. Create()+GetBytes()+Dispose() works on
+        # both PS 5.1 and PS 7, so the install no longer aborts at Step 4 on
+        # a stock Windows box.
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
         $salt = -join ($bytes | ForEach-Object { "{0:x2}" -f $_ })
         Add-Content -Path $envFile -Value "TELEMETRY_HMAC_SALT=$salt"
         Write-Ok "Generated TELEMETRY_HMAC_SALT"

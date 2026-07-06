@@ -3,6 +3,7 @@
  * All cats respond independently to the same message.
  */
 
+import crypto from 'node:crypto';
 import type { CatConfig, CatId } from '@cat-cafe/shared';
 import { catRegistry, resolveWorkflowSopSkill } from '@cat-cafe/shared';
 import { getCatContextBudget } from '../../../../../config/cat-budgets.js';
@@ -28,6 +29,9 @@ import {
   prepareGuideContext,
 } from '../../../../guides/GuideRoutingInterceptor.js';
 import { triggerRecallCorrelation } from '../../../../memory/recall-correlation-hook.js';
+import { getTraceStore } from '../../../../prompt-hooks/trace-bootstrap.js';
+// F237: Injection trace (v0 — fire-and-forget observability)
+import { buildTraceDetail, buildTraceSummary, collectTrace } from '../../../../prompt-hooks/trace-collector.js';
 import { assembleContext } from '../../context/ContextAssembler.js';
 import {
   buildInvocationContext,
@@ -73,6 +77,30 @@ import { appendThinkingChunk, renderThinkingChunks } from './thinking-chunks.js'
 import { buildVoteTally, checkVoteCompletion, extractVoteFromText, VOTE_RESULT_SOURCE } from './vote-intercept.js';
 
 const log = createModuleLogger('route-parallel');
+
+/**
+ * Wrap an agent stream so iteration-time errors yield synthetic error+done events
+ * instead of propagating into mergeStreams (which silently drops errored streams).
+ * Without this, @all can lose a cat's response with zero user-visible feedback.
+ */
+async function* wrapStreamWithErrorRecovery(
+  stream: AsyncIterable<AgentMessage>,
+  catId: CatId,
+): AsyncGenerator<AgentMessage> {
+  try {
+    yield* stream;
+  } catch (err) {
+    log.error({ catId, err }, 'Parallel stream iteration error — synthesizing error+done');
+    yield {
+      type: 'error' as AgentMessageType,
+      catId,
+      content: err instanceof Error ? err.message : String(err),
+      error: err instanceof Error ? err.message : String(err),
+      timestamp: Date.now(),
+    } as AgentMessage;
+    yield { type: 'done' as AgentMessageType, catId, timestamp: Date.now() } as AgentMessage;
+  }
+}
 
 export async function* routeParallel(
   deps: RouteStrategyDeps,
@@ -341,6 +369,34 @@ export async function* routeParallel(
         }
       }
 
+      // F237: fire-and-forget injection trace persist (v0 — observability only)
+      // Placed after bootstrapCtx so per-turn trace covers ALL route-level
+      // injected system/control content (invocation + mode prompt + bootstrap + MCP).
+      // Skip if cat is already cancelled (avoid phantom trace for turns that never happen).
+      const preTraceSignal = signalForCat?.(catId) ?? signal;
+      try {
+        const traceStore = getTraceStore();
+        if (traceStore && !preTraceSignal?.aborted) {
+          const traceTurnId = crypto.randomUUID();
+          const traceModePrompt = modeSystemPromptByCat?.[catId as string] ?? modeSystemPrompt ?? '';
+          const traceTurnContent = [invocationContext, traceModePrompt, bootstrapCtx, mcpInstructions]
+            .filter(Boolean)
+            .join('\n\n---\n\n');
+          const collected = collectTrace(catId as string, staticIdentity, traceTurnContent, hasNativeL0, {
+            mcpAvailable,
+            packBlocks,
+          });
+          const traceMeta = { turnId: traceTurnId, threadId, catId: catId as string };
+          const summary = buildTraceSummary(collected, traceMeta);
+          const detail = buildTraceDetail(collected, traceMeta);
+          traceStore.persist(summary, detail).catch((err) => {
+            log.warn({ err, threadId, catId }, '[F237] injection trace persist failed (fire-and-forget)');
+          });
+        }
+      } catch {
+        /* F237: trace collection must never break invocation */
+      }
+
       let prompt: string;
       if (incrementalMode) {
         // A+ fix: calculate effective context budget by deducting ALL system parts from maxPromptTokens.
@@ -371,6 +427,16 @@ export async function* routeParallel(
           },
         );
         boundaryByCat.set(catId, inc.boundaryId);
+
+        // F254 Phase A (AC-A3 seed): Initialize seenCursor from delivery boundary
+        if (inc.boundaryId && deps.deliveryCursorStore) {
+          try {
+            await deps.deliveryCursorStore.ackSeenCursor(userId, catId, threadId, inc.boundaryId);
+          } catch (err) {
+            log.warn({ catId: catId as string, err }, '[F254] seenCursor seed failed');
+          }
+        }
+
         if (inc.degradation) {
           degradationMsgs.push({
             type: 'system_info' as AgentMessageType,
@@ -496,6 +562,10 @@ export async function* routeParallel(
         // helper namespace bridge 失效 → ideate/parallel 场景气泡又裂。
         ...(options.parentInvocationId ? { parentInvocationId: options.parentInvocationId } : {}),
         ...(options.routeSpan ? { routeSpan: options.routeSpan } : {}),
+        // F247 AC-B1c-3 PR-C: Plumb raw mention text for cloud bridge dispatch.
+        // Parallel routes are user-initiated (no A2A), so mentioningCatId = userId.
+        mentionContent: message,
+        mentioningCatId: userId as import('@cat-cafe/shared').CatId,
         continuityCapsule,
         isLastCat: false,
       });
@@ -564,8 +634,11 @@ export async function* routeParallel(
   // same-name queue drift (search→graph→search).
   const pendingToolResultsByCat = new Map<string, Array<{ toolName: string; toolUseId?: string }>>();
   const invocationStartedAt = Date.now();
-  for await (const msg of mergeStreams(streams, (idx, err) => {
-    log.error({ streamIndex: idx, err }, 'Parallel stream error');
+  // Wrap each stream so iteration errors surface as error+done events
+  // instead of being silently dropped by mergeStreams.
+  const recoveredStreams = streams.map((s, idx) => wrapStreamWithErrorRecovery(s, targetCats[idx]!));
+  for await (const msg of mergeStreams(recoveredStreams, (idx, err) => {
+    log.error({ streamIndex: idx, catId: targetCats[idx], err }, 'Parallel stream error (post-recovery)');
   })) {
     const effectiveMsgs: AgentMessage[] = [];
     if (msg.type === 'text' && msg.content && msg.catId) {

@@ -1,21 +1,21 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Thread } from '@/stores/chat-types';
-import { useChatStore } from '@/stores/chatStore';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '@/utils/api-client';
-import type { CapabilityBoardItem, CapabilityBoardResponse, CatFamily } from '../capability-board-ui';
-import { getProjectPaths, projectDisplayName } from '../ThreadSidebar/thread-utils';
+import type {
+  CapabilityBoardItem,
+  CapabilityBoardResponse,
+  CatFamily,
+  SkillHealthSummary,
+} from '../capability-board-ui';
+import { projectDisplayName } from '../ThreadSidebar/thread-utils';
+import { readApiError } from './settings-utils';
+import { useKnownProjects } from './useKnownProjects';
 
 export { projectDisplayName };
 
 type SkillCapabilityItem = CapabilityBoardItem & { type: 'skill' };
 type CapabilityPatchDiscriminator = Pick<CapabilityBoardItem, 'source' | 'pluginId'>;
-
-async function readApiError(res: Response): Promise<string> {
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
-  return data.error ?? `请求失败 (${res.status})`;
-}
 
 export function useSkillControls() {
   const [items, setItems] = useState<SkillCapabilityItem[]>([]);
@@ -24,55 +24,14 @@ export function useSkillControls() {
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [resolvedProjectPath, setResolvedProjectPath] = useState('');
   const [apiProjectPaths, setApiProjectPaths] = useState<string[]>([]);
-  const [threadProjectPaths, setThreadProjectPaths] = useState<string[]>([]);
   const [toggling, setToggling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [skillHealth, setSkillHealth] = useState<SkillHealthSummary | null>(null);
   const fetchGeneration = useRef(0);
   const projectPathRef = useRef(projectPath);
   projectPathRef.current = projectPath;
 
-  const storeThreads = useChatStore((state) => state.threads);
-
-  // Settings page doesn't mount ThreadSidebar, so useChatStore may return [].
-  // Fetch /api/threads directly on mount to get thread-derived project paths
-  // (same data source as the "新建对话" dialog's project list).
-  useEffect(() => {
-    let cancelled = false;
-    void apiFetch('/api/threads')
-      .then(async (res) => {
-        if (cancelled || !res.ok) return;
-        const data = (await res.json()) as { threads: Thread[] };
-        if (cancelled) return;
-        setThreadProjectPaths(getProjectPaths(data.threads));
-      })
-      .catch(() => {
-        /* non-critical: project dropdown degrades to single-project label */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Merge project paths from three sources (dedup by normalized path):
-  // 1. chatStore threads (populated when ThreadSidebar is mounted)
-  // 2. /api/threads fetch (fallback for settings page)
-  // 3. /api/capabilities knownProjectPaths (catCafeRoot + queried project)
-  const knownProjects = useMemo(() => {
-    const normalize = (p: string) => p.replace(/\/+$/, '');
-    const seen = new Set<string>();
-    const merged: string[] = [];
-    const addUnique = (p: string) => {
-      const key = normalize(p);
-      if (!seen.has(key)) {
-        seen.add(key);
-        merged.push(p);
-      }
-    };
-    for (const p of getProjectPaths(storeThreads)) addUnique(p);
-    for (const p of threadProjectPaths) addUnique(p);
-    for (const p of apiProjectPaths) addUnique(p);
-    return merged;
-  }, [storeThreads, threadProjectPaths, apiProjectPaths]);
+  const knownProjects = useKnownProjects(apiProjectPaths);
 
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: generation-based race prevention (same pattern as useCapabilityState)
   const fetchItems = useCallback(async (forProject?: string) => {
@@ -97,6 +56,7 @@ export function useSkillControls() {
       if (!isCurrent()) return;
       setItems(data.items.filter((item): item is SkillCapabilityItem => item.type === 'skill'));
       setCatFamilies(data.catFamilies);
+      setSkillHealth(data.skillHealth ?? null);
       setApiProjectPaths(data.knownProjectPaths ?? []);
       // Only set resolvedProjectPath on initial load (no explicit project switch).
       // This preserves the "home" project in the ProjectSelector dropdown.
@@ -277,6 +237,7 @@ export function useSkillControls() {
   return {
     items,
     catFamilies,
+    skillHealth,
     loading,
     projectPath,
     resolvedProjectPath,
