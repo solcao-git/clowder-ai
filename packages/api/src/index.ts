@@ -1316,6 +1316,13 @@ async function main(): Promise<void> {
             service = new TraeAgentService({ catId });
             break;
           }
+          case 'deepseek': {
+            const { DeepSeekAgentService } = await import(
+              './domains/cats/services/agents/providers/DeepSeekAgentService.js'
+            );
+            service = new DeepSeekAgentService({ catId });
+            break;
+          }
           default:
             app.log.warn(`[api] Unknown client "${config.clientId}" for cat "${id}". It will not be routable.`);
             continue;

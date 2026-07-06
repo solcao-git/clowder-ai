@@ -24,6 +24,16 @@ export const CAT_COLORS: Record<string, CatColorPair> = {
   codex: { primary: '#5B8C5A', secondary: '#D4E6D3' },
   gemini: { primary: '#5B9BD5', secondary: '#D6E9F8' },
   kimi: { primary: '#4B5563', secondary: '#E5E7EB' },
+  // Genshin-named catIds (catalog uses these names; mirror their color values
+  // so story-data / SSR can resolve CAT_COLORS.nahida etc. without crashing).
+  nahida: { primary: '#a5c83b', secondary: '#E8F5D8' },
+  zhongli: { primary: '#cfa726', secondary: '#FAF0D8' },
+  mavuika: { primary: '#ef4035', secondary: '#FDE0DC' },
+  venti: { primary: '#7ec8c8', secondary: '#E0F5F5' },
+  raiden: { primary: '#a855f7', secondary: '#EDE0F9' },
+  furina: { primary: '#1f9cdb', secondary: '#D6EEF8' },
+  tighnari: { primary: '#4ECDC4', secondary: '#E8FFF9' },
+  qiqi: { primary: '#7C5CFC', secondary: '#EDE8FF' },
 };
 
 /** Fallback when catId is unknown or color data is missing entirely. */

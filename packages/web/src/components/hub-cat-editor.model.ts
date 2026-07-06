@@ -11,7 +11,7 @@ import type { BuiltinAccountClient, ProfileItem } from './hub-accounts.types';
 import { defaultAcpCommandForClient, defaultAcpStartupArgsForClient } from './hub-cat-editor.acp';
 import type { CatStrategyEntry, StrategyType } from './hub-strategy-types';
 
-export type ClientId = 'anthropic' | 'openai' | 'google' | 'kimi' | 'opencode' | 'antigravity' | 'catagent' | 'acp';
+export type ClientId = 'anthropic' | 'openai' | 'google' | 'kimi' | 'opencode' | 'antigravity' | 'catagent' | 'acp' | 'qoder' | 'trae' | 'deepseek';
 /** @deprecated Use ClientId instead. */
 export type ClientValue = ClientId;
 export type SessionChainValue = 'true' | 'false';
