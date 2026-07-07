@@ -1293,13 +1293,31 @@
             "contextWindow": 128000
           },
           "acp": {
-            "command": "trae-cli",
+            "command": "C:UsersAdministratorAppDataLocal\trae-cli\bin\trae-cli.exe",
             "startupArgs": [
               "acp",
               "serve",
               "-y",
               "-c",
-              "session.resume=false"
+              "session.resume=false",
+              "--disallowed-tool",
+              "Bash",
+              "--disallowed-tool",
+              "Grep",
+              "--disallowed-tool",
+              "Glob",
+              "--disallowed-tool",
+              "LS",
+              "--disallowed-tool",
+              "Edit",
+              "--disallowed-tool",
+              "Write",
+              "--disallowed-tool",
+              "Replace",
+              "--disallowed-tool",
+              "Task",
+              "--disallowed-tool",
+              "TodoWrite"
             ],
             "mcpWhitelist": [
               "cat-cafe",
