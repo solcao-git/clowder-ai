@@ -171,6 +171,13 @@
       "lead": false,
       "available": true,
       "evaluation": "claude-fable-5 新布偶猫，Opus x2 猫粮，能力画像待校准"
+    },
+    "clorinde": {
+      "family": "codebuddy-acp",
+      "roles": ["code-audit", "code-refactor", "error-inspect", "rule-check"],
+      "lead": true,
+      "available": true,
+      "evaluation": "代码质量终审Agent，CodeBuddy CLI ACP 接入，专注静态审计与规范校验"
     }
   },
   "reviewPolicy": {
@@ -919,6 +926,64 @@
             "temperature": 0.3
           },
           "accountRef": "claude"
+        }
+      ]
+    },
+    {
+      "id": "codebuddy-acp",
+      "catId": "clorinde",
+      "name": "克洛琳德",
+      "displayName": "克洛琳德",
+      "nickname": "Clorinde",
+      "avatar": "/avatars/codebuddy.png",
+      "color": {
+        "primary": "#2B4B8C",
+        "secondary": "#D6E4F0"
+      },
+      "mentionPatterns": ["@clorinde", "@Clorinde", "@克洛琳德", "@codebuddy"],
+      "roleDescription": "代码质量终审Agent，专注静态审计、规范校验、边界漏洞排查、代码洁癖重构",
+      "teamStrengths": "编码规范校验、静态代码审查、边界异常捕获、隐性逻辑漏洞定位、批量代码重构、代码风格统一、工程质量收口",
+      "caution": null,
+      "defaultVariantId": "clorinde-default",
+      "features": {
+        "sessionChain": true
+      },
+      "variants": [
+        {
+          "id": "clorinde-default",
+          "clientId": "acp",
+          "defaultModel": "MiniMax-M3",
+          "mcpSupport": true,
+          "cli": {
+            "command": "codebuddy",
+            "outputFormat": "stream-json",
+            "contextWindow": 1000000,
+            "autoCompactTokenLimit": 850000
+          },
+          "acp": {
+            "command": "codebuddy",
+            "startupArgs": ["--acp", "--acp-transport", "stdio", "-y"],
+            "mcpWhitelist": ["cat-cafe", "cat-cafe-memory", "cat-cafe-collab", "cat-cafe-signals"],
+            "supportsMultiplexing": false
+          },
+          "accountRef": "xiyu-openai",
+          "personality": "冷静克制，逻辑严谨，输出简洁无冗余；对不规范代码、隐藏缺陷、冗余逻辑敏感度极高",
+          "strengths": ["code-audit", "code-refactor", "error-inspect", "rule-check"],
+          "contextBudget": {
+            "maxPromptTokens": 900000,
+            "maxContextTokens": 900000,
+            "maxMessages": 300,
+            "maxContentLengthPerMsg": 100000
+          },
+          "voiceConfig": {
+            "voice": "zm_yunjian",
+            "langCode": "zh",
+            "speed": 0.9,
+            "refAudio": "genshin/克洛琳德/vo_clorinde_dialog_greetingMorning.wav",
+            "refText": "不必多言，我只为结果负责。既然接了委托，就不会有半分差池。",
+            "instruct": "用冷静克制、干脆利落的女性语气说话，像决斗裁判官一样严谨果断",
+            "temperature": 0.2
+          }
         }
       ]
     }
