@@ -178,6 +178,13 @@
       "lead": true,
       "available": true,
       "evaluation": "代码质量终审Agent，CodeBuddy CLI ACP 接入，专注静态审计与规范校验"
+    },
+    "tighnari": {
+      "family": "trae-cli-acp",
+      "roles": ["coding", "precision"],
+      "lead": false,
+      "available": true,
+      "evaluation": "须弥巡林官，Trae CLI ACP 接入，严谨务实，细节敏感"
     }
   },
   "reviewPolicy": {
@@ -983,6 +990,57 @@
             "refText": "不必多言，我只为结果负责。既然接了委托，就不会有半分差池。",
             "instruct": "用冷静克制、干脆利落的女性语气说话，像决斗裁判官一样严谨果断",
             "temperature": 0.2
+          }
+        }
+      ]
+    },
+    {
+      "id": "trae-cli-acp",
+      "catId": "tighnari",
+      "name": "提纳里",
+      "displayName": "提纳里",
+      "nickname": "提纳里",
+      "avatar": "/avatars/trae.png",
+      "color": {
+        "primary": "#4ECDC4",
+        "secondary": "#E8FFF9"
+      },
+      "mentionPatterns": ["@提纳里", "@小T", "@trae"],
+      "roleDescription": "须弥巡林官，Trae CLI ACP 原生接入猫，精准可靠",
+      "caution": null,
+      "defaultVariantId": "tighnari-default",
+      "features": {
+        "sessionChain": true
+      },
+      "variants": [
+        {
+          "id": "tighnari-default",
+          "clientId": "acp",
+          "defaultModel": "智谱glm-5.2",
+          "mcpSupport": true,
+          "cli": {
+            "command": "trae-cli",
+            "outputFormat": "stream-json",
+            "contextWindow": 128000
+          },
+          "acp": {
+            "command": "trae-cli",
+            "startupArgs": ["acp", "serve", "-y"],
+            "mcpWhitelist": ["cat-cafe", "cat-cafe-memory", "cat-cafe-collab", "cat-cafe-signals"],
+            "supportsMultiplexing": false
+          },
+          "accountRef": "trae-native",
+          "personality": "严谨务实，对细节极度敏感，巡林官的直觉从不犯错",
+          "roleDescription": "须弥巡林官，Trae CLI ACP 原生接入猫，精准可靠",
+          "caution": null,
+          "voiceConfig": {
+            "voice": "zm_yunjian",
+            "langCode": "zh",
+            "speed": 1,
+            "refAudio": "genshin/提纳里/vo_zh_tighnari_hello.wav",
+            "refText": "我是道成林巡林官提纳里，不废话，直入正题——你之前从没在道成林一带见过须弥蔷薇吗？",
+            "instruct": "用严谨务实、冷静沉稳的青年男性语气说话，像巡林官一样精准可靠，偶尔流露一丝无奈的关怀",
+            "temperature": 0.3
           }
         }
       ]
