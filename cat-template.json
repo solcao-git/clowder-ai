@@ -1297,7 +1297,9 @@
             "startupArgs": [
               "acp",
               "serve",
-              "-y"
+              "-y",
+              "-c",
+              "session.resume=false"
             ],
             "mcpWhitelist": [
               "cat-cafe",
