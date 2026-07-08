@@ -172,6 +172,20 @@ export function transformAcpEvent(
   if (!sessionUpdate) return null;
   const now = Date.now();
 
+  // DIAGNOSTIC: dump every ACP event type for raiden debugging.
+  // Remove after root cause is confirmed.
+  log.info(
+    {
+      catId,
+      sessionUpdate,
+      contentType: content?.type,
+      textPreview: content?.text?.slice(0, 120),
+      textLen: content?.text?.length,
+      innerKeys: Object.keys(inner),
+    },
+    'ACP EVENT DIAGNOSTIC',
+  );
+
   // Raw event diagnostic: log non-text event types and any event with unexpected content structure.
   // Helps diagnose thread-specific failures where Gemini outputs metadata instead of real content.
   if (sessionUpdate !== 'agent_message_chunk' && sessionUpdate !== 'user_message_chunk') {
@@ -454,6 +468,12 @@ export function transformAcpEvent(
       });
 
     case 'user_message_chunk':
+      // Trae-cli agent loop: user_message_chunk signals a new turn boundary.
+      // The model receives the full conversation history as user_message_chunk,
+      // then generates a fresh response. Without textMode='replace', all turns'
+      // text is concatenated. Setting newResponsePhase here ensures the next
+      // agent_message_chunk replaces (not appends to) the previous response.
+      if (state) state.newResponsePhase = true;
       return withFlush(null);
 
     default:
