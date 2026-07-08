@@ -41,7 +41,13 @@ export interface AcpPoolMetrics {
 export interface AcpLease {
   readonly client: AcpPoolClient;
   readonly poolKey: PoolKey;
-  release(): void;
+  /**
+   * Release the lease back to the pool (process stays alive for reuse).
+   * Pass `{ close: true }` to close the process instead of returning it
+   * to the pool — needed for agents (e.g. trae-cli) that accumulate
+   * internal state across sessions within the same process.
+   */
+  release(options?: { close?: boolean }): void;
 }
 
 export interface AcpAcquireOptions {
@@ -292,7 +298,7 @@ export class AcpProcessPool {
     return {
       client: entry.client,
       poolKey,
-      release: () => {
+      release: (options?: { close?: boolean }) => {
         if (released) return;
         released = true;
         // Stale lease guard: generation mismatch means this lease was force-released
@@ -300,6 +306,26 @@ export class AcpProcessPool {
         if (entry.leaseGeneration !== creationGeneration) return;
         entry.leaseCount--;
         this._metrics.activeLeaseCount--;
+
+        // Close-and-evict: some ACP agents (notably trae-cli) accumulate internal
+        // state across sessions within the same process. Returning them to the pool
+        // causes context leakage — the next session sees previous sessions' history.
+        // Close the process instead of returning it to the pool.
+        if (options?.close) {
+          this.forgetSessionsForEntry(entry);
+          entry.state = 'closing';
+          entry.client.close().catch(() => {});
+          const key = serializeKey(poolKey);
+          const entries = this.entries.get(key);
+          if (entries) {
+            const idx = entries.indexOf(entry);
+            if (idx >= 0) entries.splice(idx, 1);
+            if (entries.length === 0) this.entries.delete(key);
+          }
+          this._metrics.liveProcessCount--;
+          return;
+        }
+
         if (entry.leaseCount <= 0) {
           entry.leaseCount = 0;
           this._metrics.idleProcessCount++;

@@ -991,6 +991,12 @@ export interface AcpVariantConfig {
   experimental?: boolean;
   mcpWhitelist?: string[];
   supportsMultiplexing?: boolean;
+  /**
+   * When true, close the ACP process after each invocation instead of returning
+   * it to the pool. Needed for agents (e.g. trae-cli) that accumulate internal
+   * state across sessions within the same process, causing context leakage.
+   */
+  singleUseProcess?: boolean;
   /** Phase C: optional pool config overrides */
   pool?: {
     maxLiveProcesses?: number;

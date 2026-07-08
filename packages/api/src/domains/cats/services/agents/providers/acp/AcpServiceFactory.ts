@@ -265,5 +265,8 @@ export async function createAcpServiceForConfig(
     modelName: spawn.sessionModel ?? config.defaultModel ?? 'acp',
     sessionModel: spawn.sessionModel,
     mcpSupport: config.mcpSupport,
+    // Trae-cli accumulates internal state across sessions within the same
+    // process — close the process after each invocation to prevent context leakage.
+    singleUseProcess: acpConfig.singleUseProcess === true,
   });
 }

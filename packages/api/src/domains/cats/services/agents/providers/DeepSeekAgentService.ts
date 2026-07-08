@@ -38,6 +38,16 @@ const DEEPCODE_SETTINGS_PATHS = [
   () => join(homedir(), '.deepcode', 'settings.json'),
 ];
 
+/** Dashscope model name normalization — dashscope keys only grant access to specific models.
+ *  deepcode CLI defaults to DeepSeek-V4-Pro which dashscope rejects (Model.AccessDenied).
+ *  Auto-correct to a dashscope-compatible model when the BASE_URL points to dashscope. */
+const DASHSCOPE_MODEL_MAP: Record<string, string> = {
+  'deepseek-v4-pro': 'qwen3.7-plus',
+  'deepseekv4-pro': 'qwen3.7-plus',
+  'deepseek-chat': 'qwen3.7-plus',
+  'deepseek-reasoner': 'qwen3.7-plus',
+};
+
 function readDeepCodeConfig(): DeepSeekConfig | null {
   for (const getPath of DEEPCODE_SETTINGS_PATHS) {
     const path = getPath();
@@ -48,7 +58,16 @@ function readDeepCodeConfig(): DeepSeekConfig | null {
       const env = parsed.env ?? parsed;
       const apiKey = env.API_KEY ?? env.apiKey ?? '';
       const baseUrl = (env.BASE_URL ?? env.baseUrl ?? 'https://api.deepseek.com').replace(/\/+$/, '');
-      const model = env.MODEL ?? env.model ?? parsed.model ?? 'deepseek-chat';
+      let model = env.MODEL ?? env.model ?? parsed.model ?? 'deepseek-chat';
+      // Dashscope auto-correction: map DeepSeek model names to dashscope-compatible ones
+      const isDashScope = baseUrl.includes('dashscope');
+      if (isDashScope) {
+        const normalizedModel = DASHSCOPE_MODEL_MAP[model.toLowerCase()];
+        if (normalizedModel) {
+          log.info({ original: model, corrected: normalizedModel }, 'Dashscope model name auto-corrected');
+          model = normalizedModel;
+        }
+      }
       if (!apiKey) {
         log.warn({ path }, 'deepcode settings.json found but missing API_KEY');
         continue;
@@ -180,9 +199,21 @@ export class DeepSeekAgentService implements AgentService {
     };
 
     // Build messages payload
-    const messages: Array<{ role: string; content: string }> = [
-      { role: 'user', content: prompt },
-    ];
+    // invoke-single-cat prepends L0 system prompt to the prompt string when
+    // injectSystemPrompt is true. Extract the system portion into a proper
+    // system-role message for OpenAI-compatible APIs (dashscope/qwen etc.)
+    // which respect system-role differently from user-role.
+    const SYSTEM_SEP = '\n\n---\n\n';
+    const sepIdx = prompt.indexOf(SYSTEM_SEP);
+    const messages: Array<{ role: string; content: string }> = [];
+    if (sepIdx > 0) {
+      // L0 system prompt is before the separator
+      messages.push({ role: 'system', content: prompt.slice(0, sepIdx) });
+      messages.push({ role: 'user', content: prompt.slice(sepIdx + SYSTEM_SEP.length) });
+    } else {
+      // No separator found — treat entire prompt as user message
+      messages.push({ role: 'user', content: prompt });
+    }
 
     // Build request body
     const requestBody: Record<string, unknown> = {
