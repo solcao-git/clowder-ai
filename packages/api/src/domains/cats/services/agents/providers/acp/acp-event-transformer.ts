@@ -172,20 +172,6 @@ export function transformAcpEvent(
   if (!sessionUpdate) return null;
   const now = Date.now();
 
-  // DIAGNOSTIC: dump every ACP event type for raiden debugging.
-  // Remove after root cause is confirmed.
-  log.info(
-    {
-      catId,
-      sessionUpdate,
-      contentType: content?.type,
-      textPreview: content?.text?.slice(0, 120),
-      textLen: content?.text?.length,
-      innerKeys: Object.keys(inner),
-    },
-    'ACP EVENT DIAGNOSTIC',
-  );
-
   // Raw event diagnostic: log non-text event types and any event with unexpected content structure.
   // Helps diagnose thread-specific failures where Gemini outputs metadata instead of real content.
   if (sessionUpdate !== 'agent_message_chunk' && sessionUpdate !== 'user_message_chunk') {
