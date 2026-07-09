@@ -305,22 +305,27 @@ export function transformAcpEvent(
         state.textTail = combined.length > SCRATCHPAD_TAIL_CHARS ? combined.slice(-SCRATCHPAD_TAIL_CHARS) : combined;
       }
 
-      // Trae-cli agent-loop text replacement: when a tool result was emitted
+      // Trae-cli agent-loop text replacement: when a user_message_chunk was seen
       // earlier in this session, the model has started a new response phase.
-      // The new text replaces (not appends to) the previous response's text,
-      // matching trae-cli's own terminal behavior. Only the FIRST chunk after
-      // a tool result gets textMode='replace'; subsequent chunks are streaming
-      // deltas that should append normally.
+      // textMode='replace' tells the frontend to replace the bubble's content
+      // instead of appending. This is ONLY correct during replayPhase (session
+      // resume where historical turns are replayed and should be replaced by
+      // the new response). Outside replayPhase, tool_call→text transitions
+      // within the SAME turn should append, not replace — using replace here
+      // causes the text before the tool_call to be silently dropped.
       const isFirstInNewPhase = state?.newResponsePhase === true;
+      const shouldReplace = isFirstInNewPhase && state?.replayPhase === true;
       if (isFirstInNewPhase) {
         state.newResponsePhase = false;
-        log.info({ catId, textLen: text.length }, 'ACP textMode=replace: new response phase');
+        if (shouldReplace) {
+          log.info({ catId, textLen: text.length }, 'ACP textMode=replace: new response phase (replay)');
+        }
       }
       return withFlush({
         type: 'text',
         catId,
         content: text,
-        ...(isFirstInNewPhase ? { textMode: 'replace' as const } : {}),
+        ...(shouldReplace ? { textMode: 'replace' as const } : {}),
         metadata,
         timestamp: now,
       });
