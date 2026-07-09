@@ -12,7 +12,7 @@ import { defaultAcpCommandForClient, defaultAcpStartupArgsForClient } from './hu
 import { defaultMcpSupportForClient } from './hub-cat-editor.protocols';
 import type { CatStrategyEntry, StrategyType } from './hub-strategy-types';
 
-export type ClientId = 'anthropic' | 'openai' | 'google' | 'kimi' | 'opencode' | 'antigravity' | 'catagent' | 'acp' | 'qoder' | 'trae' | 'deepseek';
+export type ClientId = 'anthropic' | 'openai' | 'google' | 'kimi' | 'opencode' | 'antigravity' | 'catagent' | 'acp' | 'qoder' | 'trae' | 'codebuddy' | 'deepseek';
 /** @deprecated Use ClientId instead. */
 export type ClientValue = ClientId;
 export type SessionChainValue = 'true' | 'false';
@@ -263,7 +263,8 @@ function isBuiltinClient(client: ClientId): client is BuiltinAccountClient {
     client === 'google' ||
     client === 'kimi' ||
     client === 'opencode' ||
-    client === 'acp'
+    client === 'acp' ||
+    client === 'codebuddy'
   );
 }
 

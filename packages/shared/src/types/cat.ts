@@ -24,6 +24,7 @@ export type ClientId =
   | 'qoder'
   | 'acp' // F161: Generic ACP client for unknown/user-provided ACP agents
   | 'trae' // Native Trae CLI client
+  | 'codebuddy' // CodeBuddy CLI print mode client
   | 'deepseek'; // DeepSeek OpenAI-compatible API direct integration
 
 /** @deprecated clowder-ai#340: Use {@link ClientId} instead. Kept as alias for backward compatibility. */

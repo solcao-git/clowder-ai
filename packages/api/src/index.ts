@@ -1334,6 +1334,13 @@ async function main(): Promise<void> {
             service = new TraeAgentService({ catId });
             break;
           }
+          case 'codebuddy': {
+            const { CodeBuddyAgentService } = await import(
+              './domains/cats/services/agents/providers/CodeBuddyAgentService.js'
+            );
+            service = new CodeBuddyAgentService({ catId });
+            break;
+          }
           case 'deepseek': {
             const { DeepSeekAgentService } = await import(
               './domains/cats/services/agents/providers/DeepSeekAgentService.js'

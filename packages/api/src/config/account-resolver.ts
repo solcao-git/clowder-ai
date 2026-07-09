@@ -116,6 +116,8 @@ const BUILTIN_ACCOUNT_MAP: Record<string, BuiltinAccountClient> = {
   builtin_opencode: 'opencode',
   qoder: 'qoder',
   'qoder-native': 'qoder',
+  codebuddy: 'codebuddy',
+  'xiyu-openai': 'codebuddy',
 };
 
 const GOOGLE_OWNED_DOMAINS = ['generativelanguage.googleapis.com', 'googleapis.com'];
