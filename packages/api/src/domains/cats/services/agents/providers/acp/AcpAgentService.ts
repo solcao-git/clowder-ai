@@ -347,6 +347,15 @@ export class AcpAgentService implements AgentService {
       // Set prompt fingerprint on state for echo detection — trae-cli may echo
       // the prompt back as agent_message_chunk text; transformer will suppress it.
       acpState.promptFingerprint = computePromptFingerprint(effectivePrompt);
+      // Session resume replay suppression: when resuming a session, trae-cli
+      // replays ALL historical turns as user_message_chunk/agent_message_chunk
+      // pairs. The replayPhase flag tells the transformer to suppress all
+      // agent_message_chunk text until the user_message_chunk matching our
+      // actual prompt is detected.
+      if (isResumedSession) {
+        acpState.replayPhase = true;
+        log.info({ ...ctx, sessionId }, 'ACP replayPhase enabled for session resume');
+      }
       log.info({ ...ctx, sessionId, promptDigest }, 'ACP promptStream starting');
       eventCount = 0;
       for await (const event of client.promptStream(sessionId, effectivePrompt)) {

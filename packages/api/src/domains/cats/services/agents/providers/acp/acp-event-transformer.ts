@@ -66,6 +66,25 @@ export interface AcpSessionState {
    * when the first subsequent text chunk is emitted.
    */
   newResponsePhase: boolean;
+  /**
+   * Session resume replay suppression.
+   * When sessionChain=true and the session is resumed, trae-cli replays ALL
+   * historical turns as user_message_chunk/agent_message_chunk pairs before
+   * generating the new response. These replayed chunks cause text to briefly
+   * "flash" in the UI and the previous turn's text to remain visible.
+   * When replayPhase=true, all agent_message_chunk text output is suppressed.
+   * The phase ends when a user_message_chunk matching our prompt fingerprint
+   * is detected, signaling that the replay is over and the real response follows.
+   * Set by caller (AcpAgentService) before promptStream starts when isResumedSession=true.
+   */
+  replayPhase: boolean;
+  /**
+   * Count of user_message_chunk events seen during replayPhase.
+   * Used as a safety valve: if the prompt fingerprint doesn't match any
+   * user_message_chunk (e.g. system prompt prep changes the text), we
+   * force-end replayPhase after seeing enough chunks to assume replay is over.
+   */
+  replayUserChunkCount: number;
 }
 
 export function createAcpSessionState(): AcpSessionState {
@@ -78,6 +97,8 @@ export function createAcpSessionState(): AcpSessionState {
     suppressedSystemReminders: 0,
     promptFingerprint: '',
     newResponsePhase: false,
+    replayPhase: false,
+    replayUserChunkCount: 0,
   };
 }
 
@@ -224,6 +245,16 @@ export function transformAcpEvent(
       }
       const text = content?.text ?? '';
       if (state) {
+        // Session resume replay suppression: when replayPhase is active, all
+        // agent_message_chunk text is historical replay from a resumed session.
+        // Suppress it entirely to prevent "flash" of old content in the UI.
+        // The replayPhase flag is cleared when the user_message_chunk matching
+        // our actual prompt is detected (see user_message_chunk case below).
+        if (state.replayPhase) {
+          // Still update textTail so scratchpad detection works after replay ends
+          state.textTail = (state.textTail + text).slice(-SCRATCHPAD_TAIL_CHARS);
+          return withFlush(null);
+        }
         // Once scratchpad is detected, suppress all subsequent text chunks.
         if (state.scratchpadDetected) return withFlush(null);
 
@@ -296,6 +327,8 @@ export function transformAcpEvent(
     }
 
     case 'agent_thought_chunk':
+      // Suppress during replay — historical thinking from resumed session.
+      if (state?.replayPhase) return null;
       // Accumulate — emit nothing until a non-thinking event flushes the buffer.
       if (state) {
         state.thinkingBuffer += content?.text ?? '';
@@ -311,6 +344,9 @@ export function transformAcpEvent(
       };
 
     case 'tool_call': {
+      // Suppress tool_call/tool_result during replay — these are historical events
+      // from the resumed session, not current tool invocations.
+      if (state?.replayPhase) return withFlush(null);
       const toolName = resolveToolName(inner);
       const toolInput = resolveToolInput(inner);
       const toolCallId = typeof inner.toolCallId === 'string' ? inner.toolCallId : undefined;
@@ -373,6 +409,8 @@ export function transformAcpEvent(
     }
 
     case 'tool_call_update': {
+      // Suppress during replay — same as tool_call above.
+      if (state?.replayPhase) return withFlush(null);
       const toolName = resolveToolName(inner);
       const toolCallId = typeof inner.toolCallId === 'string' ? inner.toolCallId : undefined;
       const status = inner.status;
@@ -453,14 +491,48 @@ export function transformAcpEvent(
         timestamp: now,
       });
 
-    case 'user_message_chunk':
+    case 'user_message_chunk': {
       // Trae-cli agent loop: user_message_chunk signals a new turn boundary.
       // The model receives the full conversation history as user_message_chunk,
       // then generates a fresh response. Without textMode='replace', all turns'
       // text is concatenated. Setting newResponsePhase here ensures the next
       // agent_message_chunk replaces (not appends to) the previous response.
-      if (state) state.newResponsePhase = true;
+      if (state) {
+        state.newResponsePhase = true;
+
+        // Session resume replay detection: during replay, trae-cli sends
+        // historical user_message_chunks that do NOT match our prompt. When
+        // we find a user_message_chunk whose text matches our prompt fingerprint,
+        // the replay is over and the real response is about to follow.
+        if (state.replayPhase) {
+          state.replayUserChunkCount++;
+          const chunkText = content?.text ?? '';
+          let fingerprintMatched = false;
+          if (state.promptFingerprint && chunkText.length > 20) {
+            const colonIdx = state.promptFingerprint.indexOf(':');
+            if (colonIdx > 0) {
+              const headEnd = state.promptFingerprint.indexOf('|', colonIdx);
+              const promptHead = headEnd > colonIdx ? state.promptFingerprint.slice(colonIdx + 1, headEnd) : '';
+              // If chunk text starts with the prompt head (80 chars), this is our actual prompt
+              if (promptHead && chunkText.startsWith(promptHead)) {
+                fingerprintMatched = true;
+              }
+            }
+          }
+          if (fingerprintMatched) {
+            state.replayPhase = false;
+            log.info({ catId, textLen: chunkText.length, chunksSeen: state.replayUserChunkCount }, 'ACP replayPhase ended: prompt fingerprint matched in user_message_chunk');
+          } else if (state.replayUserChunkCount >= 20) {
+            // Safety valve: if we've seen 20+ user_message_chunks without matching
+            // the fingerprint, assume replay is over. This handles edge cases where
+            // the system prompt prep changes the text enough to break fingerprint match.
+            state.replayPhase = false;
+            log.info({ catId, chunksSeen: state.replayUserChunkCount }, 'ACP replayPhase ended: safety valve (max user_message_chunks reached)');
+          }
+        }
+      }
       return withFlush(null);
+    }
 
     default:
       return withFlush(null);
