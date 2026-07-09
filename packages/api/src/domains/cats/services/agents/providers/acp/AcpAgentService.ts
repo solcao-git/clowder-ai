@@ -24,7 +24,7 @@ import { createPromptDigest } from '../../../context/prompt-digest.js';
 import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata } from '../../../types.js';
 import { type AcpCapacitySignal, AcpProtocolError, AcpTimeoutError } from './AcpClient.js';
 import type { AcpLease, AcpProcessPool, PoolKey } from './AcpProcessPool.js';
-import { computePromptFingerprint, createAcpSessionState, flushAcpThinking, transformAcpEvent } from './acp-event-transformer.js';
+import { createAcpSessionState, flushAcpThinking, transformAcpEvent } from './acp-event-transformer.js';
 import { resolveAcpMcpServers, resolveDisabledServerIds, resolveUserProjectMcpServers } from './acp-mcp-resolver.js';
 import { callbackEnvDiagnostic, materializeSessionMcpServers } from './acp-session-env.js';
 import type { AcpMcpServer, AcpNewSessionResult } from './types.js';
@@ -60,15 +60,6 @@ export interface AcpAgentServiceConfig {
    * sessions' conversation history even with sessionChain=false.
    */
   singleUseProcess?: boolean;
-  /**
-   * When true, enables replayPhase suppression on session resume.
-   * Only needed for trae-cli, which replays ALL historical turns as
-   * user_message_chunk/agent_message_chunk pairs when a session is resumed.
-   * CodeBuddy and other ACP providers do NOT replay history, so enabling
-   * this for them causes all text to be silently suppressed (replayPhase
-   * never ends because no user_message_chunk events are emitted).
-   */
-  replayOnResume?: boolean;
 }
 
 /** @deprecated Use AcpAgentServiceConfig. Kept for backward compat during transition. */
@@ -88,8 +79,6 @@ export class AcpAgentService implements AgentService {
   private readonly sessionModel?: string;
   private readonly mcpSupportEnabled: boolean;
   private readonly singleUseProcess: boolean;
-  private readonly replayOnResume: boolean;
-
   constructor(config: AcpAgentServiceConfig) {
     this.catId = config.catId;
     this.pool = config.pool;
@@ -102,7 +91,6 @@ export class AcpAgentService implements AgentService {
     this.sessionModel = config.sessionModel?.trim() || undefined;
     this.mcpSupportEnabled = config.mcpSupport !== false;
     this.singleUseProcess = config.singleUseProcess === true;
-    this.replayOnResume = config.replayOnResume === true;
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
@@ -355,21 +343,6 @@ export class AcpAgentService implements AgentService {
       promptStreamStartedAt = Date.now();
       // Prompt digest: length + hash only (snippets gated by AUDIT_LOG_INCLUDE_PROMPT_SNIPPETS)
       const promptDigest = createPromptDigest(effectivePrompt);
-      // Set prompt fingerprint on state for echo detection — trae-cli may echo
-      // the prompt back as agent_message_chunk text; transformer will suppress it.
-      acpState.promptFingerprint = computePromptFingerprint(effectivePrompt);
-      // Session resume replay suppression: only enable for trae-cli (replayOnResume=true).
-      // trae-cli replays ALL historical turns as user_message_chunk/agent_message_chunk
-      // pairs when a session is resumed. The replayPhase flag tells the transformer to
-      // suppress all agent_message_chunk text until the user_message_chunk matching our
-      // actual prompt is detected.
-      // CodeBuddy and other ACP providers do NOT replay history, so enabling replayPhase
-      // for them causes all text to be silently suppressed (replayPhase never ends because
-      // no user_message_chunk events are emitted to trigger the exit condition).
-      if (isResumedSession && this.replayOnResume) {
-        acpState.replayPhase = true;
-        log.info({ ...ctx, sessionId }, 'ACP replayPhase enabled for session resume');
-      }
       log.info({ ...ctx, sessionId, promptDigest }, 'ACP promptStream starting');
       eventCount = 0;
       for await (const event of client.promptStream(sessionId, effectivePrompt)) {

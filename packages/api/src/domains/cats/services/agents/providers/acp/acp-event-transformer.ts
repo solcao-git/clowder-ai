@@ -39,52 +39,6 @@ export interface AcpSessionState {
   scratchpadDetected: boolean;
   /** Trailing text window for cross-chunk compaction signature detection. */
   textTail: string;
-  /**
-   * Trae CLI system_reminders echo suppression.
-   * Trae-cli re-sends accumulated `system_reminders` content via `agent_message_chunk`
-   * events on every prompt. These are protocol-internal reminders (context window status,
-   * thinking budget, etc.) that should NOT appear as model output text.
-   * Tracks how many system_reminders chunks have been suppressed this session.
-   */
-  suppressedSystemReminders: number;
-  /**
-   * Prompt echo suppression. Some ACP agents (notably trae-cli) echo back the
-   * user prompt as the first `agent_message_chunk` text. This stores a fingerprint
-   * of the prompt to detect and suppress such echo.
-   * Set by caller (AcpAgentService) before promptStream starts.
-   */
-  promptFingerprint: string;
-  /**
-   * Trae CLI agent-loop response phase tracking.
-   * Trae-cli runs an internal agent loop where the model may generate text,
-   * call tools, and generate new text multiple times within a single promptStream
-   * call. Without replacement, all turns' text is concatenated, causing visible
-   * repetition (e.g., multiple self-introductions). Setting textMode='replace'
-   * on the first text chunk after a tool result ensures only the latest response
-   * is shown, matching trae-cli's own terminal behavior.
-   * The flag is set when a tool result (final status) is emitted and cleared
-   * when the first subsequent text chunk is emitted.
-   */
-  newResponsePhase: boolean;
-  /**
-   * Session resume replay suppression.
-   * When sessionChain=true and the session is resumed, trae-cli replays ALL
-   * historical turns as user_message_chunk/agent_message_chunk pairs before
-   * generating the new response. These replayed chunks cause text to briefly
-   * "flash" in the UI and the previous turn's text to remain visible.
-   * When replayPhase=true, all agent_message_chunk text output is suppressed.
-   * The phase ends when a user_message_chunk matching our prompt fingerprint
-   * is detected, signaling that the replay is over and the real response follows.
-   * Set by caller (AcpAgentService) before promptStream starts when isResumedSession=true.
-   */
-  replayPhase: boolean;
-  /**
-   * Count of user_message_chunk events seen during replayPhase.
-   * Used as a safety valve: if the prompt fingerprint doesn't match any
-   * user_message_chunk (e.g. system prompt prep changes the text), we
-   * force-end replayPhase after seeing enough chunks to assume replay is over.
-   */
-  replayUserChunkCount: number;
 }
 
 export function createAcpSessionState(): AcpSessionState {
@@ -94,25 +48,7 @@ export function createAcpSessionState(): AcpSessionState {
     thinkingBuffer: '',
     scratchpadDetected: false,
     textTail: '',
-    suppressedSystemReminders: 0,
-    promptFingerprint: '',
-    newResponsePhase: false,
-    replayPhase: false,
-    replayUserChunkCount: 0,
   };
-}
-
-/**
- * Compute a lightweight fingerprint of a prompt string for echo detection.
- * Returns length + first/last N chars. NOT a hash — just enough to detect
- * an agent echoing back the exact prompt as text.
- */
-export function computePromptFingerprint(prompt: string): string {
-  if (!prompt) return '';
-  const len = prompt.length;
-  const head = prompt.slice(0, 80);
-  const tail = prompt.slice(-80);
-  return `${len}:${head}|${tail}`;
 }
 
 /**
@@ -225,67 +161,21 @@ export function transformAcpEvent(
 
   switch (sessionUpdate) {
     case 'agent_message_chunk': {
-      // Trae-cli sends `system_reminders` as agent_message_chunk events with
-      // content.type = 'system_reminders'. These are protocol-internal context
-      // updates (context window status, thinking budget, etc.) that must NOT be
-      // emitted as model output text. Only emit when content.type is 'text' or
-      // unset (backwards compat for providers that don't set type).
-      // See: zcode root-cause analysis of raiden trae-cli dialog repetition.
+      // ACP agents may send non-text content types (e.g. `system_reminders`)
+      // as agent_message_chunk events. These are protocol-internal context
+      // updates that must NOT be emitted as model output text.
+      // Only emit when content.type is 'text' or unset (backwards compat).
       if (content?.type && content.type !== 'text') {
-        if (state) {
-          state.suppressedSystemReminders++;
-          if (state.suppressedSystemReminders <= 3) {
-            log.info(
-              { catId, contentType: content.type, textLen: content?.text?.length },
-              'Suppressing non-text agent_message_chunk (system_reminders echo)',
-            );
-          }
-        }
+        log.debug(
+          { catId, contentType: content.type, textLen: content?.text?.length },
+          'Suppressing non-text agent_message_chunk',
+        );
         return withFlush(null);
       }
       const text = content?.text ?? '';
       if (state) {
-        // Session resume replay suppression: when replayPhase is active, all
-        // agent_message_chunk text is historical replay from a resumed session.
-        // Suppress it entirely to prevent "flash" of old content in the UI.
-        // The replayPhase flag is cleared when the user_message_chunk matching
-        // our actual prompt is detected (see user_message_chunk case below).
-        if (state.replayPhase) {
-          // Still update textTail so scratchpad detection works after replay ends
-          state.textTail = (state.textTail + text).slice(-SCRATCHPAD_TAIL_CHARS);
-          return withFlush(null);
-        }
         // Once scratchpad is detected, suppress all subsequent text chunks.
         if (state.scratchpadDetected) return withFlush(null);
-
-        // Prompt echo detection: trae-cli echoes the user prompt back as
-        // agent_message_chunk text. If this chunk's text matches the start of
-        // the prompt fingerprint, suppress it. The fingerprint encodes
-        // "length:head80|tail80" — check head match for echo detection.
-        if (state.promptFingerprint && text.length > 20) {
-          const colonIdx = state.promptFingerprint.indexOf(':');
-          if (colonIdx > 0) {
-            const promptLen = parseInt(state.promptFingerprint.slice(0, colonIdx), 10);
-            const headEnd = state.promptFingerprint.indexOf('|', colonIdx);
-            const promptHead = headEnd > colonIdx ? state.promptFingerprint.slice(colonIdx + 1, headEnd) : '';
-            // If text starts with the prompt head (80 chars), it's an echo
-            if (promptHead && text.startsWith(promptHead)) {
-              log.info(
-                { catId, textLen: text.length, promptLen },
-                'Suppressing prompt echo in agent_message_chunk',
-              );
-              // After detecting echo, clear fingerprint so subsequent non-echo
-              // chunks are emitted normally
-              state.promptFingerprint = '';
-              return withFlush(null);
-            }
-            // If text is shorter but still matches the prompt start, accumulate
-            // and wait for more chunks. Use textTail to track across chunks.
-            if (promptHead.startsWith(text) && text.length < promptHead.length) {
-              // Could be partial echo — let textTail accumulate and check next chunk
-            }
-          }
-        }
 
         // Cross-chunk detection: combine trailing window with current chunk.
         const combined = state.textTail + text;
@@ -305,35 +195,16 @@ export function transformAcpEvent(
         state.textTail = combined.length > SCRATCHPAD_TAIL_CHARS ? combined.slice(-SCRATCHPAD_TAIL_CHARS) : combined;
       }
 
-      // Trae-cli agent-loop text replacement: when a user_message_chunk was seen
-      // earlier in this session, the model has started a new response phase.
-      // textMode='replace' tells the frontend to replace the bubble's content
-      // instead of appending. This is ONLY correct during replayPhase (session
-      // resume where historical turns are replayed and should be replaced by
-      // the new response). Outside replayPhase, tool_call→text transitions
-      // within the SAME turn should append, not replace — using replace here
-      // causes the text before the tool_call to be silently dropped.
-      const isFirstInNewPhase = state?.newResponsePhase === true;
-      const shouldReplace = isFirstInNewPhase && state?.replayPhase === true;
-      if (isFirstInNewPhase) {
-        state.newResponsePhase = false;
-        if (shouldReplace) {
-          log.info({ catId, textLen: text.length }, 'ACP textMode=replace: new response phase (replay)');
-        }
-      }
       return withFlush({
         type: 'text',
         catId,
         content: text,
-        ...(shouldReplace ? { textMode: 'replace' as const } : {}),
         metadata,
         timestamp: now,
       });
     }
 
     case 'agent_thought_chunk':
-      // Suppress during replay — historical thinking from resumed session.
-      if (state?.replayPhase) return null;
       // Accumulate — emit nothing until a non-thinking event flushes the buffer.
       if (state) {
         state.thinkingBuffer += content?.text ?? '';
@@ -349,9 +220,6 @@ export function transformAcpEvent(
       };
 
     case 'tool_call': {
-      // Suppress tool_call/tool_result during replay — these are historical events
-      // from the resumed session, not current tool invocations.
-      if (state?.replayPhase) return withFlush(null);
       const toolName = resolveToolName(inner);
       const toolInput = resolveToolInput(inner);
       const toolCallId = typeof inner.toolCallId === 'string' ? inner.toolCallId : undefined;
@@ -400,10 +268,6 @@ export function transformAcpEvent(
           state.emittedToolUseByCallId.add(toolCallId);
           state.finalEmittedByCallId.add(toolCallId);
         }
-        // Tool result emitted — next text chunk starts a new response phase.
-        // Use textMode='replace' to avoid concatenating multiple turns' text
-        // (e.g., trae-cli agent loop generating repeated self-introductions).
-        if (state) state.newResponsePhase = true;
         return withFlush(hasPendingToolUse ? resultMsg : [toolUse, resultMsg]);
       }
       // Pending/in_progress/no-status → tool_use only.
@@ -414,8 +278,6 @@ export function transformAcpEvent(
     }
 
     case 'tool_call_update': {
-      // Suppress during replay — same as tool_call above.
-      if (state?.replayPhase) return withFlush(null);
       const toolName = resolveToolName(inner);
       const toolCallId = typeof inner.toolCallId === 'string' ? inner.toolCallId : undefined;
       const status = inner.status;
@@ -463,8 +325,6 @@ export function transformAcpEvent(
         // above (before this `if (alreadyHasToolUse)` branch). Second final
         // for same toolCallId returns null before reaching this point.
         if (state && toolCallId) state.finalEmittedByCallId.add(toolCallId);
-        // Tool result emitted — next text chunk starts a new response phase.
-        if (state) state.newResponsePhase = true;
         return withFlush(resultMsg);
       }
       // F197 AC-A3 boundary: toolCallId first appears as final update with no prior
@@ -473,8 +333,6 @@ export function transformAcpEvent(
         state.emittedToolUseByCallId.add(toolCallId);
         state.finalEmittedByCallId.add(toolCallId);
       }
-      // Tool result emitted — next text chunk starts a new response phase.
-      if (state) state.newResponsePhase = true;
       return withFlush([
         {
           type: 'tool_use',
@@ -496,48 +354,9 @@ export function transformAcpEvent(
         timestamp: now,
       });
 
-    case 'user_message_chunk': {
-      // Trae-cli agent loop: user_message_chunk signals a new turn boundary.
-      // The model receives the full conversation history as user_message_chunk,
-      // then generates a fresh response. Without textMode='replace', all turns'
-      // text is concatenated. Setting newResponsePhase here ensures the next
-      // agent_message_chunk replaces (not appends to) the previous response.
-      if (state) {
-        state.newResponsePhase = true;
-
-        // Session resume replay detection: during replay, trae-cli sends
-        // historical user_message_chunks that do NOT match our prompt. When
-        // we find a user_message_chunk whose text matches our prompt fingerprint,
-        // the replay is over and the real response is about to follow.
-        if (state.replayPhase) {
-          state.replayUserChunkCount++;
-          const chunkText = content?.text ?? '';
-          let fingerprintMatched = false;
-          if (state.promptFingerprint && chunkText.length > 20) {
-            const colonIdx = state.promptFingerprint.indexOf(':');
-            if (colonIdx > 0) {
-              const headEnd = state.promptFingerprint.indexOf('|', colonIdx);
-              const promptHead = headEnd > colonIdx ? state.promptFingerprint.slice(colonIdx + 1, headEnd) : '';
-              // If chunk text starts with the prompt head (80 chars), this is our actual prompt
-              if (promptHead && chunkText.startsWith(promptHead)) {
-                fingerprintMatched = true;
-              }
-            }
-          }
-          if (fingerprintMatched) {
-            state.replayPhase = false;
-            log.info({ catId, textLen: chunkText.length, chunksSeen: state.replayUserChunkCount }, 'ACP replayPhase ended: prompt fingerprint matched in user_message_chunk');
-          } else if (state.replayUserChunkCount >= 20) {
-            // Safety valve: if we've seen 20+ user_message_chunks without matching
-            // the fingerprint, assume replay is over. This handles edge cases where
-            // the system prompt prep changes the text enough to break fingerprint match.
-            state.replayPhase = false;
-            log.info({ catId, chunksSeen: state.replayUserChunkCount }, 'ACP replayPhase ended: safety valve (max user_message_chunks reached)');
-          }
-        }
-      }
+    case 'user_message_chunk':
+      // ACP protocol internal event — not emitted as output.
       return withFlush(null);
-    }
 
     default:
       return withFlush(null);

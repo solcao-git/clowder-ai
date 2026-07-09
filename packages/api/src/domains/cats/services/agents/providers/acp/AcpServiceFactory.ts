@@ -265,12 +265,6 @@ export async function createAcpServiceForConfig(
     modelName: spawn.sessionModel ?? config.defaultModel ?? 'acp',
     sessionModel: spawn.sessionModel,
     mcpSupport: config.mcpSupport,
-    // Trae-cli accumulates internal state across sessions within the same
-    // process — close the process after each invocation to prevent context leakage.
     singleUseProcess: acpConfig.singleUseProcess === true,
-    // Trae-cli replays ALL historical turns on session resume — enable replayPhase
-    // suppression. CodeBuddy and other ACP providers do NOT replay history, so
-    // replayOnResume must be false for them (otherwise all text gets silently suppressed).
-    replayOnResume: /trae-cli/i.test(acpConfig.command ?? ''),
   });
 }
