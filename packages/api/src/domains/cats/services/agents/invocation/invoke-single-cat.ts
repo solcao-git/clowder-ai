@@ -1045,6 +1045,13 @@ export async function* invokeSingleCat(deps: InvocationDeps, params: InvocationP
     // so a freshly-bound session would be missed if we gate on sessionId being truthy.
     const sessionChainActive = isSessionChainEnabled(catId);
     let activeSessionRecordForResume: SessionRecord | null = null;
+    // When sessionChain is disabled for this cat, discard any cached sessionId
+    // from sessionManager — without this, AcpAgentService would still try
+    // loadSession() with the old sessionId, causing trae-cli to replay
+    // historical turns and produce duplicated text in the response.
+    if (!sessionChainActive) {
+      sessionId = undefined;
+    }
     if (isBgCarrier && bgChainKey && deps.sessionChainStore && sessionChainActive) {
       // F198 Bug #3: bg resolves its resume target via the chainKey record's
       // latestResumeSessionId (the daemon's previous fork UUID). bg reuses one
