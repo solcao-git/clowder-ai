@@ -1379,6 +1379,19 @@ export class QueueProcessor {
               outboundTurns.push({ catId: msg.catId, textParts: [] });
               currentTurnCatId = msg.catId;
             }
+            // textMode=replace means this text replaces ALL previously accumulated
+            // text for this cat in the current invocation (e.g. trae-cli agent loop
+            // where each response phase replaces the previous one). Without clearing
+            // previous turns' textParts, flattenTurnTextParts concatenates stale
+            // turns with the new one, producing duplicated text in persistence.
+            if (textMode === 'replace') {
+              const currentTurnIdx = outboundTurns.length - 1;
+              for (let i = 0; i < currentTurnIdx; i++) {
+                if (outboundTurns[i].catId === msg.catId) {
+                  outboundTurns[i].textParts = [];
+                }
+              }
+            }
             const turn = outboundTurns[outboundTurns.length - 1];
             accumulateTextParts(turn.textParts, textContent, textMode);
           }

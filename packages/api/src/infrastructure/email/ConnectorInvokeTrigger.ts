@@ -24,6 +24,7 @@ import { mergeTokenUsage, type TokenUsage } from '../../domains/cats/services/ty
 import type { SocketManager } from '../../infrastructure/websocket/index.js';
 import { emitQueueUpdated, enrichQueueEntries } from '../../utils/queue-enrichment.js';
 
+import { accumulateTextParts, flattenTextParts, flattenTurnTextParts } from '../../domains/cats/services/agents/text-aggregation.js';
 import type { OutboundDeliveryHook, ThreadMeta } from '../connectors/OutboundDeliveryHook.js';
 import type { StreamingOutboundHook } from '../connectors/StreamingOutboundHook.js';
 
@@ -457,18 +458,31 @@ export class ConnectorInvokeTrigger {
         }
         // Collect text content for outbound delivery (final-only)
         if (msg.type === 'text' && typeof msg.content === 'string') {
-          collectedTextParts.push(msg.content);
+          const textMode = (msg as { textMode?: 'append' | 'replace' }).textMode;
+          accumulateTextParts(collectedTextParts, msg.content, textMode);
           // ISSUE-9: per-turn text collection (new turn on catId change or after done)
           if (msg.catId) {
             if (msg.catId !== currentTurnCatId) {
               outboundTurns.push({ catId: msg.catId, textParts: [] });
               currentTurnCatId = msg.catId;
             }
-            outboundTurns[outboundTurns.length - 1].textParts.push(msg.content);
+            // textMode=replace: clear previous turns for same cat to prevent
+            // flattenTurnTextParts from concatenating stale text with new text
+            if (textMode === 'replace') {
+              const currentTurnIdx = outboundTurns.length - 1;
+              for (let i = 0; i < currentTurnIdx; i++) {
+                if (outboundTurns[i].catId === msg.catId) {
+                  outboundTurns[i].textParts = [];
+                }
+              }
+            }
+            const turn = outboundTurns[outboundTurns.length - 1];
+            accumulateTextParts(turn.textParts, msg.content, textMode);
           }
           // Phase 4: Stream accumulated text to external platforms
           if (this.opts.streamingHook) {
-            const accumulated = collectedTextParts.join('');
+            const accumulated =
+              outboundTurns.length > 0 ? flattenTurnTextParts(outboundTurns) : flattenTextParts(collectedTextParts);
             this.opts.streamingHook.onStreamChunk(threadId, accumulated, createResult.invocationId).catch((err) => {
               log.warn({ err, threadId }, '[ConnectorInvokeTrigger] StreamingHook.onStreamChunk failed');
             });
@@ -510,7 +524,8 @@ export class ConnectorInvokeTrigger {
         finalStatus = 'succeeded';
 
         // ⑥ Outbound delivery: send final text + rich blocks to bound external chats
-        const finalContent = collectedTextParts.join('');
+        const finalContent =
+          outboundTurns.length > 0 ? flattenTurnTextParts(outboundTurns) : flattenTextParts(collectedTextParts);
 
         // Phase 4: Finalize streaming — ensure start completed before ending
         if (this.opts.streamingHook) {
@@ -535,7 +550,7 @@ export class ConnectorInvokeTrigger {
             hasContent,
             textPartsCount: collectedTextParts.length,
             outboundTurnsCount: outboundTurns.length,
-            finalContentLen: collectedTextParts.join('').length,
+            finalContentLen: finalContent.length,
           },
           '[ConnectorInvokeTrigger] Outbound delivery check',
         );
