@@ -600,6 +600,8 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
           roleDescription: cat.roleDescription,
           personality: cat.personality,
           teamStrengths: cat.teamStrengths,
+          ...(cat.family ? { family: cat.family } : {}),
+          ...(cat.familyDisplayName ? { familyDisplayName: cat.familyDisplayName } : {}),
         })),
         clientDefaults: {},
       };

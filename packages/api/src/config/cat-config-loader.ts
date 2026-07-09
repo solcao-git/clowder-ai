@@ -192,6 +192,8 @@ const catBreedSchema = z.object({
   teamStrengths: z.string().optional(), // F-Ground-3: breed-level default
   caution: z.string().nullable().optional(), // F-Ground-3: null = explicit no-caution (R1 fix)
   restrictions: z.array(z.string().min(1)).optional(), // F167 Phase E: breed-level hard task bans
+  family: z.string().min(1).optional(), // Nation/family grouping (e.g. Sumeru, Liyue)
+  familyDisplayName: z.string().min(1).optional(), // Display name for family (e.g. 须弥, 璃月)
 });
 
 // ── F032: Roster schema for collaboration rules ──────────────────────
