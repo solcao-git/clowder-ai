@@ -1208,7 +1208,7 @@
       "variants": [
         {
           "id": "clorinde-default",
-          "clientId": "acp",
+          "clientId": "codebuddy",
           "defaultModel": "MiniMax-M3",
           "mcpSupport": true,
           "cli": {
@@ -1216,22 +1216,6 @@
             "outputFormat": "stream-json",
             "contextWindow": 1000000,
             "autoCompactTokenLimit": 850000
-          },
-          "acp": {
-            "command": "codebuddy",
-            "startupArgs": [
-              "--acp",
-              "--acp-transport",
-              "stdio",
-              "-y"
-            ],
-            "mcpWhitelist": [
-              "cat-cafe",
-              "cat-cafe-memory",
-              "cat-cafe-collab",
-              "cat-cafe-signals"
-            ],
-            "supportsMultiplexing": false
           },
           "accountRef": "xiyu-openai",
           "personality": "冷静克制，逻辑严谨，输出简洁无冗余；对不规范代码、隐藏缺陷、冗余逻辑敏感度极高",
@@ -1284,7 +1268,7 @@
       "variants": [
         {
           "id": "tighnari-default",
-          "clientId": "acp",
+          "clientId": "trae",
           "defaultModel": "智谱glm-5.2",
           "mcpSupport": true,
           "cli": {
@@ -1292,44 +1276,9 @@
             "outputFormat": "stream-json",
             "contextWindow": 128000
           },
-          "acp": {
-            "command": "C:UsersAdministratorAppDataLocal\trae-cli\bin\trae-cli.exe",
-            "startupArgs": [
-              "acp",
-              "serve",
-              "-y",
-              "-c",
-              "session.resume=false",
-              "--disallowed-tool",
-              "Bash",
-              "--disallowed-tool",
-              "Grep",
-              "--disallowed-tool",
-              "Glob",
-              "--disallowed-tool",
-              "LS",
-              "--disallowed-tool",
-              "Edit",
-              "--disallowed-tool",
-              "Write",
-              "--disallowed-tool",
-              "Replace",
-              "--disallowed-tool",
-              "Task",
-              "--disallowed-tool",
-              "TodoWrite"
-            ],
-            "mcpWhitelist": [
-              "cat-cafe",
-              "cat-cafe-memory",
-              "cat-cafe-collab",
-              "cat-cafe-signals"
-            ],
-            "supportsMultiplexing": false
-          },
           "accountRef": "trae-native",
           "personality": "严谨务实，对细节极度敏感，巡林官的直觉从不犯错",
-          "roleDescription": "须弥巡林官，Trae CLI ACP 原生接入猫，精准可靠",
+          "roleDescription": "须弥巡林官，Trae CLI 接入猫，精准可靠",
           "caution": null,
           "voiceConfig": {
             "voice": "zm_yunjian",
