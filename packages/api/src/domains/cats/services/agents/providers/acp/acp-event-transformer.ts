@@ -314,10 +314,7 @@ export function transformAcpEvent(
       const isFirstInNewPhase = state?.newResponsePhase === true;
       if (isFirstInNewPhase) {
         state.newResponsePhase = false;
-        log.info({ catId, textLen: text.length, replayPhase: state?.replayPhase }, 'ACP textMode=replace: new response phase');
-      } else if (state?.replayPhase === false && text.length > 0) {
-        // Diagnostic: log non-replace text chunks for debugging repetition
-        log.debug({ catId, textLen: text.length, textHead: text.slice(0, 60) }, 'ACP text chunk (append mode)');
+        log.info({ catId, textLen: text.length }, 'ACP textMode=replace: new response phase');
       }
       return withFlush({
         type: 'text',
