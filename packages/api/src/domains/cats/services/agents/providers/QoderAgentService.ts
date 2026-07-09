@@ -189,14 +189,34 @@ export class QoderAgentService implements AgentService {
 
     const args: string[] = ['-f', 'stream-json'];
 
-    // Session resume
-    if (options?.sessionId) {
-      args.push('-r', options.sessionId);
-      metadata.sessionId = options.sessionId;
+    // Session resume: validate that the session file exists on disk before
+    // passing -r to Qoder CLI. Qoder stores sessions under
+    //   ~/.qoder/projects/<sanitized-cwd>/<sessionId>-session.json
+    // If the file doesn't exist (cleaned up / expired / from a different project),
+    // Qoder CLI errors with "session not persisted". Starting fresh is safer.
+    let validSessionId = options?.sessionId;
+    if (validSessionId) {
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+      const cwdForSession = options?.workingDirectory || process.cwd();
+      // Mirror Qoder's path sanitization: replace non-alphanumeric with -, strip drive letter
+      const sanitizedCwd = cwdForSession
+        .replace(/^[A-Za-z]:/, '')        // strip Windows drive letter
+        .replace(/[^a-zA-Z0-9]/g, '-')    // replace non-alnum with dash
+        .replace(/-+/g, '-')              // collapse consecutive dashes
+        .replace(/^-|-$/g, '');           // trim leading/trailing dashes
+      const sessionFilePath = resolve(homeDir, '.qoder', 'projects', sanitizedCwd, `${validSessionId}-session.json`);
+      if (!existsSync(sessionFilePath)) {
+        log.info({ catId: this.catId, sessionId: validSessionId, expectedPath: sessionFilePath }, 'Qoder session file not found — starting fresh instead of resume');
+        validSessionId = undefined;
+      }
+    }
+    if (validSessionId) {
+      args.push('-r', validSessionId);
+      metadata.sessionId = validSessionId;
       yield {
         type: 'session_init',
         catId: this.catId,
-        sessionId: options.sessionId,
+        sessionId: validSessionId,
         metadata,
         timestamp: Date.now(),
       };
