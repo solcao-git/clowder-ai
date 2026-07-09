@@ -102,6 +102,10 @@ export const CLIENT_OPTIONS: Array<{ value: ClientId; label: string }> = [
   { value: 'opencode', label: 'OpenCode' },
   { value: 'antigravity', label: 'Antigravity' },
   { value: 'catagent', label: 'CatAgent' },
+  { value: 'qoder', label: 'Qoder' },
+  { value: 'trae', label: 'Trae CLI' },
+  { value: 'codebuddy', label: 'CodeBuddy' },
+  { value: 'deepseek', label: 'DeepSeek' },
   { value: 'acp', label: 'ACP Client' },
 ];
 
