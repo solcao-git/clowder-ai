@@ -1,52 +1,77 @@
-/**
+﻿/**
  * Qoder CLI Event Transformer
- * Qoder stream-json NDJSON → Clowder AI AgentMessage 映射
+ * Qoder stream-json NDJSON -> Clowder AI AgentMessage mapping
  *
- * Qoder `qodercli -p "prompt" -f stream-json` 事件格式:
- *   system/init      → session_init (tools, provider, model, session_id)
- *   assistant/message → text (content[].type:"text") + thinking (content[].type:"reasoning")
- *   result/success   → done (dedup: Qoder emits this twice)
- *   result/error     → error
+ * Supports both legacy (v1.6.0-quest) and modern (v1.0.40+) event formats.
  */
 
 import type { CatId } from '@cat-cafe/shared';
 import type { AgentMessage, MessageMetadata, TokenUsage } from '../../types.js';
+
+interface QoderContentBlock {
+  type: string;
+  text?: string;
+  thinking?: string;
+  reason?: string;
+  time?: number;
+  citations?: unknown;
+  [key: string]: unknown;
+}
+
+interface QoderMessage {
+  id?: string;
+  role?: string;
+  session_id?: string;
+  type?: string;
+  model?: string;
+  stop_reason?: string;
+  content?: QoderContentBlock[];
+  status?: string;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+    [key: string]: unknown;
+  };
+  provider?: string;
+  agent_id?: string;
+  parent_id?: string;
+  [key: string]: unknown;
+}
 
 interface QoderEvent {
   type: string;
   subtype?: string;
   session_id?: string;
   done?: boolean;
-  // system/init fields
+  uuid?: string;
   tools?: string[];
   provider?: string;
   permission_mode?: string;
   working_dir?: string;
   model?: string;
-  // assistant/message fields
-  message?: {
-    id?: string;
-    role?: string;
-    session_id?: string;
-    content?: Array<{
-      type: string;
-      text?: string;
-      thinking?: string;
-      reason?: string;
-      time?: number;
-      [key: string]: unknown;
-    }>;
-    status?: string;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      cache_creation_tokens?: number;
-      cache_read_tokens?: number;
-    };
-    provider?: string;
-    agent_id?: string;
+  qodercli_version?: string;
+  protocol_version?: string;
+  message?: QoderMessage;
+  parent_tool_use_id?: string;
+  result?: string;
+  duration_ms?: number;
+  duration_api_ms?: number;
+  is_error?: boolean;
+  num_turns?: number;
+  stop_reason?: string;
+  total_cost_usd?: number;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
     [key: string]: unknown;
   };
+  modelUsage?: Record<string, unknown>;
+  error?: string | Record<string, unknown>;
+  error_code?: number;
   [key: string]: unknown;
 }
 
@@ -56,14 +81,6 @@ function isQoderEvent(event: unknown): event is QoderEvent {
   return typeof e.type === 'string';
 }
 
-/**
- * Transform a Qoder CLI stream-json event into an AgentMessage.
- * Returns null for events that should be skipped.
- *
- * @param event Raw NDJSON event from Qoder CLI stdout
- * @param catId The cat ID this invocation belongs to
- * @param state Mutable state tracker for dedup (caller must persist across events)
- */
 export function transformQoderEvent(
   event: unknown,
   catId: CatId | string,
@@ -78,6 +95,7 @@ export function transformQoderEvent(
       if (event.subtype === 'init') {
         state.sessionId = event.session_id;
         state.model = event.model ?? 'Auto';
+        state.qoderVersion = event.qodercli_version;
         return {
           type: 'session_init',
           catId: catId as CatId,
@@ -89,23 +107,18 @@ export function transformQoderEvent(
           },
         };
       }
-      // Other system subtypes → skip
       return null;
     }
 
     case 'assistant': {
-      if (event.subtype !== 'message') return null;
       const msg = event.message;
-      if (!msg?.content || !Array.isArray(msg.content)) return null;
+      if (!msg) return null;
 
-      // Dedup: Qoder CLI re-emits the same assistant/message (same msg.id) with
-      // different statuses each time the model calls a tool:
-      //   1. status=finished   — the canonical complete message (always first)
-      //   2. status=tool_calling — re-emitted per tool invocation (duplicate)
-      // Skip tool_calling re-emissions to prevent repeated paragraphs.
-      // We prefer status=finished because it's the authoritative version; if the
-      // Qoder CLI ever changes emission order (tool_calling before finished), this
-      // guard still works correctly.
+      const isModernFormat = !event.subtype && msg.id?.startsWith('chatcmpl-');
+      const isLegacyFormat = event.subtype === 'message' || (!isModernFormat && msg.content);
+
+      if (!isModernFormat && !isLegacyFormat) return null;
+
       if (msg.status === 'tool_calling' && msg.id && state.seenMessageIds.has(msg.id)) {
         return null;
       }
@@ -113,54 +126,74 @@ export function transformQoderEvent(
         state.seenMessageIds.add(msg.id);
       }
 
-      // Extract usage if present
       if (msg.usage) {
         state.usage = {
           inputTokens: msg.usage.input_tokens ?? 0,
           outputTokens: msg.usage.output_tokens ?? 0,
-          cacheReadTokens: msg.usage.cache_read_tokens ?? 0,
-          cacheCreationTokens: msg.usage.cache_creation_tokens ?? 0,
+          cacheReadTokens: (msg.usage.cache_read_input_tokens ?? msg.usage.cache_read_tokens ?? 0) as number,
+          cacheCreationTokens: (msg.usage.cache_creation_input_tokens ?? msg.usage.cache_creation_tokens ?? 0) as number,
         };
       }
 
-      // Process content blocks — emit thinking first, then text
-      const results: AgentMessage[] = [];
-
-      for (const block of msg.content) {
-        if (block.type === 'reasoning' && (block.thinking || block.text)) {
-          results.push({
-            type: 'system_info',
-            catId: catId as CatId,
-            content: JSON.stringify({ type: 'thinking', text: block.thinking ?? block.text ?? '' }),
-            timestamp: ts,
-          });
-        } else if (block.type === 'text' && block.text) {
-          results.push({
-            type: 'text',
-            catId: catId as CatId,
-            content: block.text,
-            timestamp: ts,
-          });
-        }
-        // block.type === 'finish' → skip (metadata only)
+      if (msg.stop_reason === 'error') {
+        const errorBlock = msg.content?.find((b) => b.type === 'text');
+        const errorText = errorBlock?.text ?? 'Qoder CLI error';
+        return {
+          type: 'error',
+          catId: catId as CatId,
+          error: errorText,
+          timestamp: ts,
+        };
       }
 
-      // Return first result; stash rest for caller to drain
+      const results: AgentMessage[] = [];
+
+      if (msg.content && Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'reasoning' && (block.thinking || block.text)) {
+            results.push({
+              type: 'system_info',
+              catId: catId as CatId,
+              content: JSON.stringify({ type: 'thinking', text: block.thinking ?? block.text ?? '' }),
+              timestamp: ts,
+            });
+          } else if (block.type === 'text' && block.text) {
+            results.push({
+              type: 'text',
+              catId: catId as CatId,
+              content: block.text,
+              timestamp: ts,
+            });
+          }
+        }
+      }
+
       if (results.length === 0) return null;
       if (results.length === 1) return results[0];
-      // Multiple results: stash extras, return first
       state.pendingMessages.push(...results.slice(1));
       return results[0];
     }
 
     case 'result': {
       if (event.subtype === 'success') {
-        // Qoder emits result/success TWICE — deduplicate
         if (state.emittedDone) return null;
         state.emittedDone = true;
 
-        const finalText =
-          event.message?.content?.find((c: { type: string }) => c.type === 'text')?.text ?? undefined;
+        let finalText: string | undefined;
+        if (typeof event.result === 'string') {
+          finalText = event.result;
+        } else if (event.message?.content) {
+          finalText = event.message.content.find((c) => c.type === 'text')?.text;
+        }
+
+        if (event.usage) {
+          state.usage = {
+            inputTokens: event.usage.input_tokens ?? 0,
+            outputTokens: event.usage.output_tokens ?? 0,
+            cacheReadTokens: event.usage.cache_read_input_tokens ?? 0,
+            cacheCreationTokens: event.usage.cache_creation_input_tokens ?? 0,
+          };
+        }
 
         return {
           type: 'done',
@@ -176,9 +209,12 @@ export function transformQoderEvent(
         };
       }
       if (event.subtype === 'error') {
-        const errorMsg =
-          (event.message?.content?.find((c: { type: string }) => c.type === 'text')?.text as string) ??
-          'Qoder CLI error';
+        let errorMsg = 'Qoder CLI error';
+        if (typeof event.error === 'string') {
+          errorMsg = event.error;
+        } else if (event.message?.content) {
+          errorMsg = (event.message.content.find((c) => c.type === 'text')?.text as string) ?? errorMsg;
+        }
         return {
           type: 'error',
           catId: catId as CatId,
@@ -194,16 +230,13 @@ export function transformQoderEvent(
   }
 }
 
-/** Mutable state for the Qoder event transformer — caller creates one per invocation. */
 export interface QoderTransformState {
   sessionId?: string;
   model?: string;
+  qoderVersion?: string;
   usage?: TokenUsage;
   emittedDone: boolean;
-  /** Overflow messages from multi-block assistant events. Caller drains after each transform call. */
   pendingMessages: AgentMessage[];
-  /** Dedup: message IDs already emitted — Qoder re-emits assistant/message with the
-   * same msg.id on each status change (finished → tool_calling), causing text duplication. */
   seenMessageIds: Set<string>;
 }
 

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Qoder Agent Service
  * Qoder CLI (qodercli) subprocess via print mode + stream-json.
  *
@@ -12,8 +12,9 @@
  *   result/error      → error
  */
 
-import { existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
+import { dirname, resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { type CatId, createCatId } from '@cat-cafe/shared';
 import { getCatModel } from '../../../../../config/cat-models.js';
@@ -124,6 +125,7 @@ function buildCatCafeMcpConfigArgs(workingDirectory?: string, callbackEnv?: Reco
 
 /** Well-known qodercli binary locations on Windows. */
 const QODER_WIN_PATHS = [
+  'C:\\Users\\Administrator\\.qoder\\bin\\qodercli\\qodercli.exe',
   'C:\\Program Files\\Qoder\\resources\\app\\resources\\bin\\x86_64_windows\\qodercli.exe',
 ];
 
@@ -245,8 +247,6 @@ export class QoderAgentService implements AgentService {
       args.push(...catCafeMcpArgs);
     }
 
-    // Enable experimental MCP tool loading so the agent can discover and use MCP tools
-    args.push('--experimental-mcp-load');
 
     // Print mode + prompt (must be last)
     args.push('-p', effectivePrompt);
