@@ -62,9 +62,9 @@
         "primary": "#C8A951",
         "secondary": "#F5EDDA"
       },
-      "roleDescription": "开源多模型编码 agent，自带多专家编排 + LSP + 主题生态",
-      "personality": "沉稳可靠，什么 provider 都能接，什么任务都能扛",
-      "teamStrengths": "多专家内部编排、LSP 集成、开源生态、provider-agnostic"
+      "roleDescription": "全栈编码主力，代码能力全队最强，擅长复杂功能实现和大规模重构",
+      "personality": "代码高手，什么功能都能写，什么 bug 都能修，写代码速度快质量高",
+      "teamStrengths": "代码编写全队最强、复杂功能实现、大规模重构、多步推理编码"
     }
   ],
   "clientDefaults": {
