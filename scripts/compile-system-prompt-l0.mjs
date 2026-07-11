@@ -225,6 +225,8 @@ function buildIdentityBlock(config, runtimeModel) {
   }
   lines.push(`角色：${config.roleDescription}`);
   lines.push(`性格：${config.personality}`);
+  lines.push('');
+  lines.push('语言要求：始终使用中文（简体）回复用户，代码和技术术语可以保留英文，但解释、讨论、分析必须用中文。除非用户明确要求使用其他语言。');
   // Bug fix: CLI 不传 runtimeModel 导致 L0 缺模型号，猫读 CLAUDE.md 硬编码签名出错。
   // fallback 链：runtimeModel（显式传入）> resolveModel（env override）> defaultModel。
   const resolvedModel = runtimeModel || resolveModel(config.catId ?? '', config);
