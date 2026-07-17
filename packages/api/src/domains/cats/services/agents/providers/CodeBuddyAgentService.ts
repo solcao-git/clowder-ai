@@ -197,10 +197,12 @@ export class CodeBuddyAgentService implements AgentService {
       args.push('--model', effectiveModel);
     }
 
-    // Working directory
-    if (options?.workingDirectory) {
-      args.push('-w', options.workingDirectory);
-    }
+    // Working directory: use cwd (child process option) instead of -w flag.
+    // CodeBuddy v2.123+ creates a git worktree when -w is passed, which crashes
+    // in print mode ("✳ Creating worktree…" → exit 1). Setting cwd achieves the
+    // same effect without triggering the worktree codepath.
+    // Note: -w is still needed for interactive/session mode (CodeBuddy uses it to
+    // locate its project config), but print mode (-p) doesn't need it.
 
     // System prompt separation (CodeBuddy supports --system-prompt)
     // This reduces argv pressure by moving L0 out of the prompt arg.

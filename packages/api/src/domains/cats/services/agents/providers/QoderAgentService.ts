@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Qoder Agent Service
  * Qoder CLI (qodercli) subprocess via print mode + stream-json.
  *
@@ -12,7 +12,7 @@
  *   result/error      → error
  */
 
-import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, realpathSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -198,14 +198,17 @@ export class QoderAgentService implements AgentService {
     // Qoder CLI errors with "session not persisted". Starting fresh is safer.
     let validSessionId = options?.sessionId;
     if (validSessionId) {
-      const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+      // Normalize home dir to expand 8.3 short names (ADMINI~1 -> Administrator).
+      // Qoder CLI stores sessions under the long path (from buildChildEnv), so
+      // lookup must also use the canonical long path to match.
+      const rawHome = process.env.HOME || process.env.USERPROFILE || '';
+      let homeDir = rawHome;
+      try { homeDir = realpathSync.native(rawHome); } catch { homeDir = resolve(rawHome); }
       const cwdForSession = options?.workingDirectory || process.cwd();
-      // Mirror Qoder's path sanitization: replace non-alphanumeric with -, strip drive letter
+      // Mirror Qoder's path sanitization: keep drive letter, each non-alnum becomes dash (no collapse)
       const sanitizedCwd = cwdForSession
-        .replace(/^[A-Za-z]:/, '')        // strip Windows drive letter
-        .replace(/[^a-zA-Z0-9]/g, '-')    // replace non-alnum with dash
-        .replace(/-+/g, '-')              // collapse consecutive dashes
-        .replace(/^-|-$/g, '');           // trim leading/trailing dashes
+        .replace(/^([A-Za-z]):/, '$1-')  // C: → C- (keep drive letter, colon → dash)
+        .replace(/[^a-zA-Z0-9]/g, '-');  // every non-alnum → dash (no collapse)
       const sessionFilePath = resolve(homeDir, '.qoder', 'projects', sanitizedCwd, `${validSessionId}-session.json`);
       if (!existsSync(sessionFilePath)) {
         log.info({ catId: this.catId, sessionId: validSessionId, expectedPath: sessionFilePath }, 'Qoder session file not found — starting fresh instead of resume');
@@ -247,6 +250,9 @@ export class QoderAgentService implements AgentService {
       args.push(...catCafeMcpArgs);
     }
 
+
+    // Permission mode: bypass all checks (our route layer handles safety)
+    args.push('--dangerously-skip-permissions');
 
     // Print mode + prompt (must be last)
     args.push('-p', effectivePrompt);

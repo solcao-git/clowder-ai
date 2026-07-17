@@ -4,8 +4,8 @@
  */
 
 import { spawn as nodeSpawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, isAbsolute } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, resolve as pathResolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Span } from '@opentelemetry/api';
 import { context, SpanStatusCode, trace } from '@opentelemetry/api';
@@ -189,13 +189,28 @@ export function buildChildEnv(overrides?: Record<string, string | null>): NodeJS
     if (ENV_VARS_TO_STRIP.has(key)) continue;
     merged[key] = value;
   }
-  if (!overrides) return merged;
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value === null) {
-      delete merged[key];
-      continue;
+  if (overrides) {
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === null) {
+        delete merged[key];
+        continue;
+      }
+      merged[key] = value;
     }
-    merged[key] = value;
+  }
+  // Windows: normalize user-profile paths to prevent libuv fs-event.c assertion
+  // failures. 8.3 short names (e.g. ADMINI~1) + mixed separators cause path
+  // prefix mismatches when Node.js file watchers receive canonical long-name events.
+  // realpathSync.native() calls GetFinalPathNameByHandleW to expand short names.
+  if (IS_WINDOWS) {
+    for (const key of ['USERPROFILE', 'HOME', 'HOMEPATH'] as const) {
+      const val = merged[key];
+      if (typeof val === 'string' && val.length > 0) {
+        try { merged[key] = realpathSync.native(val); } catch {
+          try { merged[key] = pathResolve(val); } catch { /* keep original */ }
+        }
+      }
+    }
   }
   return merged;
 }
