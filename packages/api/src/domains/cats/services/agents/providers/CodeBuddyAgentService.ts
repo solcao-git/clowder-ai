@@ -22,7 +22,7 @@
  *   - Permission mode: -y / --dangerously-skip-permissions
  */
 
-import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, writeFileSync, unlinkSync, realpathSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -176,10 +176,25 @@ export class CodeBuddyAgentService implements AgentService {
     const args: string[] = ['--print', '--output-format', 'stream-json'];
 
     // Session resume: validate session file exists before passing -r.
-    // CodeBuddy stores sessions similarly to Qoder.
+    // CodeBuddy shares the same session storage format as Qoder:
+    //   ~/.qoder/projects/<sanitized-cwd>/<sessionId>-session.json
+    // If the file doesn't exist (cleaned up / expired / stale after API restart),
+    // CodeBuddy CLI crashes. Starting fresh is safer.
     let validSessionId = options?.sessionId;
-    // CodeBuddy session resume with -r is simpler than Qoder — it loads from
-    // internal storage. Skip file validation for now; let CodeBuddy handle it.
+    if (validSessionId) {
+      const rawHome = process.env.HOME || process.env.USERPROFILE || '';
+      let homeDir = rawHome;
+      try { homeDir = realpathSync.native(rawHome); } catch { homeDir = resolve(rawHome); }
+      const cwdForSession = options?.workingDirectory || process.cwd();
+      const sanitizedCwd = cwdForSession
+        .replace(/^([A-Za-z]):/, '$1-')  // C: → C- (keep drive letter, colon → dash)
+        .replace(/[^a-zA-Z0-9]/g, '-');
+      const sessionFilePath = resolve(homeDir, '.qoder', 'projects', sanitizedCwd, `${validSessionId}-session.json`);
+      if (!existsSync(sessionFilePath)) {
+        log.info({ catId: this.catId, sessionId: validSessionId, expectedPath: sessionFilePath }, 'CodeBuddy session file not found — starting fresh instead of resume');
+        validSessionId = undefined;
+      }
+    }
     if (validSessionId) {
       args.push('-r', validSessionId);
       metadata.sessionId = validSessionId;
