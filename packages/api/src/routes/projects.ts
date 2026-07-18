@@ -6,12 +6,14 @@
  */
 
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, posix, resolve, win32 } from 'node:path';
 import { promisify } from 'node:util';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { getAllowedRoots, isDenylistMode, isUnderAllowedRoot, validateProjectPath } from '../utils/project-path.js';
+import { resolvePersistentProjectPath } from '../utils/persistent-project-path.js';
+import { getAllowedRoots, isDenylistMode, isUnderAllowedRoot } from '../utils/project-path.js';
 import { resolveHeaderUserId } from '../utils/request-identity.js';
 
 const execFileAsync = promisify(execFile);
@@ -87,6 +89,37 @@ export function getProjectBrowseParent(validatedPath: string, platformName = pro
   return parent === validatedPath ? null : parent;
 }
 
+export interface DriveInfo {
+  letter: string;
+  path: string;
+  label: string;
+}
+
+/**
+ * Enumerate available Windows drive letters by probing each letter's root.
+ * Returns [] on non-Windows platforms (single root filesystem).
+ * Skips A:/B: (legacy floppy reservations) and inaccessible drives.
+ */
+export function listAvailableDrives(
+  platformName = process.platform,
+  probeRealpath: (root: string) => string = realpathSync,
+): DriveInfo[] {
+  if (platformName !== 'win32') return [];
+  const drives: DriveInfo[] = [];
+  // C-Z: skip A/B (floppy legacy), probe the rest.
+  for (let code = 'C'.charCodeAt(0); code <= 'Z'.charCodeAt(0); code++) {
+    const letter = String.fromCharCode(code);
+    const root = `${letter}:\\`;
+    try {
+      const real = probeRealpath(root);
+      drives.push({ letter, path: real, label: `本地磁盘 (${letter}:)` });
+    } catch {
+      // Drive not mounted / inaccessible - skip silently.
+    }
+  }
+  return drives;
+}
+
 /**
  * Shell out to the host OS native folder picker.
  * Returns a discriminated result: picked / cancelled / error.
@@ -156,7 +189,7 @@ export const projectsRoutes: FastifyPluginAsync = async (app) => {
       reply.status(500);
       return { error: result.message };
     }
-    const validated = await validateProjectPath(result.path);
+    const validated = await resolvePersistentProjectPath(result.path);
     if (!validated) {
       reply.status(403);
       return {
@@ -188,7 +221,7 @@ export const projectsRoutes: FastifyPluginAsync = async (app) => {
     const { parentDir, fragment } = splitProjectCompletePrefix(prefix, cwd);
 
     // Validate parent directory
-    const validatedParent = await validateProjectPath(parentDir);
+    const validatedParent = await resolvePersistentProjectPath(parentDir);
     if (!validatedParent) {
       reply.status(403);
       return {
@@ -241,7 +274,7 @@ export const projectsRoutes: FastifyPluginAsync = async (app) => {
     const targetPath = query.path || homedir();
 
     // Validate path: realpath() resolves symlinks, then boundary check
-    const validatedPath = await validateProjectPath(targetPath);
+    const validatedPath = await resolvePersistentProjectPath(targetPath);
     if (!validatedPath) {
       reply.status(403);
       return {
@@ -284,6 +317,7 @@ export const projectsRoutes: FastifyPluginAsync = async (app) => {
         parent: canGoUp ? parentDir : null,
         homePath: homedir(),
         entries: dirs,
+        isWindows: process.platform === 'win32',
       };
     } catch (err) {
       reply.status(400);
@@ -291,5 +325,19 @@ export const projectsRoutes: FastifyPluginAsync = async (app) => {
         error: `Cannot read directory: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+  });
+
+  // GET /api/projects/drives - list available Windows drive letters
+  // Returns [] on non-Windows. Frontend uses this to render a "此电脑" drive-picker
+  // entry so users can navigate across drive letters (C: → D:) which win32.dirname
+  // cannot traverse (drive root's dirname is itself).
+  app.get('/api/projects/drives', async (request, reply) => {
+    if (!requireTrustedProjectIdentity(request, reply)) {
+      return { error: 'Identity required (X-Cat-Cafe-User header)' };
+    }
+    const allDrives = listAvailableDrives();
+    // Filter to drives whose root is under an allowed root (project-path policy).
+    const accessibleDrives = allDrives.filter((d) => isUnderAllowedRoot(d.path));
+    return { drives: accessibleDrives, isWindows: process.platform === 'win32' };
   });
 };

@@ -2,7 +2,7 @@
  * Rules & Prompts Route
  * GET /api/rules — shared rules + provider guides for console transparency
  * GET /api/rules/skill/:name — SKILL.md content preview (allowlisted paths only)
- * GET /api/prompt-injection/manifest — F237 injection manifest for console visibility
+ * GET /api/prompt-injection/manifest — moved to prompt-injection-manifest.ts (F237 Phase 2)
  */
 
 import { existsSync } from 'node:fs';
@@ -12,10 +12,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CatCafeConfig } from '@cat-cafe/shared';
 import type { FastifyPluginAsync } from 'fastify';
-import YAML from 'yaml';
 import { readCapabilitiesConfig } from '../config/capabilities/capability-orchestrator.js';
 import { getRoster, loadCatConfig, toAllCatConfigs } from '../config/cat-config-loader.js';
-import { getDefaultRootsForPlatform, isPathUnderRoots, validateProjectPath } from '../utils/project-path.js';
+import { resolvePersistentProjectPath } from '../utils/persistent-project-path.js';
+import { getDefaultRootsForPlatform, isPathUnderRoots } from '../utils/project-path.js';
 import { resolveUserId } from '../utils/request-identity.js';
 
 function findProjectRoot(): string {
@@ -252,7 +252,7 @@ export function isLegacySkillProjectPath(absPath: string, roots: string[] = getD
 
 async function findSkillPath(root: string, name: string, projectPath?: string): Promise<string | null> {
   const home = homedir();
-  const validatedProject = projectPath ? await validateProjectPath(projectPath) : null;
+  const validatedProject = projectPath ? await resolvePersistentProjectPath(projectPath) : null;
   const projectRoot = validatedProject && isLegacySkillProjectPath(validatedProject) ? validatedProject : root;
   const candidateDirs = [
     join(root, 'cat-cafe-skills'),
@@ -336,42 +336,4 @@ export const rulesRoutes: FastifyPluginAsync = async (app) => {
       }
     },
   );
-
-  // F237: Prompt Injection Manifest — full segment registry for Console visibility
-  app.get('/api/prompt-injection/manifest', async (request, reply) => {
-    if (!resolveUserId(request)) {
-      reply.status(401);
-      return { error: 'Authentication required' };
-    }
-    const root = findProjectRoot();
-    const manifestPath = join(root, 'assets', 'prompt-injection-manifest.yaml');
-    if (!existsSync(manifestPath)) {
-      reply.status(404);
-      return { error: 'Manifest file not found' };
-    }
-    try {
-      const raw = await readFile(manifestPath, 'utf-8');
-      interface ManifestSegment {
-        id: string;
-        [key: string]: unknown;
-      }
-      const parsed = YAML.parse(raw) as { schemaVersion: string; segments: ManifestSegment[] };
-      const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
-      return {
-        schemaVersion: parsed.schemaVersion,
-        segments,
-        totalActive: segments.filter((s) => {
-          const status = (s._status as string) ?? '';
-          return !status.startsWith('legacy') && status !== 'removed';
-        }).length,
-        totalLegacy: segments.filter((s) => {
-          const status = (s._status as string) ?? '';
-          return status.startsWith('legacy') || status === 'removed';
-        }).length,
-      };
-    } catch (e) {
-      reply.status(500);
-      return { error: `Failed to parse manifest: ${e instanceof Error ? e.message : String(e)}` };
-    }
-  });
 };

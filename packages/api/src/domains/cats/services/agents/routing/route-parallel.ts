@@ -29,6 +29,7 @@ import {
   prepareGuideContext,
 } from '../../../../guides/GuideRoutingInterceptor.js';
 import { triggerRecallCorrelation } from '../../../../memory/recall-correlation-hook.js';
+import { drainCapturedTraces } from '../../../../prompt-hooks/PipelinePromptBuilder.js';
 import { getTraceStore } from '../../../../prompt-hooks/trace-bootstrap.js';
 // F237: Injection trace (v0 — fire-and-forget observability)
 import { buildTraceDetail, buildTraceSummary, collectTrace } from '../../../../prompt-hooks/trace-collector.js';
@@ -244,6 +245,9 @@ export async function* routeParallel(
       const staticIdentity = hasNativeL0
         ? buildStaticIdentityPackOnly(catId, { packBlocks })
         : buildStaticIdentity(catId, { mcpAvailable, packBlocks });
+      // F237: drain session trace IMMEDIATELY — before any await that could let
+      // another parallel cat overwrite the module-global capture buffer.
+      drainCapturedTraces();
       // F041: inject HTTP callback only when MCP is NOT actually available (fallback)
       const mcpInstructions = needsMcpInjection(mcpAvailable, catConfig?.clientId)
         ? buildMcpCallbackInstructions({
@@ -314,6 +318,13 @@ export async function* routeParallel(
         ...guideContextForCat(guideCtx, catId, targetCatIds, threadId),
         ...conciergeContextForCat(conciergeCtx, catId as string),
       });
+      // F237: drain turn trace IMMEDIATELY — same race-safety as session drain above.
+      drainCapturedTraces();
+
+      // F237 Phase 2: Pipeline trace capture drained above (lines 250, 322) to prevent
+      // stale module-global buffer in concurrent Promise.all execution. Persistence is
+      // handled by the v0 trace path below (after all route-level content is assembled).
+
       const continuityCapsule = buildCapsuleFromRouteState({
         threadId,
         catId: catId as string,
@@ -393,6 +404,10 @@ export async function* routeParallel(
             log.warn({ err, threadId, catId }, '[F237] injection trace persist failed (fire-and-forget)');
           });
         }
+        // v0 collectTrace → buildStaticIdentity(annotateSegments: true) re-populates
+        // the module-global capturedSessionTrace without draining. Clear it so the next
+        // invocation (especially native-L0 pack-only) doesn't persist stale session traces.
+        if (deps.injectionTraceStore) drainCapturedTraces();
       } catch {
         /* F237: trace collection must never break invocation */
       }

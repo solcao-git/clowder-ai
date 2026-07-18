@@ -48,7 +48,7 @@ const cliConfigSchema = z.object({
   command: z.string().min(1),
   outputFormat: z.string().min(1),
   defaultArgs: z.array(z.string()).optional(),
-  effort: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
+  effort: z.string().trim().min(1).optional(),
   contextWindow: z.number().positive().int().optional(),
   autoCompactTokenLimit: z.number().positive().int().optional(),
 });
@@ -85,7 +85,9 @@ const timeZoneSchema = z
 const catVariantSchema = z.object({
   id: z.string().min(1),
   catId: z.string().min(1).optional(), // F32-b: variant-level catId
+  name: z.string().min(1).optional(), // clowder-ai#1090: variant-level editable member name
   displayName: z.string().min(1).optional(), // F32-b: variant-level displayName
+  nickname: z.string().nullable().optional(), // clowder-ai#1090: null = explicit no nickname
   variantLabel: z.string().min(1).optional(), // F32-b P4: disambiguation label
   mentionPatterns: z.array(mentionPatternSchema).optional(), // F32-b: variant-level mentions
   source: z.string().optional(), // #441: legacy field, ignored — kept in schema for old catalog read compat
@@ -589,6 +591,7 @@ export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig
       // R1 fix: null = "explicitly no caution" (don't inherit breed).
       // undefined (omitted) = inherit from breed. ?? treats null as nullish, so use !== undefined.
       const caution = variant.caution !== undefined ? variant.caution : breed.caution;
+      const nickname = variant.nickname !== undefined ? variant.nickname : breed.nickname;
       // F167 Phase E (KD-20): variant restrictions override breed (no merge);
       // undefined (omitted) inherits breed-level restrictions.
       const restrictions = variant.restrictions ?? breed.restrictions;
@@ -600,9 +603,19 @@ export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig
 
       result[catId] = {
         id: createCatId(catId),
-        name: variant.displayName ?? breed.name,
+        // Identity fields normally follow a clean `variant.<field> ?? breed.<field>` chain.
+        // The `variant.displayName` middle step in `name` is a LEGACY-COMPAT exception:
+        // pre-clowder-ai#1090 catalogs shipped variants with `displayName` overrides but
+        // no `name` field (that field was introduced by this PR), so their resolved name
+        // came from `variant.displayName`. Keep this legacy branch here for read-time
+        // continuity ONLY — write-time coupling is broken in `updateRuntimeCat` (which
+        // snapshots the resolved name into `variant.name` before overwriting
+        // `variant.displayName`). Do NOT extend this cross-field fallback to other
+        // identity fields (nickname / avatar / color / role): they must stay
+        // variant→breed same-field chains to prevent similar leaks.
+        name: variant.name ?? variant.displayName ?? breed.name,
         displayName: variant.displayName ?? breed.displayName,
-        ...(breed.nickname != null ? { nickname: breed.nickname } : {}),
+        ...(nickname != null ? { nickname } : {}),
         avatar: variant.avatar ?? breed.avatar, // F32-b P4c: variant can override
         color: variant.color ?? breed.color, // F32-b P4c: variant can override
         mentionPatterns,
@@ -914,8 +927,8 @@ function buildCatIdToVariantIndex(config: CatCafeConfig): Map<string, CatVariant
   return index;
 }
 
-/** Effort level union across all CLI providers */
-export type CliEffortLevel = 'low' | 'medium' | 'high' | 'max' | 'xhigh';
+/** Canonical effort string resolved from the catalog or a client default. */
+export type CliEffortLevel = string;
 
 /**
  * Get CLI effort level for a cat from the resolved cat config.
@@ -938,17 +951,11 @@ export function getCatEffort(catId: string, config?: CatCafeConfig, fallbackProv
 
   const variant = _catIdToVariant.get(catId);
   if (variant?.cli?.effort) {
-    // Defense-in-depth: validate persisted effort against current provider.
-    // Stale cross-provider values (e.g. 'max' on openai) are cleaned at write
-    // time, but historical data may still contain them.
-    const provider = variant.clientId ?? fallbackProvider;
-    if (provider) {
-      const validated = normalizeCliEffortForProvider(provider, variant.cli.effort);
-      if (validated) return validated;
-      // Invalid for this provider — fall through to provider default below
-    } else {
-      return variant.cli.effort;
-    }
+    // Provider CLIs can introduce native effort values faster than our preset
+    // vocabulary evolves. Preserve a saved non-empty value exactly; the
+    // selected provider adapter owns native validation at invocation time.
+    const nativeValue = variant.cli.effort.trim();
+    if (nativeValue) return nativeValue;
   }
 
   // Client-aware defaults: use variant's clientId if found, otherwise fallbackProvider

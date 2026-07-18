@@ -18,6 +18,7 @@ const hasSourceStagingContent = existsSync(
 
 import { afterEach, before, beforeEach, describe, it, mock } from 'node:test';
 import { catRegistry } from '@cat-cafe/shared';
+import { GovernanceBootstrapService } from '../dist/config/governance/governance-bootstrap.js';
 
 function assertStagingPromptContract(prompt, mode) {
   if (hasSourceStagingContent) {
@@ -2578,7 +2579,19 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       'missing_session',
     );
     assert.equal(classifyResumeFailure('ACP error -32603: os.getcwd() failed'), 'missing_session');
+    // Session interrupt: our stall auto-kill (SIGTERM) causes the daemon to mark the session
+    // as "interrupted". Without this classifier, resume fails cascade (no self-heal, no retry).
+    assert.equal(classifyResumeFailure('session was interrupted'), 'missing_session');
+    assert.equal(classifyResumeFailure('already interrupted'), 'missing_session');
+    assert.equal(classifyResumeFailure('session interrupted'), 'missing_session');
+    assert.equal(classifyResumeFailure('session-interrupted'), 'missing_session');
+    assert.equal(classifyResumeFailure('session terminated'), 'missing_session');
+    // Must NOT match generic messages that happen to contain "interrupt" as a substring
+    // in non-session context (e.g. developer instructions mentioning keyboard interrupts)
     assert.equal(classifyResumeFailure('upstream timeout'), null);
+    assert.equal(classifyResumeFailure('keyboard interrupt'), null);
+    assert.equal(classifyResumeFailure('process was interrupted by user'), null);
+    assert.equal(classifyResumeFailure('interrupted system call'), null);
   });
 
   it('isTransientCliExitCode1: context-overflow messages must NOT be treated as transient (bug: Codex duplicate user turn in rollout)', async () => {
@@ -5527,6 +5540,92 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
   });
 
+  for (const { label, baseUrl } of [
+    { label: 'GLM v4', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+    { label: 'GLM Coding Plan v4', baseUrl: 'https://api.z.ai/api/coding/paas/v4' },
+  ]) {
+    it(`clowder-ai#1113: ${label} OpenCode binding preserves versioned baseUrl`, async () => {
+      const { createProviderProfile } = await import('./helpers/create-test-account.js');
+      const root = await mkdtemp(join(tmpdir(), 'clowder1113-opencode-glm-v4-'));
+      process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = root;
+      const apiDir = join(root, 'packages', 'api');
+      await mkdir(apiDir, { recursive: true });
+      await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+      const customProfile = await createProviderProfile(root, {
+        provider: 'openai',
+        name: 'zhipu-api',
+        mode: 'api_key',
+        authType: 'api_key',
+        protocol: 'openai',
+        baseUrl,
+        apiKey: 'sk-zhipu-key',
+        models: ['zhipu/glm-4.6v'],
+        setActive: false,
+      });
+
+      const registrySnapshot = catRegistry.getAllConfigs();
+      const originalConfig = catRegistry.tryGet('opencode')?.config;
+      assert.ok(originalConfig, 'opencode config should exist in registry');
+      const boundCatId = `opencode-zhipu-${label.toLowerCase().replace(/\W+/g, '-')}`;
+      catRegistry.register(boundCatId, {
+        ...originalConfig,
+        id: boundCatId,
+        mentionPatterns: [`@${boundCatId}`],
+        clientId: 'opencode',
+        accountRef: customProfile.id,
+        defaultModel: 'zhipu/glm-4.6v',
+        provider: 'zhipu',
+      });
+
+      const optionsSeen = [];
+      let seenConfigPath;
+      let seenRuntimeConfig;
+      const service = {
+        l0CompilerFn: dummyL0CompilerFn,
+        async *invoke(_prompt, options) {
+          optionsSeen.push(options ?? {});
+          seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
+          assert.ok(seenConfigPath, 'GLM OpenCode binding should receive OPENCODE_CONFIG');
+          seenRuntimeConfig = JSON.parse(await readFile(seenConfigPath, 'utf-8'));
+          yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+        },
+      };
+
+      const deps = makeDeps();
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(apiDir);
+        const messages = await collect(
+          invokeSingleCat(deps, {
+            catId: boundCatId,
+            service,
+            prompt: 'test GLM v4 routing',
+            userId: 'user-clowder1113-opencode-glm-v4',
+            threadId: 'thread-clowder1113-opencode-glm-v4',
+            isLastCat: true,
+          }),
+        );
+        assert.ok(messages.some((m) => m.type === 'done'));
+      } finally {
+        process.chdir(previousCwd);
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(registrySnapshot)) {
+          catRegistry.register(id, config);
+        }
+        await rmWithRetry(root);
+      }
+
+      const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
+      assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-zhipu-key');
+      assert.equal(callbackEnv.CAT_CAFE_OC_BASE_URL, baseUrl);
+      assert.equal(seenRuntimeConfig?.model, 'zhipu/glm-4.6v');
+      assert.equal(seenRuntimeConfig?.provider?.zhipu?.npm, '@ai-sdk/openai-compatible');
+      assert.deepStrictEqual(seenRuntimeConfig?.provider?.zhipu?.models, { 'glm-4.6v': { name: 'glm-4.6v' } });
+      await assert.rejects(readFile(seenConfigPath, 'utf-8'));
+    });
+  }
+
   it('clowder-ai#223: bare model + provider assembles composite model for custom provider routing', async () => {
     const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f189-oc-bare-model-'));
@@ -6838,12 +6937,38 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       msgs.some((m) => m.type === 'done'),
       'service should be invoked',
     );
-    assert.equal(optionsSeen[0]?.livenessProbe?.stallAutoKill, true, 'cat invocations still opt into stall cleanup');
+    assert.equal(
+      optionsSeen[0]?.livenessProbe?.stallAutoKill,
+      true,
+      'cat invocations still opt into stall cleanup (default CLI_TIMEOUT_MS)',
+    );
+    // #1145: stallWarningMs tracks resolved CLI_TIMEOUT_MS (default 30 min).
+    // buildStallAutoKillConfig(cliTimeoutMs) uses resolved value, not a hardcoded constant.
     assert.equal(
       optionsSeen[0]?.livenessProbe?.stallWarningMs,
-      7 * 60_000,
-      'stall auto-kill must leave async sampling and deferred-kill margin before the 10m stale-processing window',
+      30 * 60_000,
+      'default: stall threshold must equal DEFAULT_CLI_TIMEOUT_MS (30 min)',
     );
+  });
+
+  it('#1145: buildStallAutoKillConfig tracks custom CLI_TIMEOUT_MS and disables on 0', async () => {
+    const { buildStallAutoKillConfig } = await import(
+      '../dist/domains/cats/services/agents/invocation/invoke-single-cat.js'
+    );
+    // Custom CLI_TIMEOUT_MS (e.g. 60 min)
+    const custom = buildStallAutoKillConfig(60 * 60_000);
+    assert.equal(custom.stallAutoKill, true, 'custom: stallAutoKill enabled');
+    assert.equal(custom.stallWarningMs, 60 * 60_000, 'custom: threshold tracks custom value');
+
+    // CLI_TIMEOUT_MS=0 (disabled) → stallAutoKill off
+    const disabled = buildStallAutoKillConfig(0);
+    assert.equal(disabled.stallAutoKill, false, 'disabled: stallAutoKill off when CLI_TIMEOUT_MS=0');
+    assert.equal(disabled.stallWarningMs, undefined, 'disabled: no stallWarningMs when off');
+
+    // Default fallback (negative → uses DEFAULT_CLI_TIMEOUT_MS internally)
+    const fallback = buildStallAutoKillConfig(-1);
+    assert.equal(fallback.stallAutoKill, true, 'fallback: stallAutoKill enabled');
+    assert.equal(fallback.stallWarningMs, 30 * 60_000, 'fallback: uses DEFAULT_CLI_TIMEOUT_MS');
   });
 
   it('F101: game thread projectPath (games/*) does not trigger governance gate', async () => {
@@ -6959,6 +7084,119 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     );
     assert.equal(optionsSeen.length, 1, `service should be invoked once, got messages: ${JSON.stringify(msgs)}`);
     assert.equal(optionsSeen[0]?.workingDirectory, projectRoot);
+  });
+
+  it('reads external-project governance from the persistent workspace when invoked from a runtime checkout', async () => {
+    const previousCwd = process.cwd();
+    const previousRuntimeRoot = process.env.CAT_CAFE_RUNTIME_ROOT;
+    const previousWorkspaceRoot = process.env.CAT_CAFE_WORKSPACE_ROOT;
+    const runtimeRoot = await realpath(await mkdtemp(join(tmpdir(), 'governance-runtime-root-')));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), 'governance-workspace-root-')));
+    const externalProject = await realpath(await mkdtemp(join(tmpdir(), 'governance-external-project-')));
+    await Promise.all([
+      writeFile(join(runtimeRoot, 'pnpm-workspace.yaml'), 'packages: []\n'),
+      writeFile(join(workspaceRoot, 'pnpm-workspace.yaml'), 'packages: []\n'),
+    ]);
+    process.env.CAT_CAFE_RUNTIME_ROOT = runtimeRoot;
+    process.env.CAT_CAFE_WORKSPACE_ROOT = workspaceRoot;
+    process.chdir(runtimeRoot);
+
+    const bootstrap = new GovernanceBootstrapService(workspaceRoot);
+    await bootstrap.bootstrap(externalProject, { dryRun: false });
+
+    let invokedService = false;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        invokedService = true;
+        yield { type: 'done', catId: 'codex', timestamp: Date.now() };
+      },
+    };
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: externalProject, createdBy: 'user1' }),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    try {
+      const msgs = await collect(
+        invokeSingleCat(deps, {
+          catId: 'codex',
+          service,
+          prompt: 'invoke initialized external project',
+          userId: 'user1',
+          threadId: 'thread-persistent-governance-root',
+          isLastCat: true,
+        }),
+      );
+
+      assert.equal(invokedService, true, 'the initialized external project should reach the agent service');
+      assert.equal(
+        msgs.some((m) => m.type === 'system_info' && m.content?.includes('governance_blocked')),
+        false,
+        'dispatch must read the registry written under the persistent workspace',
+      );
+    } finally {
+      process.chdir(previousCwd);
+      if (previousRuntimeRoot === undefined) delete process.env.CAT_CAFE_RUNTIME_ROOT;
+      else process.env.CAT_CAFE_RUNTIME_ROOT = previousRuntimeRoot;
+      if (previousWorkspaceRoot === undefined) delete process.env.CAT_CAFE_WORKSPACE_ROOT;
+      else process.env.CAT_CAFE_WORKSPACE_ROOT = previousWorkspaceRoot;
+      await Promise.all([rmWithRetry(runtimeRoot), rmWithRetry(workspaceRoot), rmWithRetry(externalProject)]);
+    }
+  });
+
+  it('migrates a legacy runtime-root thread before invoking the agent', async () => {
+    const workspaceRoot = await realpath(join(__dirname, '..', '..', '..'));
+    const runtimeRoot = await realpath(await mkdtemp(join(tmpdir(), 'legacy-thread-runtime-root-')));
+    const previousRuntimeRoot = process.env.CAT_CAFE_RUNTIME_ROOT;
+    const previousWorkspaceRoot = process.env.CAT_CAFE_WORKSPACE_ROOT;
+    process.env.CAT_CAFE_RUNTIME_ROOT = runtimeRoot;
+    process.env.CAT_CAFE_WORKSPACE_ROOT = workspaceRoot;
+
+    const optionsSeen = [];
+    const migrations = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+    const threadId = 'thread-legacy-runtime-root';
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: runtimeRoot, createdBy: 'user1' }),
+        updateProjectPath: async (...args) => migrations.push(args),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    try {
+      const msgs = await collect(
+        invokeSingleCat(deps, {
+          catId: 'opencode',
+          service,
+          prompt: 'test legacy runtime cwd migration',
+          userId: 'user1',
+          threadId,
+          isLastCat: true,
+        }),
+      );
+
+      assert.ok(msgs.some((m) => m.type === 'done'));
+      assert.equal(optionsSeen[0]?.workingDirectory, workspaceRoot);
+      assert.deepEqual(migrations, [[threadId, workspaceRoot]]);
+    } finally {
+      if (previousRuntimeRoot === undefined) delete process.env.CAT_CAFE_RUNTIME_ROOT;
+      else process.env.CAT_CAFE_RUNTIME_ROOT = previousRuntimeRoot;
+      if (previousWorkspaceRoot === undefined) delete process.env.CAT_CAFE_WORKSPACE_ROOT;
+      else process.env.CAT_CAFE_WORKSPACE_ROOT = previousWorkspaceRoot;
+      await rmWithRetry(runtimeRoot);
+    }
   });
 
   it('drops OpenCode resume when the stored session workspace differs from the current thread workspace', async () => {

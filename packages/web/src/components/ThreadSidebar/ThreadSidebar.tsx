@@ -15,14 +15,17 @@ import { readProjectNames, writeProjectNames } from './active-workspace';
 import { DirectoryPickerModal, type NewThreadOptions } from './DirectoryPickerModal';
 import { LabelFilterBar } from './LabelFilterBar';
 import { SectionGroup } from './SectionGroup';
+import { SidebarTabIcon } from './SidebarTabIcon';
 import { ThreadItem } from './ThreadItem';
 import { ThreadOrganizerModal } from './ThreadOrganizerModal';
 import { pushThreadRouteWithHistory } from './thread-navigation';
 import {
+  buildSidebarTabContent,
+  buildSidebarTabs,
   getProjectPaths,
   mergeLiveActivityIntoThreads,
   projectDisplayName,
-  sortAndGroupThreadsWithWorkspace,
+  type SidebarTabId,
 } from './thread-utils';
 import { createToggleWithReconcile } from './toggle-with-reconcile';
 import { useCollapseState } from './use-collapse-state';
@@ -71,9 +74,20 @@ export function ThreadSidebar({ onClose, className }: ThreadSidebarProps) {
   const [govHealth, setGovHealth] = useState<Record<string, string>>({});
   // F252 Phase E: Meow Theater replay state
   const [replayThreadId, setReplayThreadId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<SidebarTabId>('recent');
 
   // F095 Phase E: scroll anchor for reorder stability
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const tabRefs = useRef<Record<SidebarTabId, HTMLButtonElement | null>>({
+    pinned: null,
+    recent: null,
+    project: null,
+    system: null,
+    favorites: null,
+  });
+  const tabScrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
   // F095 Phase F: custom project display names
   const [projectNames, setProjectNames] = useState(() =>
     readProjectNames(typeof localStorage !== 'undefined' ? localStorage : { getItem: () => null, setItem: () => {} }),
@@ -156,6 +170,12 @@ export function ThreadSidebar({ onClose, className }: ThreadSidebarProps) {
     window.addEventListener('online', handleOnline);
     return () => window.removeEventListener('online', handleOnline);
   }, [loadThreads]);
+
+  useEffect(() => {
+    const activeButton = tabRefs.current[activeTab];
+    if (!activeButton || typeof activeButton.scrollIntoView !== 'function') return;
+    activeButton.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [activeTab]);
 
   // F070: Fetch governance health for all registered external projects
   useEffect(() => {
@@ -446,9 +466,11 @@ export function ThreadSidebar({ onClose, className }: ThreadSidebarProps) {
     return filteredThreads.filter((t) => t.labels?.includes(labelFilter));
   }, [filteredThreads, labelFilter]);
 
+  const labelAssignableThreads = useMemo(() => liveThreads.filter((t) => t.id !== 'default'), [liveThreads]);
+
   const uncategorizedCount = useMemo(
-    () => liveThreads.filter((t) => !t.labels || t.labels.length === 0).length,
-    [liveThreads],
+    () => labelAssignableThreads.filter((t) => !t.labels || t.labels.length === 0).length,
+    [labelAssignableThreads],
   );
 
   const [showOrganizer, setShowOrganizer] = useState(false);
@@ -458,8 +480,8 @@ export function ThreadSidebar({ onClose, className }: ThreadSidebarProps) {
   const pendingNameAssignmentsRef = useRef<Map<string, string[]>>(new Map());
 
   const uncategorizedThreads = useMemo(
-    () => liveThreads.filter((t) => !t.labels || t.labels.length === 0),
-    [liveThreads],
+    () => labelAssignableThreads.filter((t) => !t.labels || t.labels.length === 0),
+    [labelAssignableThreads],
   );
 
   const ORGANIZER_TITLE = 'Thread 整理助手';
@@ -707,25 +729,181 @@ export function ThreadSidebar({ onClose, className }: ThreadSidebarProps) {
     }
   }, []);
 
-  // F095 Phase B: Active workspace grouping
+  // V9 sidebar tabs: keep grouping derived from filtered thread data.
   const { pinnedProjects, toggleProjectPin } = useProjectPins();
-  const threadGroups = useMemo(
-    () => sortAndGroupThreadsWithWorkspace(labelFilteredThreads, unreadIds, pinnedProjects),
-    [labelFilteredThreads, unreadIds, pinnedProjects],
+  const tabs = useMemo(
+    () => buildSidebarTabs(labelFilteredThreads, pinnedProjects, unreadIds),
+    [labelFilteredThreads, pinnedProjects, unreadIds],
   );
+  const activeTabContent = useMemo(
+    () => buildSidebarTabContent(activeTab, labelFilteredThreads, pinnedProjects, unreadIds),
+    [activeTab, labelFilteredThreads, pinnedProjects, unreadIds],
+  );
+  const projectThreadGroups = useMemo(
+    () => buildSidebarTabContent('project', labelFilteredThreads, pinnedProjects, unreadIds).projectGroups ?? [],
+    [labelFilteredThreads, pinnedProjects, unreadIds],
+  );
+  const threadGroups = activeTab === 'project' ? projectThreadGroups : [];
+
+  // Tab overflow scroll: show arrow buttons when tabs overflow the row
+  const updateTabScrollState = useCallback(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    setCanScrollLeft(el.scrollLeft > 1);
+    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 1);
+  }, []);
+
+  const scrollTabs = useCallback((dir: 'left' | 'right') => {
+    tabScrollRef.current?.scrollBy({ left: dir === 'left' ? -120 : 120, behavior: 'smooth' });
+  }, []);
+
+  useEffect(() => {
+    updateTabScrollState();
+  }, [tabs, updateTabScrollState]);
+
+  useEffect(() => {
+    window.addEventListener('resize', updateTabScrollState);
+    const el = tabScrollRef.current;
+    let observer: ResizeObserver | undefined;
+    if (el) {
+      observer = new ResizeObserver(() => updateTabScrollState());
+      observer.observe(el);
+    }
+    return () => {
+      window.removeEventListener('resize', updateTabScrollState);
+      observer?.disconnect();
+    };
+  }, [updateTabScrollState]);
+
   const existingProjects = useMemo(() => getProjectPaths(liveThreads), [liveThreads]);
-  const showDefaultThread = (normalizedQuery.length === 0 || '大厅'.includes(normalizedQuery)) && !labelFilter;
+  const hasLabelFilters = labels.length > 0 || uncategorizedCount > 0;
+  const showTabRow = tabs.length > 0 || hasLabelFilters;
+  const activeTabIsEmpty =
+    activeTabContent.kind === 'project' ? threadGroups.length === 0 : activeTabContent.threads.length === 0;
 
   // F095 Phase E: Scroll anchor — keeps visible content in place when threads reorder
-  const { onScroll: handleScrollAnchor } = useScrollAnchor(scrollContainerRef, threadGroups);
+  const { onScroll: handleScrollAnchor } = useScrollAnchor(scrollContainerRef, projectThreadGroups);
 
   // F095: Collapse state with localStorage persistence + search/active auto-expand
   const { isCollapsed, toggleGroup, expandAll, collapseAll } = useCollapseState({
-    threadGroups,
+    threadGroups: projectThreadGroups,
     searchQuery: normalizedQuery,
     currentThreadId,
   });
   const sidebarWidthClass = className === undefined ? 'w-60' : className;
+
+  // Select Open Session: scroll to & highlight the active thread in the sidebar.
+  // In project tab, auto-expand the collapsed group containing the thread first.
+  const scrollToActiveThread = useCallback(() => {
+    if (!currentThreadId || !scrollContainerRef.current) return;
+
+    const needsFilterClear = searchQuery.trim() !== '' || labelFilter !== null;
+
+    // Clear any active filters so the thread is guaranteed visible
+    if (searchQuery.trim()) setSearchQuery('');
+    if (labelFilter) setLabelFilter(null);
+
+    // If the thread is in a collapsed project group, expand it first
+    const ownerGroup = projectThreadGroups.find((g) => g.threads.some((t) => t.id === currentThreadId));
+    const ownerKey = ownerGroup ? (ownerGroup.projectPath ?? ownerGroup.type) : undefined;
+    if (ownerKey && isCollapsed(ownerKey)) {
+      toggleGroup(ownerKey);
+    }
+
+    // Derive the tab that actually contains the active thread by checking
+    // unfiltered membership across all tabs (avoids hardcoding 'recent').
+    const findTabForThread = (): SidebarTabId => {
+      const tabOrder: SidebarTabId[] = ['recent', 'system', 'project', 'pinned', 'favorites'];
+      for (const tabId of tabOrder) {
+        const bucket = buildSidebarTabContent(tabId, threads, pinnedProjects, unreadIds);
+        if (bucket.threads.some((t) => t.id === currentThreadId)) return tabId;
+      }
+      return 'recent';
+    };
+
+    // Helper: scroll to the active thread and apply a brief highlight ring.
+    // If the thread isn't in the current tab's DOM, switch to the tab that
+    // actually contains it before retrying.
+    const scrollAndHighlight = (retried = false) => {
+      const el = scrollContainerRef.current?.querySelector<HTMLElement>(`[data-thread-id="${currentThreadId}"]`);
+      if (!el) {
+        if (!retried) {
+          const targetTab = findTabForThread();
+          if (activeTab !== targetTab) {
+            setActiveTab(targetTab);
+          }
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => scrollAndHighlight(true));
+          });
+        }
+        return;
+      }
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.classList.add('ring-2', 'ring-cafe-accent', 'ring-opacity-60');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-cafe-accent', 'ring-opacity-60'), 1200);
+    };
+
+    // Defer DOM lookup when state updates (filter clear / group expand) need a re-render first
+    if (needsFilterClear || (ownerKey && isCollapsed(ownerKey))) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => scrollAndHighlight());
+      });
+    } else {
+      scrollAndHighlight();
+    }
+  }, [
+    currentThreadId,
+    threads,
+    projectThreadGroups,
+    isCollapsed,
+    toggleGroup,
+    searchQuery,
+    labelFilter,
+    activeTab,
+    pinnedProjects,
+    unreadIds,
+  ]);
+
+  const renderThreadItem = useCallback(
+    (thread: Thread, indented = false) => (
+      <ThreadItem
+        key={thread.id}
+        id={thread.id}
+        title={thread.title}
+        participants={thread.participants}
+        lastActiveAt={thread.lastActiveAt}
+        isActive={currentThreadId === thread.id}
+        onSelect={handleSelect}
+        onDelete={handleDeleteRequest}
+        onRename={handleRename}
+        onTogglePin={handleTogglePin}
+        onToggleFavorite={handleToggleFavorite}
+        onUpdatePreferredCats={handleUpdatePreferredCats}
+        onUpdateLabels={handleUpdateLabels}
+        onReplay={handleReplay}
+        isPinned={thread.pinned}
+        isFavorited={thread.favorited}
+        threadState={getThreadState(thread.id)}
+        projectPath={thread.projectPath}
+        indented={indented}
+        preferredCats={thread.preferredCats}
+        threadLabels={thread.labels}
+        isHubThread={!!thread.connectorHubState}
+      />
+    ),
+    [
+      currentThreadId,
+      getThreadState,
+      handleDeleteRequest,
+      handleRename,
+      handleReplay,
+      handleSelect,
+      handleToggleFavorite,
+      handleTogglePin,
+      handleUpdateLabels,
+      handleUpdatePreferredCats,
+    ],
+  );
 
   return (
     <>
@@ -733,6 +911,26 @@ export function ThreadSidebar({ onClose, className }: ThreadSidebarProps) {
         <div className="px-3 pt-3 pb-2 flex items-center justify-between">
           <span className="text-sm font-semibold text-cafe-black">对话</span>
           <div className="flex items-center gap-1.5">
+            {uncategorizedCount > 0 && (
+              <button
+                type="button"
+                onClick={handleOrganizeWithCat}
+                className="p-1.5 rounded-lg text-cafe-muted hover:bg-[var(--console-hover-bg)] hover:text-conn-amber-text transition-colors"
+                title={`猫猫帮你分类 (${uncategorizedCount} 未分类)`}
+              >
+                <SparkleIcon />
+              </button>
+            )}
+            {uncategorizedCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowOrganizer(true)}
+                className="p-1.5 rounded-lg text-cafe-muted hover:bg-[var(--console-hover-bg)] hover:text-cafe-secondary transition-colors"
+                title={`手动批量分类 (${uncategorizedCount} 未分类)`}
+              >
+                <GridIcon />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setShowBootcampList(true)}
@@ -783,208 +981,249 @@ export function ThreadSidebar({ onClose, className }: ThreadSidebarProps) {
           </div>
         </div>
 
-        <LabelFilterBar
-          labels={labels}
-          selectedFilter={labelFilter}
-          onSelect={setLabelFilter}
-          uncategorizedCount={uncategorizedCount}
-          onOrganize={handleOrganizeWithCat}
-          onManualOrganize={() => setShowOrganizer(true)}
-        />
-
-        <div ref={scrollContainerRef} onScroll={handleScrollAnchor} className="flex-1 overflow-y-auto">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScrollAnchor}
+          className="flex-1 overflow-y-auto [scrollbar-width:thin] [scrollbar-color:color-mix(in_srgb,var(--cafe-text-muted)_72%,transparent)_transparent] [&::-webkit-scrollbar]:w-2.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-[3px] [&::-webkit-scrollbar-thumb]:border-solid [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-clip-content [&::-webkit-scrollbar-thumb]:[background-color:color-mix(in_srgb,var(--cafe-text-muted)_72%,transparent)]"
+        >
           {isLoadingThreads && threads.length === 0 && (
             <div className="text-center py-4 text-xs text-cafe-muted">加载中...</div>
           )}
 
-          {showDefaultThread && (
-            <ThreadItem
-              id="default"
-              title="大厅"
-              participants={[]}
-              lastActiveAt={Date.now()}
-              isActive={currentThreadId === 'default'}
-              onSelect={handleSelect}
-              threadState={getThreadState('default')}
-            />
-          )}
-
-          {threadGroups.length > 0 && (
-            <div className="flex items-center justify-end px-3 pt-1.5">
-              <button
-                type="button"
-                onClick={expandAll}
-                className="text-micro text-cafe-muted hover:text-cafe-accent transition-colors"
-                data-testid="expand-all-btn"
+          {showTabRow && (
+            <div
+              className="sticky top-0 z-10 flex items-stretch border-b border-cafe-subtle bg-[var(--console-panel-bg)] pt-2 px-2"
+              data-testid="sidebar-tabs-row"
+            >
+              {canScrollLeft && (
+                <button
+                  type="button"
+                  onClick={() => scrollTabs('left')}
+                  className="flex flex-shrink-0 items-center justify-center w-5 rounded-t-md text-cafe-muted hover:bg-[var(--console-hover-bg)] hover:text-cafe-accent"
+                  aria-label="向左滚动"
+                  data-testid="sidebar-tab-scroll-left"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-3.5 w-3.5"
+                    aria-hidden="true"
+                  >
+                    <path d="M15 18l-6-6 6-6" />
+                  </svg>
+                </button>
+              )}
+              <div
+                ref={tabScrollRef}
+                onScroll={updateTabScrollState}
+                className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                data-testid="sidebar-tabs-scroll"
               >
-                全部展开
-              </button>
-              <span className="text-micro text-cafe-muted mx-1">/</span>
-              <button
-                type="button"
-                onClick={collapseAll}
-                className="text-micro text-cafe-muted hover:text-cafe-accent transition-colors"
-                data-testid="collapse-all-btn"
-              >
-                全部折叠
-              </button>
+                <div className="flex w-max mx-auto" role="tablist" aria-label="对话分类">
+                  {tabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      ref={(node) => {
+                        tabRefs.current[tab.id] = node;
+                      }}
+                      type="button"
+                      role="tab"
+                      aria-selected={activeTab === tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`flex flex-shrink-0 items-center gap-1 rounded-t-md border-b-2 px-1.5 py-1.5 text-micro font-medium transition-colors ${
+                        activeTab === tab.id
+                          ? 'border-cafe-accent text-cafe-accent'
+                          : 'border-transparent text-cafe-muted hover:bg-[var(--console-hover-bg)] hover:text-cafe-secondary'
+                      }`}
+                      data-testid={`sidebar-tab-${tab.id}`}
+                    >
+                      <SidebarTabIcon id={tab.id} className="h-3.5 w-3.5 shrink-0" />
+                      <span>{tab.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <LabelFilterBar
+                labels={labels}
+                selectedFilter={labelFilter}
+                onSelect={setLabelFilter}
+                uncategorizedCount={uncategorizedCount}
+              />
+              {canScrollRight && (
+                <button
+                  type="button"
+                  onClick={() => scrollTabs('right')}
+                  className="flex flex-shrink-0 items-center justify-center w-5 rounded-t-md text-cafe-muted hover:bg-[var(--console-hover-bg)] hover:text-cafe-accent"
+                  aria-label="向右滚动"
+                  data-testid="sidebar-tab-scroll-right"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-3.5 w-3.5"
+                    aria-hidden="true"
+                  >
+                    <path d="M9 6l6 6-6 6" />
+                  </svg>
+                </button>
+              )}
             </div>
           )}
 
-          {threadGroups.map((group) => {
-            const groupKey = group.projectPath ?? group.type;
-            const icon =
-              group.type === 'pinned'
-                ? ('pin' as const)
-                : group.type === 'favorites'
-                  ? ('star' as const)
-                  : group.type === 'recent'
-                    ? ('clock' as const)
-                    : group.type === 'system'
-                      ? ('system' as const)
-                      : undefined;
-
-            // Archived container: render nested project groups
-            if (group.type === 'archived-container') {
-              return (
-                <SectionGroup
-                  key="archived-container"
-                  label={group.label}
-                  icon="archive"
-                  count={group.archivedGroups?.length ?? 0}
-                  isCollapsed={isCollapsed('archived-container')}
-                  onToggle={() => toggleGroup('archived-container')}
+          <div className="space-y-1 pt-1.5" data-testid="sidebar-tab-content">
+            {activeTabContent.kind === 'flat' && (
+              <>
+                <div
+                  className="flex items-center justify-between px-3 py-1 text-micro text-cafe-muted"
+                  data-testid="flat-toolbar"
                 >
-                  {group.archivedGroups?.map((sub) => {
-                    const subKey = sub.projectPath ?? sub.type;
-                    return (
-                      <SectionGroup
-                        key={subKey}
-                        label={sub.projectPath ? (projectNames.get(sub.projectPath) ?? sub.label) : sub.label}
-                        count={sub.threads.length}
-                        isCollapsed={isCollapsed(subKey)}
-                        onToggle={() => toggleGroup(subKey)}
-                        projectPath={sub.projectPath}
-                        governanceStatus={sub.projectPath ? govHealth[sub.projectPath] : undefined}
-                        onToggleProjectPin={sub.projectPath ? () => toggleProjectPin(sub.projectPath!) : undefined}
-                        isProjectPinned={sub.projectPath ? pinnedProjects.has(sub.projectPath) : undefined}
-                        onQuickCreate={sub.projectPath ? () => handleQuickCreate(sub.projectPath!) : undefined}
-                        onOpenInFinder={
-                          sub.projectPath && sub.projectPath !== 'default'
-                            ? () => handleOpenInFinder(sub.projectPath!)
-                            : undefined
-                        }
-                        onRenameProject={
-                          sub.projectPath ? (name: string) => handleRenameProject(sub.projectPath!, name) : undefined
-                        }
-                        onArchiveThreads={sub.projectPath ? () => handleArchiveThreads(sub.projectPath!) : undefined}
-                      >
-                        {sub.threads.map((t) => (
-                          <ThreadItem
-                            key={t.id}
-                            id={t.id}
-                            title={t.title}
-                            participants={t.participants}
-                            lastActiveAt={t.lastActiveAt}
-                            isActive={currentThreadId === t.id}
-                            onSelect={handleSelect}
-                            onDelete={handleDeleteRequest}
-                            onRename={handleRename}
-                            onTogglePin={handleTogglePin}
-                            onToggleFavorite={handleToggleFavorite}
-                            onUpdatePreferredCats={handleUpdatePreferredCats}
-                            onUpdateLabels={handleUpdateLabels}
-                            onReplay={handleReplay}
-                            isPinned={t.pinned}
-                            isFavorited={t.favorited}
-                            threadState={getThreadState(t.id)}
-                            projectPath={t.projectPath}
-                            indented
-                            preferredCats={t.preferredCats}
-                            threadLabels={t.labels}
-                            isHubThread={!!t.connectorHubState}
-                          />
-                        ))}
-                      </SectionGroup>
-                    );
-                  })}
-                </SectionGroup>
-              );
-            }
+                  <span>{activeTabContent.threads.length} 个对话</span>
+                  <button
+                    type="button"
+                    onClick={scrollToActiveThread}
+                    className="flex items-center justify-center rounded p-1 text-cafe-muted transition-colors hover:bg-[var(--console-hover-bg)] hover:text-cafe-accent"
+                    data-testid="select-open-session-btn"
+                    aria-label="定位当前对话"
+                    title="定位当前对话"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.4}
+                    >
+                      {/* PyCharm "Select Opened File" — circle with inward crosshair, center gap */}
+                      <circle cx="8" cy="8" r="5.5" />
+                      <line x1="8" y1="2.5" x2="8" y2="6" />
+                      <line x1="8" y1="10" x2="8" y2="13.5" />
+                      <line x1="2.5" y1="8" x2="6" y2="8" />
+                      <line x1="10" y1="8" x2="13.5" y2="8" />
+                    </svg>
+                  </button>
+                </div>
+                {activeTabContent.threads.map((t) => renderThreadItem(t))}
+              </>
+            )}
 
-            return (
-              <SectionGroup
-                key={groupKey}
-                label={group.projectPath ? (projectNames.get(group.projectPath) ?? group.label) : group.label}
-                icon={icon}
-                count={group.threads.length}
-                isCollapsed={isCollapsed(groupKey)}
-                onToggle={() => toggleGroup(groupKey)}
-                projectPath={group.projectPath}
-                governanceStatus={group.projectPath ? govHealth[group.projectPath] : undefined}
-                onToggleProjectPin={
-                  group.type === 'project' && group.projectPath ? () => toggleProjectPin(group.projectPath!) : undefined
-                }
-                isProjectPinned={
-                  group.type === 'project' && group.projectPath ? pinnedProjects.has(group.projectPath) : undefined
-                }
-                onQuickCreate={
-                  group.type === 'project' && group.projectPath
-                    ? () => handleQuickCreate(group.projectPath!)
-                    : undefined
-                }
-                // Note: system/pinned/recent/favorites groups get undefined for all project actions
-                // because group.type !== 'project'. This is intentional — only project sections
-                // should have Open in Finder / Rename / Archive / Quick Create.
-                onOpenInFinder={
-                  group.type === 'project' && group.projectPath && group.projectPath !== 'default'
-                    ? () => handleOpenInFinder(group.projectPath!)
-                    : undefined
-                }
-                onRenameProject={
-                  group.type === 'project' && group.projectPath
-                    ? (name: string) => handleRenameProject(group.projectPath!, name)
-                    : undefined
-                }
-                onArchiveThreads={
-                  group.type === 'project' && group.projectPath
-                    ? () => handleArchiveThreads(group.projectPath!)
-                    : undefined
-                }
+            {activeTabContent.kind === 'project' && threadGroups.length > 0 && (
+              <div
+                className="flex items-center justify-between px-3 py-1 text-micro text-cafe-muted"
+                data-testid="project-toolbar"
               >
-                {group.threads.map((t) => (
-                  <ThreadItem
-                    key={t.id}
-                    id={t.id}
-                    title={t.title}
-                    participants={t.participants}
-                    lastActiveAt={t.lastActiveAt}
-                    isActive={currentThreadId === t.id}
-                    onSelect={handleSelect}
-                    onDelete={handleDeleteRequest}
-                    onRename={handleRename}
-                    onTogglePin={handleTogglePin}
-                    onToggleFavorite={handleToggleFavorite}
-                    onUpdatePreferredCats={handleUpdatePreferredCats}
-                    onUpdateLabels={handleUpdateLabels}
-                    onReplay={handleReplay}
-                    isPinned={t.pinned}
-                    isFavorited={t.favorited}
-                    threadState={getThreadState(t.id)}
-                    projectPath={t.projectPath}
-                    indented={group.type === 'project'}
-                    preferredCats={t.preferredCats}
-                    threadLabels={t.labels}
-                    isHubThread={!!t.connectorHubState}
-                  />
-                ))}
-              </SectionGroup>
-            );
-          })}
+                <span>{threadGroups.length} 个项目</span>
+                <div className="flex items-center gap-0.5">
+                  <button
+                    type="button"
+                    onClick={scrollToActiveThread}
+                    className="flex items-center justify-center rounded p-1 text-cafe-muted transition-colors hover:bg-[var(--console-hover-bg)] hover:text-cafe-accent"
+                    data-testid="project-select-open-session-btn"
+                    aria-label="定位当前对话"
+                    title="定位当前对话"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.4}
+                    >
+                      {/* PyCharm "Select Opened File" — circle with inward crosshair, center gap */}
+                      <circle cx="8" cy="8" r="5.5" />
+                      <line x1="8" y1="2.5" x2="8" y2="6" />
+                      <line x1="8" y1="10" x2="8" y2="13.5" />
+                      <line x1="2.5" y1="8" x2="6" y2="8" />
+                      <line x1="10" y1="8" x2="13.5" y2="8" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={expandAll}
+                    className="flex items-center justify-center rounded p-1 text-cafe-muted transition-colors hover:bg-[var(--console-hover-bg)] hover:text-cafe-accent"
+                    data-testid="expand-all-btn"
+                    aria-label="展开全部项目"
+                    title="展开全部"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.4}
+                    >
+                      {/* PyCharm-style expand all — diverging chevrons ∧∨ */}
+                      <path d="M5 7l3-3 3 3" />
+                      <path d="M5 9l3 3 3-3" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={collapseAll}
+                    className="flex items-center justify-center rounded p-1 text-cafe-muted transition-colors hover:bg-[var(--console-hover-bg)] hover:text-cafe-accent"
+                    data-testid="collapse-all-btn"
+                    aria-label="折叠全部项目"
+                    title="折叠全部"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.4}
+                    >
+                      {/* PyCharm-style collapse all — converging chevrons ∨∧ */}
+                      <path d="M5 4l3 3 3-3" />
+                      <path d="M5 12l3-3 3 3" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            )}
 
-          {normalizedQuery.length > 0 && threadGroups.length === 0 && !showDefaultThread && (
-            <div className="px-3 py-4 text-xs text-cafe-muted">没有匹配的对话</div>
-          )}
+            {activeTabContent.kind === 'project' &&
+              threadGroups.map((group) => {
+                const groupKey = group.projectPath ?? group.type;
+                const projectPath = group.projectPath;
+
+                return (
+                  <SectionGroup
+                    key={groupKey}
+                    label={projectPath ? (projectNames.get(projectPath) ?? group.label) : group.label}
+                    count={group.threads.length}
+                    isCollapsed={isCollapsed(groupKey)}
+                    onToggle={() => toggleGroup(groupKey)}
+                    projectPath={projectPath}
+                    governanceStatus={projectPath ? govHealth[projectPath] : undefined}
+                    onToggleProjectPin={projectPath ? () => toggleProjectPin(projectPath) : undefined}
+                    isProjectPinned={projectPath ? pinnedProjects.has(projectPath) : undefined}
+                    onQuickCreate={projectPath ? () => handleQuickCreate(projectPath) : undefined}
+                    onOpenInFinder={
+                      projectPath && projectPath !== 'default' ? () => handleOpenInFinder(projectPath) : undefined
+                    }
+                    onRenameProject={projectPath ? (name: string) => handleRenameProject(projectPath, name) : undefined}
+                    onArchiveThreads={projectPath ? () => handleArchiveThreads(projectPath) : undefined}
+                  >
+                    {group.threads.map((t) => renderThreadItem(t, true))}
+                  </SectionGroup>
+                );
+              })}
+
+            {(normalizedQuery.length > 0 || labelFilter) && activeTabIsEmpty && (
+              <div className="px-3 py-4 text-xs text-cafe-muted">没有匹配的对话</div>
+            )}
+          </div>
         </div>
 
         {/* F095 Phase D: Trash bin section */}
@@ -1108,6 +1347,44 @@ export function ThreadSidebar({ onClose, className }: ThreadSidebarProps) {
         </TheaterOverlay>
       )}
     </>
+  );
+}
+
+function SparkleIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.14-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.14a.5.5 0 0 1 .96 0l1.58 6.14a2 2 0 0 0 1.44 1.44l6.14 1.58a.5.5 0 0 1 0 .96l-6.14 1.58a2 2 0 0 0-1.44 1.44l-1.58 6.14a.5.5 0 0 1-.96 0z" />
+      <path d="M20 3v4M22 5h-4" />
+    </svg>
+  );
+}
+
+function GridIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
   );
 }
 
