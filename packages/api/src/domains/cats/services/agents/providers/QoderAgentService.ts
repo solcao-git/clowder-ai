@@ -271,6 +271,12 @@ export class QoderAgentService implements AgentService {
       let hadCliError = false;
       const transformState = createQoderTransformState();
 
+      // Semantic completion signal: qodercli may crash with EPIPE on cleanup
+      // after successfully outputting result/success (the LLM call itself succeeds).
+      // Without this signal, cli-spawn treats the non-zero exit as a fatal error.
+      // Pattern mirrors CodexAgentService's semanticCompletionController.
+      const semanticCompletionController = new AbortController();
+
       const cliOpts = {
         command: qoderCommand,
         args,
@@ -286,6 +292,7 @@ export class QoderAgentService implements AgentService {
         ...(options?.invocationId && this.rawArchive.getPath
           ? { rawArchivePath: this.rawArchive.getPath(options.invocationId) }
           : {}),
+        semanticCompletionSignal: semanticCompletionController.signal,
       };
       const events = options?.spawnCliOverride
         ? options.spawnCliOverride(cliOpts)
@@ -344,6 +351,11 @@ export class QoderAgentService implements AgentService {
         // Transform Qoder event → AgentMessage
         const msg = transformQoderEvent(event, this.catId, transformState);
         if (msg) {
+          // Signal semantic completion on result/success — the LLM call is done.
+          // Subsequent EPIPE crashes on pipe cleanup should not be treated as fatal.
+          if (transformState.emittedDone && !semanticCompletionController.signal.aborted) {
+            semanticCompletionController.abort();
+          }
           // Attach metadata to session_init and done events
           if (msg.type === 'session_init') {
             emittedSessionInit = true;
