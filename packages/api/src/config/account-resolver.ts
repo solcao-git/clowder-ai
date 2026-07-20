@@ -118,6 +118,8 @@ const BUILTIN_ACCOUNT_MAP: Record<string, BuiltinAccountClient> = {
   'qoder-native': 'qoder',
   codebuddy: 'codebuddy',
   'xiyu-openai': 'codebuddy',
+  trae: 'trae',
+  'trae-native': 'trae',
 };
 
 const GOOGLE_OWNED_DOMAINS = ['generativelanguage.googleapis.com', 'googleapis.com'];
@@ -240,6 +242,10 @@ function normalizeToClient(clientOrProtocol: string): BuiltinAccountClient | nul
     case 'google':
     case 'kimi':
     case 'opencode':
+    case 'qoder':
+    case 'codebuddy':
+    case 'deepseek':
+    case 'trae':
       return clientOrProtocol;
     case 'openai-responses':
       return 'openai';
