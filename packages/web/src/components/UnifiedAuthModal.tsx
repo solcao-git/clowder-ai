@@ -9,7 +9,7 @@ import { HubIcon } from './hub-icons';
 import { TagEditor } from './hub-tag-editor';
 import { formInputClass } from './mcp-form-helpers';
 
-const CLIENT_OPTIONS: BuiltinAccountClient[] = ['anthropic', 'openai', 'google', 'kimi', 'opencode', 'acp', 'qoder', 'deepseek'];
+const CLIENT_OPTIONS: BuiltinAccountClient[] = ['anthropic', 'openai', 'google', 'kimi', 'opencode', 'acp', 'qoder', 'trae', 'deepseek'];
 
 /** Suggested models per client — kept in sync with cat-template.json clientDefaults. */
 const MODEL_SUGGESTIONS: Partial<Record<BuiltinAccountClient, string[]>> = {

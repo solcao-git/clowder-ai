@@ -28,6 +28,7 @@ const BUILTIN_CLIENT_LABELS: Record<BuiltinAccountClient, string> = {
   opencode: 'OpenCode',
   acp: 'ACP',
   qoder: 'Qoder',
+  trae: 'Trae',
   codebuddy: 'CodeBuddy',
   deepseek: 'DeepSeek',
 };
