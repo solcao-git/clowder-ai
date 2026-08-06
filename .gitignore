@@ -231,3 +231,6 @@ generated/capability-wakeup/
 packages/api/test/__b1_parent_a__/
 .claude/skills/organize-threads
 .claude/skills/thread-orchestration
+
+# PowerShell module analysis cache (mistracked binary, environment-written)
+Microsoft/
