@@ -268,6 +268,7 @@ describe('prepareOpenCodeAcpSpawnConfig', () => {
           apiKey: 'sk-test-secret',
           baseUrl: 'https://proxy.example/v1',
           models: ['claude-opus-4-6'],
+          modelAliases: { 'claude-opus-4-6': 'claude-opus-4-6-20260101' },
         },
       });
 
@@ -281,7 +282,17 @@ describe('prepareOpenCodeAcpSpawnConfig', () => {
       assert.equal(config.small_model, 'anthropic-compat/claude-opus-4-6');
       assert.equal(config.provider['anthropic-compat'].options.apiKey, `{env:${OC_API_KEY_ENV}}`);
       assert.equal(config.provider['anthropic-compat'].options.baseURL, `{env:${OC_BASE_URL_ENV}}`);
+      assert.deepEqual(config.provider['anthropic-compat'].models, {
+        'claude-opus-4-6': { id: 'claude-opus-4-6-20260101', name: 'claude-opus-4-6' },
+      });
+      assert.deepEqual(prepared.runtimeConfigSummary.providerSummary['anthropic-compat'].modelMappings, {
+        'claude-opus-4-6': 'claude-opus-4-6-20260101',
+      });
       assert.ok(!JSON.stringify(config).includes('sk-test-secret'), 'runtime config must not write secrets');
+      assert.ok(
+        !JSON.stringify(prepared.runtimeConfigSummary).includes('sk-test-secret'),
+        'debug summary must not include secrets',
+      );
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }
@@ -359,6 +370,48 @@ describe('generateOpenCodeRuntimeConfig', () => {
     assert.equal(config.provider.maas.npm, '@ai-sdk/openai-compatible');
     assert.equal(config.provider.maas.options.baseURL, `{env:${OC_BASE_URL_ENV}}`);
     assert.equal(config.provider.maas.options.apiKey, `{env:${OC_API_KEY_ENV}}`);
+  });
+
+  test('uses account model aliases as upstream ids while preserving local keys', () => {
+    const config = generateOpenCodeRuntimeConfig({
+      providerName: 'kimi',
+      models: ['kimi-code/k3'],
+      defaultModel: 'kimi/kimi-code/k3',
+      apiType: 'openai',
+      hasBaseUrl: true,
+      modelAliases: { 'kimi-code/k3': 'kimi-k3' },
+    });
+
+    assert.equal(config.model, 'kimi/kimi-code/k3');
+    assert.deepStrictEqual(config.provider.kimi.models, {
+      'kimi-code/k3': { id: 'kimi-k3', name: 'kimi-code/k3' },
+    });
+  });
+
+  test('keeps unknown models on identity routing without guessing aliases', () => {
+    const config = generateOpenCodeRuntimeConfig({
+      providerName: 'vendor',
+      models: ['vendor/custom-model'],
+      defaultModel: 'vendor/custom-model',
+      apiType: 'openai',
+    });
+
+    assert.deepStrictEqual(config.provider.vendor.models, {
+      'custom-model': { name: 'custom-model' },
+    });
+  });
+
+  test('keeps prototype-named local models on identity routing without inherited aliases', () => {
+    const config = generateOpenCodeRuntimeConfig({
+      providerName: 'vendor',
+      models: ['toString', 'constructor'],
+      modelAliases: { configured: 'upstream-configured' },
+    });
+
+    assert.deepStrictEqual(config.provider.vendor.models, {
+      toString: { name: 'toString' },
+      constructor: { name: 'constructor' },
+    });
   });
 
   test('apiType maps to correct npm adapters', () => {
@@ -629,6 +682,7 @@ describe('generateOpenCodeRuntimeConfig', () => {
       defaultModel: 'anthropic/minimax-m2.7',
       apiType: 'anthropic',
       hasBaseUrl: true,
+      modelAliases: { 'minimax-m2.7': 'upstream-minimax-m2.7' },
     });
 
     assert.equal(summary.model, 'anthropic-compat/minimax-m2.7');
@@ -638,6 +692,10 @@ describe('generateOpenCodeRuntimeConfig', () => {
       'anthropic-compat': {
         npm: '@ai-sdk/anthropic',
         modelKeys: ['minimax-m2.7', 'minimax-text-01'],
+        modelMappings: {
+          'minimax-m2.7': 'upstream-minimax-m2.7',
+          'minimax-text-01': 'minimax-text-01',
+        },
         hasBaseUrl: true,
         apiKeySource: `env:${OC_API_KEY_ENV}`,
         baseUrlSource: `env:${OC_BASE_URL_ENV}`,
@@ -686,7 +744,7 @@ describe('writeOpenCodeRuntimeConfig', () => {
         hasBaseUrl: true,
       });
 
-      assert.match(configPath, /\.cat-cafe\/oc-config-opencode-maas-inv-123\/opencode\.json$/);
+      assert.match(configPath, /\.cat-cafe[\\/]oc-config-opencode-maas-inv-123[\\/]opencode\.json$/);
       assert.ok(existsSync(configPath), 'opencode.json must exist at returned config path');
       const content = JSON.parse(readFileSync(configPath, 'utf-8'));
       assert.equal(content.model, 'maas/glm-5');
@@ -952,6 +1010,7 @@ describe('writeOpenCodeRuntimeConfig', () => {
         JSON.stringify({
           mcp: {
             filesystem: { type: 'local', command: ['npx', '-y', '@mcp/fs-stale'] },
+            github: { type: 'remote', url: 'https://api.githubcopilot.com/mcp/', enabled: true },
             'cat-cafe': { type: 'local', command: ['node', 'legacy-monolith.js'] },
             'my-tool': { type: 'local', command: ['node', 'tool.js'] },
           },
@@ -975,6 +1034,7 @@ describe('writeOpenCodeRuntimeConfig', () => {
 
       const content = JSON.parse(readFileSync(configPath, 'utf-8'));
       assert.equal(content.mcp.filesystem, undefined, 'disabled capability must not be re-added from opencode.json');
+      assert.equal(content.mcp.github, undefined, 'retired GitHub MCP must not be re-added from opencode.json');
       assert.equal(content.mcp['cat-cafe'], undefined, 'legacy monolith alias must not be re-added from opencode.json');
       assert.ok(content.mcp['my-tool'], 'unmanaged user server should still be merged');
       assert.ok(content.mcp['cat-cafe-memory'], 'enabled capability should still be injected');

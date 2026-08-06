@@ -3,11 +3,10 @@
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
-import { EmbeddingService } from './EmbeddingService.js';
 import type { IEventMemoryStore } from './EventMemoryStore.js';
 import { EventMemoryStore } from './EventMemoryStore.js';
-import { loadEntitySeeds } from './entity-seeds.js';
-import { loadExternalCollections, resolveCollectionStorePath } from './external-collections.js';
+import { loadEntitySeeds, shouldSkipProposalEntity } from './entity-seeds.js';
+import { loadExternalCollections } from './external-collections.js';
 import { GlobalIndexBuilder } from './GlobalIndexBuilder.js';
 import { type ExcludeThreadIdsFn, IndexBuilder, type MessageListFn, type ThreadListFn } from './IndexBuilder.js';
 import type {
@@ -25,11 +24,12 @@ import { KnowledgeResolver } from './KnowledgeResolver.js';
 import { LibraryCatalog } from './LibraryCatalog.js';
 import { MarkerQueue } from './MarkerQueue.js';
 import { MaterializationService } from './MaterializationService.js';
-import { PassageVectorStore } from './PassageVectorStore.js';
+import { MemoryEmbeddingLifecycle } from './MemoryEmbeddingLifecycle.js';
+import type { PassageVectorStore } from './PassageVectorStore.js';
+import { createPersonalMemoryStore, registerPrivateAndExternalCollections } from './private-collection-bindings.js';
 import { ReflectionService } from './ReflectionService.js';
 import { SqliteEvidenceStore } from './SqliteEvidenceStore.js';
-import { ensurePassageVectorTable, ensureVectorTable } from './schema.js';
-import { VectorStore } from './VectorStore.js';
+import type { VectorStore } from './VectorStore.js';
 
 export interface MemoryServices {
   evidenceStore: IEvidenceStore;
@@ -44,6 +44,7 @@ export interface MemoryServices {
   knowledgeResolver: IKnowledgeResolver;
   indexBuilder?: IIndexBuilder;
   materializationService?: IMaterializationService;
+  embeddingLifecycle: MemoryEmbeddingLifecycle;
   embeddingService?: IEmbeddingService;
   vectorStore?: VectorStore;
   passageVectorStore?: PassageVectorStore;
@@ -89,6 +90,8 @@ export interface MemoryConfig {
   entitySeedPath?: string;
   /** F209 Phase B.1: one-way F032 roster → entity registry mirror (default: true). */
   includeRosterEntitySeeds?: boolean;
+  /** F263: owner identity enabling local private profile/personal Collection bindings. */
+  privateUserId?: string;
 }
 
 export function computeChildExcludes(parentRoot: string, children: Array<{ root: string }>): string[] {
@@ -133,48 +136,25 @@ export async function createMemoryServices(config: MemoryConfig): Promise<Memory
 
   const store = new SqliteEvidenceStore(sqlitePath);
   await store.initialize();
+  const stores = new Map<string, IEvidenceStore>();
+  stores.set('project:cat-cafe', store);
   const entitySeeds = loadEntitySeeds({
     explicitSeedPath: config.entitySeedPath,
     includeRoster: config.includeRosterEntitySeeds,
   });
   if (entitySeeds.length > 0) {
-    await store.upsertEntities(entitySeeds);
-  }
-
-  let embeddingService: IEmbeddingService | undefined;
-  let vectorStore: VectorStore | undefined;
-  let passageVectorStore: PassageVectorStore | undefined;
-
-  if (embedConfig.embedMode !== 'off') {
-    embeddingService = new EmbeddingService(embedConfig);
-
-    // P1 (codex R2): explicitly call load() — without this, isReady() stays false forever.
-    // Wrapped in try-catch for AC-C4 fail-open.
-    try {
-      await embeddingService.load();
-    } catch {
-      // fail-open: model load failed → isReady()=false → lexical-only degradation
+    // INV-5: Don't overwrite approved-via-Hub entities with seed data on restart.
+    // Check DB for each seed: if existing entity has proposal provenance, skip.
+    const safeSeeds = [];
+    for (const seed of entitySeeds) {
+      const existing = await store.getEntity(seed.entityId);
+      if (existing && shouldSkipProposalEntity(existing)) continue;
+      safeSeeds.push(seed);
     }
-
-    // Load sqlite-vec + ensure vec0 table (decoupled from migration, fail-open)
-    try {
-      const sqliteVecMod = await import('sqlite-vec');
-      sqliteVecMod.load(store.getDb());
-      const ok = ensureVectorTable(store.getDb(), embedConfig.embedDim);
-      if (ok) {
-        vectorStore = new VectorStore(store.getDb(), embedConfig.embedDim);
-      }
-      const passageOk = ensurePassageVectorTable(store.getDb(), embedConfig.embedDim);
-      if (passageOk) {
-        passageVectorStore = new PassageVectorStore(store.getDb(), embedConfig.embedDim);
-      }
-    } catch {
-      // fail-open: sqlite-vec not available
+    if (safeSeeds.length > 0) {
+      await store.upsertEntities(safeSeeds, { source: 'seed-sync' });
     }
   }
-
-  const embedDeps =
-    embeddingService && vectorStore ? { embedding: embeddingService, vectorStore, passageVectorStore } : undefined;
 
   // Pre-load external manifests to compute child excludes (AC-H1)
   // Must happen before IndexBuilder so CatCafeScanner gets the exclude patterns
@@ -185,7 +165,7 @@ export async function createMemoryServices(config: MemoryConfig): Promise<Memory
   const indexBuilder = new IndexBuilder(
     store,
     docsRoot,
-    embedDeps,
+    undefined,
     config.transcriptDataDir,
     config.threadListFn,
     config.messageListFn,
@@ -193,10 +173,14 @@ export async function createMemoryServices(config: MemoryConfig): Promise<Memory
     undefined,
     childExcludes.length > 0 ? childExcludes : undefined,
   );
-
-  // Wire rerank deps into store for search-time
-  if (embedDeps) {
-    store.setEmbedDeps({ ...embedDeps, mode: embedConfig.embedMode as 'shadow' | 'on' });
+  const embeddingLifecycle = new MemoryEmbeddingLifecycle(store, indexBuilder, embedConfig, {
+    getDependentStores: () =>
+      [...stores.values()].filter(
+        (candidate): candidate is SqliteEvidenceStore => candidate instanceof SqliteEvidenceStore,
+      ),
+  });
+  if (embedConfig.embedMode !== 'off') {
+    await embeddingLifecycle.activate(embedConfig.embedMode);
   }
 
   const markerQueue = new MarkerQueue(markersDir);
@@ -207,6 +191,7 @@ export async function createMemoryServices(config: MemoryConfig): Promise<Memory
 
   // F-4: Global knowledge store (optional — fail-open if missing/broken)
   let globalStore: SqliteEvidenceStore | undefined;
+  let personalStore: SqliteEvidenceStore | undefined;
   let globalIndexBuilder: GlobalIndexBuilder | undefined;
   const globalPath =
     config.globalDbPath ??
@@ -216,17 +201,27 @@ export async function createMemoryServices(config: MemoryConfig): Promise<Memory
     mkdirSync(dirname(globalPath), { recursive: true });
     globalStore = new SqliteEvidenceStore(globalPath);
     await globalStore.initialize();
+    personalStore = await createPersonalMemoryStore({
+      dataDir,
+      globalPath,
+      memoryRoot: config.memoryRoot,
+      privateUserId: config.privateUserId,
+    });
     globalIndexBuilder = new GlobalIndexBuilder({
       skillsRoot: config.skillsRoot ?? join(homedir(), '.claude', 'skills'),
       memoryRoot: config.memoryRoot ?? join(homedir(), '.claude', 'projects'),
       globalStore,
+      personalStore,
+      distilledRoot: join(dataDir, 'distilled-truths'),
     });
   } catch {
+    globalStore = undefined;
+    personalStore = undefined;
+    globalIndexBuilder = undefined;
     // fail-open: no global knowledge → project-only search
   }
 
   const catalog = new LibraryCatalog();
-  const stores = new Map<string, IEvidenceStore>();
   const now = new Date().toISOString();
 
   catalog.register({
@@ -243,7 +238,6 @@ export async function createMemoryServices(config: MemoryConfig): Promise<Memory
     createdAt: now,
     updatedAt: now,
   });
-  stores.set('project:cat-cafe', store);
 
   if (globalStore) {
     catalog.register({
@@ -261,22 +255,16 @@ export async function createMemoryServices(config: MemoryConfig): Promise<Memory
     });
     stores.set('global:methods', globalStore);
   }
-  for (const manifest of externals) {
-    try {
-      catalog.register(manifest);
-      if (manifest.status === 'archived') continue;
-      const storePath = resolveCollectionStorePath(dataDir, manifest.id);
-      mkdirSync(dirname(storePath), { recursive: true });
-      const extStore = new SqliteEvidenceStore(storePath, undefined, {
-        sourceRoot: manifest.root,
-        sourceRef: manifest.id,
-      });
-      await extStore.initialize();
-      stores.set(manifest.id, extStore);
-    } catch {
-      // fail-open: skip broken external collections
-    }
-  }
+  await registerPrivateAndExternalCollections({
+    catalog,
+    stores,
+    externalManifests: externals,
+    dataDir,
+    memoryRoot: config.memoryRoot,
+    privateUserId: config.privateUserId,
+    personalStore,
+    now,
+  });
 
   const knowledgeResolver = new KnowledgeResolver({ projectStore: store, globalStore, catalog, stores });
 
@@ -294,9 +282,16 @@ export async function createMemoryServices(config: MemoryConfig): Promise<Memory
     knowledgeResolver,
     indexBuilder,
     materializationService,
-    embeddingService,
-    vectorStore,
-    passageVectorStore,
+    embeddingLifecycle,
+    get embeddingService(): IEmbeddingService | undefined {
+      return embeddingLifecycle.getService();
+    },
+    get vectorStore(): VectorStore | undefined {
+      return embeddingLifecycle.getVectorStore();
+    },
+    get passageVectorStore(): PassageVectorStore | undefined {
+      return embeddingLifecycle.getPassageVectorStore();
+    },
     globalIndexBuilder,
     globalStore,
     catalog,

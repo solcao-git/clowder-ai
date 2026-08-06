@@ -103,11 +103,16 @@ function findCatCafeSkillCapability(
   config: { capabilities: CapabilityEntry[] } | null | undefined,
   skillId: string,
 ): CapabilityEntry | null {
-  // pluginId is an identity label, not a filter — all cat-cafe skills
-  // are looked up uniformly (built-in and plugin alike).
+  // Built-in/default-source skills participate in global policy. Plugin-owned
+  // and custom-source skills keep their own enablement and mount semantics.
   return (
     config?.capabilities.find(
-      (entry) => entry.type === 'skill' && entry.id === skillId && entry.source === 'cat-cafe',
+      (entry) =>
+        entry.type === 'skill' &&
+        entry.id === skillId &&
+        entry.source === 'cat-cafe' &&
+        !entry.pluginId &&
+        !entry.skillsSource,
     ) ?? null
   );
 }
@@ -120,10 +125,7 @@ function createCatCafeSkillCapabilityFromGlobalPolicy(
   const entry: CapabilityEntry = {
     id: skillId,
     type: 'skill',
-    // F228: `enabled` is required by CapabilityEntry but only meaningful for MCP/limb.
-    // Skills use `globalEnabled` exclusively; startup migration fills it from `enabled`
-    // for legacy entries, so new entries just set `enabled: true` as a type placeholder.
-    enabled: true,
+    enabled: globalEnabled,
     globalEnabled,
     source: 'cat-cafe',
   };
@@ -141,7 +143,7 @@ function findCapabilityPatchTargetIndex(
   config: { capabilities: CapabilityEntry[] },
   body: CapabilityPatchRequest,
 ): number {
-  const hasSourceDiscriminator = body.source === 'cat-cafe' || body.source === 'external';
+  const hasSourceDiscriminator = body.source === 'cat-cafe' || body.source === 'external' || body.source === 'plugin';
   const hasPluginDiscriminator = typeof body.pluginId === 'string';
   if (hasSourceDiscriminator || hasPluginDiscriminator) {
     const explicitIndex = config.capabilities.findIndex((entry) => {
@@ -266,9 +268,7 @@ function shouldKeepSkillCapability(
   declaredPluginSkillIds: Map<string, Set<string>> | null,
 ): boolean {
   if (cap.type !== 'skill') return true;
-  // F228: external skills (from user directories) are outside cat-cafe's
-  // managed scope — prune them from capabilities.json.
-  if (cap.source === 'external') return false;
+  if (cap.source === 'external') return allSkillNames.has(cap.id);
   if (cap.pluginId) return isDeclaredPluginSkill(cap, allSkillNames, declaredPluginSkillIds);
   return allSkillNames.has(cap.id);
 }
@@ -290,21 +290,15 @@ export async function buildKnownProjectPaths(
   projectRoot: string,
   _registry?: GovernanceRegistry,
 ): Promise<string[]> {
-  // F228: Only return the queried projectRoot as a server-known path.
-  // catCafeRoot (the Clowder AI instance directory) is NOT a user project —
-  // it's the global config source. Including it caused ambiguity between
-  // "global config" and "project config" in the UI project dropdown.
-  // In packaged installs the install dir shouldn't appear as a project;
-  // in source dev the working dir is discovered via thread project paths.
-  // The full project list is assembled client-side by merging server paths
-  // with thread-derived project paths (same source as the 新建对話 picker).
+  // F228: Only return catCafeRoot + projectRoot as server-known paths.
+  // The full project list is assembled client-side by merging these with
+  // thread-derived project paths (same source as the 新建對話 picker).
   const paths: string[] = [];
   const addPath = (path: string): void => {
     if (!paths.some((existing) => pathsEqual(existing, path))) paths.push(path);
   };
-  if (!pathsEqual(projectRoot, catCafeRoot)) {
-    addPath(projectRoot);
-  }
+  addPath(catCafeRoot);
+  addPath(projectRoot);
   return paths;
 }
 
@@ -320,18 +314,37 @@ export function shouldPropagateManagedSkillToggle(
   return scope === 'global';
 }
 
-function canReadSensitiveMcpConfig(request: FastifyRequest): boolean {
-  // Local loopback access in single-user mode: safe to show launch fields
-  // (command/args/url) — the user owns the machine and the config.
-  if (isLocalCapabilityWriteRequest(request)) return true;
-  // Non-local / multi-user: require configured owner identity match.
+/**
+ * F062: Owner-gated visibility for MCP config fields that may contain secrets.
+ *
+ * Launch fields (command/args/url) can contain inline secrets (--api-key=xxx,
+ * ?token=xxx). Env/headers contain explicit secrets. Both require owner
+ * identity even on localhost — a non-owner cat session should not see API keys.
+ *
+ * Single-user mode (no DEFAULT_OWNER_USER_ID): any authenticated local user
+ * is treated as owner — they own the machine.
+ */
+function canReadMcpSecrets(request: FastifyRequest): boolean {
   const sessionUserId = resolveCapabilityWriteSessionUserId(request);
-  return !!sessionUserId && !requireCapabilityWriteOwner(sessionUserId, { requireConfiguredOwner: true });
+  if (sessionUserId) {
+    // Has session identity → check owner match.
+    const ownerError = requireCapabilityWriteOwner(sessionUserId, { allowMissingOwner: true });
+    if (ownerError) return false;
+    // Owner matched, or single-user mode (no configured owner).
+    // In single-user mode, also require localhost — the user owns the machine
+    // but non-local network access must not expose secrets.
+    if (!process.env.DEFAULT_OWNER_USER_ID?.trim()) {
+      return isLocalCapabilityWriteRequest(request);
+    }
+    return true;
+  }
+  // No session identity. In single-user mode on localhost, fall through.
+  return isLocalCapabilityWriteRequest(request) && !process.env.DEFAULT_OWNER_USER_ID?.trim();
 }
 
 async function buildBoardMcpServer(
   cap: CapabilityEntry,
-  options?: { includeLaunchFields?: boolean },
+  options?: { includeLaunchFields?: boolean; includeSecrets?: boolean },
 ): Promise<CapabilityBoardItem['mcpServer'] | undefined> {
   const sanitized = sanitizeCapabilityForResponse(cap);
   const server = sanitized?.mcpServerOverride ?? sanitized?.mcpServer;
@@ -357,8 +370,13 @@ async function buildBoardMcpServer(
     if (Array.isArray(args)) boardServer.args = [...args];
     if (server.url) boardServer.url = server.url;
   }
-  if (server.env) boardServer.env = { ...server.env };
-  if (server.headers) boardServer.headers = { ...server.headers };
+  // F062: env/headers values only included when the caller is authorized
+  // for sensitive MCP config reads. Board display gets envKeys (below)
+  // for key-count / status indicators without leaking secret values.
+  if (options?.includeSecrets) {
+    if (server.env) boardServer.env = { ...server.env };
+    if (server.headers) boardServer.headers = { ...server.headers };
+  }
 
   const activeServer = cap.mcpServerOverride ?? cap.mcpServer;
   const envKeys = Object.keys(activeServer?.env ?? {});
@@ -548,7 +566,11 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     // Multi-project: accept ?projectPath=... to manage capabilities for any project
     const query = request.query as { projectPath?: string; probe?: string | boolean };
     const probeEnabled = query.probe === true || query.probe === 'true' || query.probe === '1';
-    const includeMcpLaunchFields = canReadSensitiveMcpConfig(request);
+    // F062: Launch fields (command/args/url) can also contain inline secrets
+    // (e.g. --api-key=xxx, ?token=xxx). Gate both launch fields and env/headers
+    // behind owner identity — non-owner sessions see only transport/resolver/envKeys.
+    const includeMcpLaunchFields = canReadMcpSecrets(request);
+    const includeMcpSecrets = includeMcpLaunchFields;
     let projectRoot = getProjectRoot();
     if (query.projectPath) {
       const validated = await resolvePersistentProjectPath(query.projectPath);
@@ -688,9 +710,10 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     for (const skillName of allSkillNames) {
       const isCatCafe = catCafeOwnSkills !== null && catCafeOwnSkills.includes(skillName);
       if (!isCatCafe) continue; // Skip non-cat-cafe skills — don't add external entries
-      // pluginId is an identity label — any cat-cafe skill entry with this id counts.
+      // Plugin-owned and custom-source skills may share an id with a built-in
+      // skill; neither should suppress the built-in registry entry.
       const exists = config.capabilities.some(
-        (c) => c.type === 'skill' && c.id === skillName && c.source === 'cat-cafe',
+        (c) => c.type === 'skill' && c.id === skillName && c.source === 'cat-cafe' && !c.pluginId && !c.skillsSource,
       );
       if (!exists) {
         config.capabilities.push(
@@ -705,7 +728,7 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     // external entries from user-directory scan results).
     for (const cap of config.capabilities) {
       if (cap.type !== 'skill') continue;
-      if (cap.skillsSource || cap.source === 'external') continue;
+      if (cap.pluginId || cap.skillsSource || cap.source === 'external') continue;
       const shouldBeCatCafe = catCafeOwnSkills !== null && catCafeOwnSkills.includes(cap.id);
       if (shouldBeCatCafe && cap.source !== 'cat-cafe') {
         cap.source = 'cat-cafe';
@@ -840,7 +863,10 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
         enabled: projectEnabled,
         globalEnabled: effectiveGlobalEnabled,
         cats,
-        mcpServer: await buildBoardMcpServer(cap, { includeLaunchFields: includeMcpLaunchFields }),
+        mcpServer: await buildBoardMcpServer(cap, {
+          includeLaunchFields: includeMcpLaunchFields,
+          includeSecrets: includeMcpSecrets,
+        }),
         layer: 'L1',
         pluginId: cap.pluginId,
         // F249: project-level fields
@@ -1004,14 +1030,18 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     // Registration consistency: capabilities.json vs source dir
     // Source directory = truth for "which skills exist"
     // capabilities.json = truth for "which skills are configured"
+    // Plugin-owned and custom-source skills are managed outside the default
+    // source-tree scanner — exclude them from consistency checks.
     const capSkillNames = new Set(
-      config.capabilities.filter((c) => c.type === 'skill' && c.source === 'cat-cafe').map((c) => c.id),
+      config.capabilities
+        .filter((c) => c.type === 'skill' && c.source === 'cat-cafe' && !c.pluginId && !c.skillsSource)
+        .map((c) => c.id),
     );
     const unregistered = [...mountSourceNames].filter((n) => !capSkillNames.has(n));
     // Skills with custom skillsSource live outside the default source dir —
     // they are expected to not appear in mountSourceNames and should not be phantom.
-    // effectiveSourceBySkill already tracks all custom-source skills (including
-    // plugin-provided ones), so no separate pluginId-based exclusion is needed.
+    // effectiveSourceBySkill tracks custom-source skills for built-in cat-cafe
+    // entries; plugin-owned skills are excluded above via !pluginId.
     const phantom = [...capSkillNames].filter((n) => !mountSourceNames.has(n) && !effectiveSourceBySkill.has(n));
     // F228: mountPaths-first — only mountPaths determines active state (enabled is legacy)
     const mountRequiredCatCafeSkillItems = catCafeSkillItems.filter((item) => (item.mountPaths?.length ?? 0) > 0);
@@ -1118,9 +1148,14 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
     }
     const isBatch = effectiveIds.length > 1;
 
-    if (body.source !== undefined && body.source !== 'cat-cafe' && body.source !== 'external') {
+    if (
+      body.source !== undefined &&
+      body.source !== 'cat-cafe' &&
+      body.source !== 'external' &&
+      body.source !== 'plugin'
+    ) {
       reply.status(400);
-      return { error: 'source must be "cat-cafe" or "external" when provided' };
+      return { error: 'source must be "cat-cafe", "external", or "plugin" when provided' };
     }
     if (body.pluginId !== undefined && typeof body.pluginId !== 'string') {
       reply.status(400);
@@ -1204,7 +1239,7 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
         const isManaged =
           body.capabilityType === 'skill' &&
           (body.scope === 'global' || body.scope === 'project') &&
-          cap.source === 'cat-cafe';
+          (cap.source === 'cat-cafe' || cap.source === 'plugin');
         if (isManaged) {
           try {
             validateSkillName(skillId);

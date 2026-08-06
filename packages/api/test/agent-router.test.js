@@ -44,6 +44,13 @@ function createMockMessageStore() {
       rows.push(stored);
       return stored;
     },
+    markDelivered: (id, deliveredAt) => {
+      const stored = rows.find((message) => message.id === id);
+      if (!stored) return null;
+      stored.deliveryStatus = 'delivered';
+      stored.deliveredAt = deliveredAt;
+      return stored;
+    },
     getById: (id) => rows.find((m) => m.id === id) ?? null,
     getRecent: (limit = 50) => sorted().slice(-limit),
     getMentionsFor: (catId, limit = 50) =>
@@ -1593,6 +1600,7 @@ describe('AgentRouter', () => {
     assert.ok(receivedOptions);
     assert.deepEqual(receivedOptions.auditContext, {
       invocationId: 'inv-1',
+      executionId: 'inv-1',
       threadId: 'thread-audit',
       userId: 'user-1',
       catId: 'opus',
@@ -3455,15 +3463,16 @@ describe('#58: preferredCats candidate scope (not dispatch list)', () => {
     });
     // msg 2: re-delivered system msg — 落到 page 1 boundary (最旧 score in page 1).
     // 关键: timestamp << deliveredAt 让 cursor=oldest.timestamp 跳到老 send-time。
-    messageStore.append({
+    const redelivered = messageStore.append({
       userId: 'system',
       catId: null,
       content: '[Re-delivered] queued 2h ago, just delivered',
       mentions: [],
       timestamp: baseTs - 2 * 60 * 60 * 1000, // OLD send-time (2h ago)
-      deliveredAt: baseTs - 60 * 1000, // score = now-60s
+      deliveryStatus: 'queued',
       threadId: 't_z16_xpage',
     });
+    messageStore.markDelivered(redelivered.id, baseTs - 60 * 1000); // score = now-60s
     // msg 3-51: 49 条 cat msgs，score 都比 msg 2 新 (now-50s..now-1s)。
     // 让 page 1 (top 50 by score) = [msg2, msg3, ..., msg51]，page[0] = msg2 (re-delivered)。
     for (let i = 0; i < 49; i += 1) {

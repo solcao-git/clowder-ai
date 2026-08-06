@@ -21,6 +21,7 @@ export interface McpConfigModalProps {
   editId?: string;
   editData?: McpEditData;
   readOnly?: boolean;
+  hasProjectOverride?: boolean;
   tools?: McpTool[];
   onSaved: () => void;
   onClose: () => void;
@@ -126,6 +127,7 @@ export function McpConfigModal({
   editId,
   editData,
   readOnly = false,
+  hasProjectOverride = false,
   tools: initialTools,
   onSaved,
   onClose,
@@ -175,43 +177,57 @@ export function McpConfigModal({
     });
   }, [args, command, editData?.resolver, envPairs, headers, id, isEdit, projectPath, transport, url]);
 
+  /** Fire a probe request. Empty body → server reads persisted config from capabilities.json. */
+  const doProbe = useCallback(
+    async (probeBody: Record<string, unknown>) => {
+      if (!id.trim()) return;
+      setProbeLoading(true);
+      setProbeError(null);
+      try {
+        const res = await apiFetch(`/api/mcp/${encodeURIComponent(id)}/tools`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(probeBody),
+        });
+        const data = (await res.json()) as {
+          tools?: McpTool[];
+          connectionStatus?: ProbeConnectionStatus;
+          error?: string;
+        };
+        setProbeTools(data.tools ?? []);
+        setProbeStatus(data.connectionStatus ?? 'unknown');
+        if (data.error) setProbeError(data.error);
+      } catch {
+        setProbeError('探测请求失败');
+        setProbeStatus('error');
+      } finally {
+        setProbeLoading(false);
+      }
+    },
+    [id],
+  );
+
   // Probe tools using the current form values (ad-hoc, no save required).
   const handleProbeTools = useCallback(async () => {
-    if (!id.trim()) return;
-    setProbeLoading(true);
-    setProbeError(null);
-    try {
-      const probeBody = buildProbeBody(transport, command, args, url, headers, envPairs, projectPath);
-      const res = await apiFetch(`/api/mcp/${encodeURIComponent(id)}/tools`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(probeBody),
-      });
-      const data = (await res.json()) as {
-        tools?: McpTool[];
-        connectionStatus?: ProbeConnectionStatus;
-        error?: string;
-      };
-      setProbeTools(data.tools ?? []);
-      setProbeStatus(data.connectionStatus ?? 'unknown');
-      if (data.error) setProbeError(data.error);
-    } catch {
-      setProbeError('探测请求失败');
-      setProbeStatus('error');
-    } finally {
-      setProbeLoading(false);
+    if (readOnly) {
+      await doProbe(projectPath ? { projectPath } : {});
+      return;
     }
-  }, [args, command, envPairs, headers, id, projectPath, transport, url]);
+    await doProbe(buildProbeBody(transport, command, args, url, headers, envPairs, projectPath));
+  }, [args, command, doProbe, envPairs, headers, projectPath, readOnly, transport, url]);
 
-  // Auto-probe on mount for edit mode (existing MCP).
+  // Auto-probe on mount: use persisted config (empty body) so the server reads
+  // real env values from capabilities.json. Ad-hoc form values would strip
+  // redacted env (all MCP env is redacted in API responses), causing MCPs that
+  // conditionally register tools based on env (e.g. protocol-server) to fail.
   const mountProbed = useRef(false);
   useEffect(() => {
     if (mountProbed.current) return;
     if (isEdit && editId && !initialTools) {
       mountProbed.current = true;
-      void handleProbeTools();
+      void doProbe(projectPath ? { projectPath } : {});
     }
-  }, [editId, handleProbeTools, initialTools, isEdit]);
+  }, [doProbe, editId, initialTools, isEdit, projectPath]);
 
   // Sync externally provided tools (from parent's initial load).
   useEffect(() => {
@@ -278,7 +294,7 @@ export function McpConfigModal({
 
   // F249 §8.3: "恢复全局配置" — clear project override, restore to global config
   const [restoring, setRestoring] = useState(false);
-  const canRestoreGlobal = isEdit && !!projectPath;
+  const canRestoreGlobal = isEdit && !!projectPath && hasProjectOverride && !readOnly;
   const handleRestoreGlobal = useCallback(async () => {
     if (!editId || !projectPath) return;
     setError(null);
@@ -371,24 +387,32 @@ export function McpConfigModal({
             loading={probeLoading}
             connectionStatus={probeStatus}
             error={probeError}
-            onProbe={readOnly ? undefined : handleProbeTools}
+            onProbe={handleProbeTools}
           />
           <McpPreviewSection preview={preview} />
         </div>
-        {!readOnly && (
-          <div className="mt-3 flex items-center justify-between">
-            <div>
-              {canRestoreGlobal && (
-                <button
-                  type="button"
-                  disabled={restoring}
-                  onClick={handleRestoreGlobal}
-                  className="rounded-lg border border-[var(--console-border-soft)] px-3 py-1.5 text-xs text-cafe-muted transition-colors hover:text-cafe-accent disabled:opacity-50"
-                >
-                  {restoring ? '恢复中…' : '恢复全局配置'}
-                </button>
-              )}
-            </div>
+        <div className="mt-3 flex items-center justify-between">
+          <div>
+            {canRestoreGlobal && (
+              <button
+                type="button"
+                disabled={restoring}
+                onClick={handleRestoreGlobal}
+                className="rounded-lg border border-[var(--console-border-soft)] px-3 py-1.5 text-xs text-cafe-muted transition-colors hover:text-cafe-accent disabled:opacity-50"
+              >
+                {restoring ? '恢复中…' : '恢复全局配置'}
+              </button>
+            )}
+          </div>
+          {readOnly ? (
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg bg-[var(--console-border-soft)] px-4 py-1.5 text-xs text-cafe-accent transition-colors hover:bg-[var(--console-border-hover)]"
+            >
+              关闭
+            </button>
+          ) : (
             <McpModalActions
               isEdit={isEdit}
               id={id}
@@ -400,8 +424,8 @@ export function McpConfigModal({
               onPreview={handlePreview}
               onSaveOrInstall={isEdit ? handleSave : handleInstall}
             />
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>,
     document.body,

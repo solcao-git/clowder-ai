@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -28,6 +29,20 @@ async function waitForFile(path, timeoutMs = 2_000) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${path}`);
+}
+
+async function waitForSignal(signal, timeoutMs, message) {
+  let timeout;
+  try {
+    await Promise.race([
+      signal,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function buildApp(options = {}) {
@@ -1112,13 +1127,30 @@ describe('service lifecycle write routes', () => {
   it('keeps startup state while readiness probes fail during a slow detached start', async () => {
     const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
     process.env.DEFAULT_OWNER_USER_ID = 'you';
-    const configs = new Map([['whisper-stt', { installed: true, enabled: false }]]);
+    const configs = new Map([
+      [
+        'whisper-stt',
+        {
+          installed: true,
+          enabled: false,
+          selectedModel: 'mlx-community/whisper-large-v3-turbo',
+        },
+      ],
+    ]);
     let ready = false;
+    let failedReadinessProbes = 0;
+    let resolveReadiness;
+    const readinessObserved = new Promise((resolve) => {
+      resolveReadiness = resolve;
+    });
     const app = await buildApp({
       lifecycle: {
         startupGraceMs: 5,
         startupReadinessTimeoutMs: 250,
         startupProbeIntervalMs: 5,
+        onServiceReady: (event) => {
+          if (event.service.id === 'whisper-stt') resolveReadiness();
+        },
         serviceConfig: {
           get: (id) => configs.get(id) ?? { enabled: false },
           set: (id, patch) => {
@@ -1131,8 +1163,22 @@ describe('service lifecycle write routes', () => {
         readProcessCommand: async () => null,
         runScript: async () => ({ code: null, pid: 4321, output: '' }),
       },
-      fetchHealth: async () =>
-        ready ? { ok: true, status: 200, error: null } : { ok: false, status: undefined, error: 'fetch failed' },
+      fetchHealth: async (_url, service) => {
+        if (ready) {
+          return {
+            ok: true,
+            status: 200,
+            error: null,
+            details: {
+              status: 'ok',
+              model: 'mlx-community/whisper-large-v3-turbo',
+              backend: 'mlx-whisper',
+            },
+          };
+        }
+        if (service.id === 'whisper-stt') failedReadinessProbes += 1;
+        return { ok: false, status: undefined, error: 'fetch failed' };
+      },
     });
     try {
       const startRes = await app.inject({
@@ -1152,22 +1198,20 @@ describe('service lifecycle write routes', () => {
       const starting = JSON.parse(startingRes.payload).services.find((service) => service.id === 'whisper-stt');
       assert.equal(starting.status, 'starting');
       assert.equal(starting.error, null);
+      assert.ok(failedReadinessProbes > 0, 'readiness must fail before the service becomes ready');
 
       ready = true;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        const healthyRes = await app.inject({
-          method: 'GET',
-          url: '/api/services',
-          headers: SESSION_HEADERS,
-        });
-        const healthy = JSON.parse(healthyRes.payload).services.find((service) => service.id === 'whisper-stt');
-        if (healthy.status === 'healthy') {
-          assert.equal(healthy.error, null);
-          return;
-        }
-      }
-      assert.fail('service should become healthy after readiness probe succeeds');
+      await waitForSignal(readinessObserved, 1_000, 'readiness probe did not observe the healthy service');
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const healthyRes = await app.inject({
+        method: 'GET',
+        url: '/api/services',
+        headers: SESSION_HEADERS,
+      });
+      const healthy = JSON.parse(healthyRes.payload).services.find((service) => service.id === 'whisper-stt');
+      assert.equal(healthy.status, 'healthy');
+      assert.equal(healthy.error, null);
     } finally {
       await app.close();
       restoreOwner(previousOwner);
@@ -1232,6 +1276,132 @@ describe('service lifecycle write routes', () => {
         }
       }
       assert.fail('service ready hook should fire after readiness probe succeeds');
+    } finally {
+      await app.close();
+      restoreOwner(previousOwner);
+    }
+  });
+
+  it('keeps service status starting until the ready hook finishes reconciliation', async () => {
+    const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
+    process.env.DEFAULT_OWNER_USER_ID = 'you';
+    const configs = new Map([['embedding-model', { installed: true, enabled: false, selectedModel: 'test-model' }]]);
+    let releaseHook = () => {};
+    const hookFinished = new Promise((resolve) => {
+      releaseHook = resolve;
+    });
+    let hookStartedResolve = () => {};
+    const hookStarted = new Promise((resolve) => {
+      hookStartedResolve = resolve;
+    });
+    const app = await buildApp({
+      lifecycle: {
+        startupGraceMs: 1_000,
+        startupReadinessTimeoutMs: 250,
+        startupProbeIntervalMs: 5,
+        onServiceReady: async () => {
+          hookStartedResolve();
+          await hookFinished;
+        },
+        serviceConfig: {
+          get: (id) => configs.get(id) ?? { enabled: false },
+          set: (id, patch) => {
+            const updated = { ...(configs.get(id) ?? { enabled: false }), ...patch };
+            configs.set(id, updated);
+            return updated;
+          },
+        },
+        findPidsByPort: async () => [],
+        readProcessCommand: async () => null,
+        runScript: async () => ({ code: null, pid: 4321, output: '' }),
+      },
+      fetchHealth: async () => ({ ok: true, status: 200, error: null }),
+    });
+    try {
+      const start = await app.inject({
+        method: 'POST',
+        url: '/api/services/embedding-model/start',
+        headers: SESSION_HEADERS,
+      });
+      assert.equal(start.statusCode, 200, start.payload);
+      await hookStarted;
+
+      const during = await app.inject({ method: 'GET', url: '/api/services', headers: SESSION_HEADERS });
+      const duringService = JSON.parse(during.payload).services.find((service) => service.id === 'embedding-model');
+      assert.equal(duringService.status, 'starting');
+
+      releaseHook();
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const after = await app.inject({ method: 'GET', url: '/api/services', headers: SESSION_HEADERS });
+        const afterService = JSON.parse(after.payload).services.find((service) => service.id === 'embedding-model');
+        if (afterService.status === 'healthy') return;
+      }
+      assert.fail('service should leave starting only after reconciliation finishes');
+    } finally {
+      releaseHook();
+      await app.close();
+      restoreOwner(previousOwner);
+    }
+  });
+
+  it('fires the service unavailable hook after stop, disable, and uninstall', async () => {
+    const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
+    process.env.DEFAULT_OWNER_USER_ID = 'you';
+    const configs = new Map([['embedding-model', { installed: true, enabled: true }]]);
+    const unavailableEvents = [];
+    const app = await buildApp({
+      lifecycle: {
+        onServiceUnavailable: (event) => {
+          unavailableEvents.push({
+            serviceId: event.service.id,
+            operator: event.operator,
+            reason: event.reason,
+          });
+        },
+        serviceConfig: {
+          get: (id) => configs.get(id) ?? { enabled: false },
+          set: (id, patch) => {
+            const updated = { ...(configs.get(id) ?? { enabled: false }), ...patch };
+            configs.set(id, updated);
+            return updated;
+          },
+        },
+        findPidsByPort: async () => [],
+        readProcessCommand: async () => null,
+        runScript: async () => ({ code: 0, output: 'ok' }),
+      },
+    });
+    try {
+      const stop = await app.inject({
+        method: 'POST',
+        url: '/api/services/embedding-model/stop',
+        headers: SESSION_HEADERS,
+      });
+      assert.equal(stop.statusCode, 200, stop.payload);
+
+      configs.set('embedding-model', { installed: true, enabled: true });
+      const disable = await app.inject({
+        method: 'POST',
+        url: '/api/services/embedding-model/toggle',
+        headers: SESSION_HEADERS,
+        payload: { enabled: false },
+      });
+      assert.equal(disable.statusCode, 200, disable.payload);
+
+      configs.set('embedding-model', { installed: true, enabled: true });
+      const uninstall = await app.inject({
+        method: 'POST',
+        url: '/api/services/embedding-model/uninstall',
+        headers: SESSION_HEADERS,
+      });
+      assert.equal(uninstall.statusCode, 200, uninstall.payload);
+
+      assert.deepEqual(unavailableEvents, [
+        { serviceId: 'embedding-model', operator: 'you', reason: 'stop' },
+        { serviceId: 'embedding-model', operator: 'you', reason: 'disabled' },
+        { serviceId: 'embedding-model', operator: 'you', reason: 'uninstall' },
+      ]);
     } finally {
       await app.close();
       restoreOwner(previousOwner);
@@ -1883,6 +2053,56 @@ describe('service lifecycle write routes', () => {
     }
   });
 
+  it(
+    'binds detached sidecar stdout and stderr directly to the durable service log',
+    { skip: process.platform === 'win32' },
+    async () => {
+      const logDir = mkdtempSync(join(tmpdir(), 'service-log-'));
+      const previousLogDir = process.env.LOG_DIR;
+      process.env.LOG_DIR = logDir;
+      const dir = mkdtempSync(join(tmpdir(), 'service-start-'));
+      const script = join(dir, 'long-running.sh');
+      writeFileSync(script, '#!/usr/bin/env bash\necho "sidecar online"\nsleep 30\n', { mode: 0o755 });
+      writeFileSync(join(logDir, 'whisper-stt.log'), 'stale failure from prior run\n');
+      chmodSync(script, 0o755);
+      let result;
+      try {
+        result = await runServiceScript({
+          serviceId: 'whisper-stt',
+          action: 'start',
+          scriptPath: script,
+          detached: true,
+          timeoutMs: 10_000,
+        });
+
+        assert.equal(typeof result.pid, 'number');
+        assert.match(result.output, /sidecar online/);
+        assert.doesNotMatch(result.output, /stale failure from prior run/);
+        const fdTruth = execFileSync('lsof', ['-a', '-p', String(result.pid), '-d', '1,2', '-Fn'], {
+          encoding: 'utf8',
+        });
+        const durableLog = realpathSync(join(logDir, 'whisper-stt.log'));
+        assert.equal(
+          fdTruth.split('\n').filter((line) => line === `n${durableLog}`).length,
+          2,
+          `stdout/stderr must both be durable log fds, got:\n${fdTruth}`,
+        );
+      } finally {
+        if (typeof result?.pid === 'number') {
+          try {
+            process.kill(-result.pid, 'SIGTERM');
+          } catch {
+            // child may already have exited
+          }
+        }
+        if (previousLogDir === undefined) delete process.env.LOG_DIR;
+        else process.env.LOG_DIR = previousLogDir;
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(logDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('records the runner invocation and clean early exit in service logs', async () => {
     const logDir = mkdtempSync(join(tmpdir(), 'service-log-'));
     const previousLogDir = process.env.LOG_DIR;
@@ -1969,6 +2189,100 @@ describe('service lifecycle write routes', () => {
 
       assert.equal(res.statusCode, 200, res.payload);
       assert.deepEqual(killed, [{ pid: 5151, signal: 'SIGTERM' }]);
+    } finally {
+      await app.close();
+      restoreOwner(previousOwner);
+    }
+  });
+
+  it('waits for exact PID exit and escalates a stubborn process to SIGKILL', async () => {
+    const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
+    process.env.DEFAULT_OWNER_USER_ID = 'you';
+    const killed = [];
+    let alive = true;
+    const configs = new Map([['whisper-stt', { installed: true, enabled: true }]]);
+    const resolvedScript = resolveServiceScriptPath('scripts/services/whisper-server.sh');
+    const app = await buildApp({
+      lifecycle: {
+        serviceConfig: {
+          get: (id) => configs.get(id),
+          set: (id, patch) => {
+            const next = { ...(configs.get(id) ?? {}), ...patch };
+            configs.set(id, next);
+            return next;
+          },
+        },
+        findPidsByPort: async () => [5151],
+        readProcessCommand: async () => `/bin/bash ${resolvedScript}`,
+        killPid: (pid, signal) => {
+          killed.push({ pid, signal });
+          if (signal === 'SIGKILL') alive = false;
+        },
+        isProcessAlive: async () => alive,
+        shutdownGraceMs: 5,
+        shutdownKillGraceMs: 5,
+        shutdownPollMs: 1,
+      },
+    });
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/services/whisper-stt/stop',
+        headers: SESSION_HEADERS,
+      });
+
+      assert.equal(res.statusCode, 200, res.payload);
+      assert.deepEqual(killed, [
+        { pid: 5151, signal: 'SIGTERM' },
+        { pid: 5151, signal: 'SIGKILL' },
+      ]);
+      assert.equal(configs.get('whisper-stt').enabled, false);
+      assert.deepEqual(JSON.parse(res.payload).escalated, [5151]);
+    } finally {
+      await app.close();
+      restoreOwner(previousOwner);
+    }
+  });
+
+  it('does not claim success or disable config when a PID survives SIGKILL', async () => {
+    const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
+    process.env.DEFAULT_OWNER_USER_ID = 'you';
+    const killed = [];
+    const configs = new Map([['whisper-stt', { installed: true, enabled: true }]]);
+    const resolvedScript = resolveServiceScriptPath('scripts/services/whisper-server.sh');
+    const app = await buildApp({
+      lifecycle: {
+        serviceConfig: {
+          get: (id) => configs.get(id),
+          set: (id, patch) => {
+            const next = { ...(configs.get(id) ?? {}), ...patch };
+            configs.set(id, next);
+            return next;
+          },
+        },
+        findPidsByPort: async () => [5151],
+        readProcessCommand: async () => `/bin/bash ${resolvedScript}`,
+        killPid: (pid, signal) => killed.push({ pid, signal }),
+        isProcessAlive: async () => true,
+        shutdownGraceMs: 5,
+        shutdownKillGraceMs: 5,
+        shutdownPollMs: 1,
+      },
+    });
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/services/whisper-stt/stop',
+        headers: SESSION_HEADERS,
+      });
+
+      assert.equal(res.statusCode, 502, res.payload);
+      assert.deepEqual(killed, [
+        { pid: 5151, signal: 'SIGTERM' },
+        { pid: 5151, signal: 'SIGKILL' },
+      ]);
+      assert.equal(configs.get('whisper-stt').enabled, true);
+      assert.deepEqual(JSON.parse(res.payload).failed, [5151]);
     } finally {
       await app.close();
       restoreOwner(previousOwner);
@@ -2707,6 +3021,7 @@ describe('deep health probe (zombie detection)', () => {
           killed.push({ pid, signal });
           if (pid === 55852) zombieAlive.value = false;
         },
+        isProcessAlive: (pid) => pid === 55852 && zombieAlive.value,
         runScript: async () => {
           scriptRan = true;
           return { code: 0, output: 'started' };

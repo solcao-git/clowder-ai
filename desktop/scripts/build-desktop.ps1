@@ -224,30 +224,54 @@ if (-not $reuseBundled) {
 }
 
 $bundledRedis = Join-Path (Join-Path $ProjectRoot "bundled") "redis"
-if (Test-Path (Join-Path $bundledRedis "redis-server.exe")) {
+$redisBin = Join-Path $bundledRedis "redis-server.exe"
+if (Test-Path $redisBin) {
     Write-Ok "Redis portable already present"
 } else {
     New-Item -ItemType Directory -Path $bundledRedis -Force | Out-Null
     Write-Host "  Downloading Redis for Windows..."
     $headers = @{ "User-Agent" = "ClowderAI-Build" }
+    # Use GITHUB_TOKEN when available (CI) to avoid API rate-limit (60 req/hr unauthenticated).
+    if ($env:GITHUB_TOKEN) {
+        $headers["Authorization"] = "Bearer $($env:GITHUB_TOKEN)"
+    }
     $releaseApi = "https://api.github.com/repos/redis-windows/redis-windows/releases/latest"
-    try {
-        $release = Invoke-RestMethod -Uri $releaseApi -Headers $headers -TimeoutSec 30
-        $asset = $release.assets | Where-Object { $_.name -match "^Redis-.*-Windows-x64-msys2\.zip$" } | Select-Object -First 1
-        if (-not $asset) { Write-Err "No Redis Windows asset found"; exit 1 }
-        $zipPath = Join-Path $bundledRedis "redis-windows.zip"
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers $headers -UseBasicParsing -TimeoutSec 120
-        $extractDir = Join-Path $bundledRedis "_extract"
-        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
-        $innerDir = Get-ChildItem -Path $extractDir -Directory | Select-Object -First 1
-        if ($innerDir) {
-            Get-ChildItem -Path $innerDir.FullName | Move-Item -Destination $bundledRedis -Force
+    # P1-3: Retry up to 3 times, then fail-closed in CI (release builds must include Redis).
+    $redisDownloaded = $false
+    for ($redisAttempt = 1; $redisAttempt -le 3; $redisAttempt++) {
+        if ($redisAttempt -gt 1) {
+            Write-Host "  Retry $redisAttempt/3 for Redis download..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
         }
-        Remove-Item $extractDir -Recurse -Force
-        Remove-Item $zipPath -Force
-        Write-Ok "Redis portable bundled ($($asset.name))"
-    } catch {
-        Write-Warn "Redis download failed — installer will use memory store or system Redis"
+        try {
+            $release = Invoke-RestMethod -Uri $releaseApi -Headers $headers -TimeoutSec 30
+            $asset = $release.assets | Where-Object { $_.name -match "^Redis-.*-Windows-x64-msys2\.zip$" } | Select-Object -First 1
+            if (-not $asset) { throw "No Redis Windows asset found in release" }
+            $zipPath = Join-Path $bundledRedis "redis-windows.zip"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -Headers $headers -UseBasicParsing -TimeoutSec 120
+            $extractDir = Join-Path $bundledRedis "_extract"
+            Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+            $innerDir = Get-ChildItem -Path $extractDir -Directory | Select-Object -First 1
+            if ($innerDir) {
+                Get-ChildItem -Path $innerDir.FullName | Move-Item -Destination $bundledRedis -Force
+            }
+            Remove-Item $extractDir -Recurse -Force
+            Remove-Item $zipPath -Force
+            $redisDownloaded = $true
+            Write-Ok "Redis portable bundled ($($asset.name))"
+            break
+        } catch {
+            Write-Warn "Redis download attempt $redisAttempt failed: $_"
+        }
+    }
+    if (-not $redisDownloaded) {
+        Write-Err "Redis download failed after 3 attempts — any publishable installer must include Redis"
+        exit 1
+    }
+    # Verify redis-server.exe actually landed (guards against corrupt/empty archives)
+    if ($redisDownloaded -and -not (Test-Path $redisBin)) {
+        Write-Err "Redis extraction succeeded but redis-server.exe not found in $bundledRedis"
+        exit 1
     }
 }
 
@@ -498,7 +522,8 @@ if (-not $SkipPortableZip) {
     Copy-ToStaging (Join-Path $ProjectRoot "guides") "guides"
 
     # Plugin manifests/resources — PluginRegistry scans this tree at runtime.
-    Copy-ToStaging (Join-Path $ProjectRoot "plugins") "plugins"
+    # F204 moved plugins from root plugins/ into packages/api/src/plugins/.
+    Copy-ToStaging (Join-Path $ProjectRoot "packages\api\src\plugins") "plugins"
 
     # Agent CLI hook templates
     $hooksSource = Join-Path $ProjectRoot ".claude\hooks\user-level"
@@ -513,19 +538,17 @@ if (-not $SkipPortableZip) {
     # Desktop assets
     Copy-ToStaging (Join-Path (Join-Path $ProjectRoot "desktop") "assets") "desktop\assets"
 
-    # Desktop package.json — version source for generate-desktop-config.ps1.
-    # Bake the resolved $zipVersion (which honours CATCAFE_VERSION override)
-    # into the staged copy so portable first-run config always matches the
-    # archive name. Without this, a manual CATCAFE_VERSION override would
-    # produce a zip named X but a desktop-config.json recording Y. (#1107)
+    # The portable launcher resolves its config version from desktop/package.json.
+    # Bake the final release version into the staged copy so CATCAFE_VERSION
+    # overrides cannot make the archive name and desktop-config.json disagree.
     $desktopPkg = Join-Path (Join-Path $ProjectRoot "desktop") "package.json"
     if (Test-Path $desktopPkg) {
         $desktopDir = Join-Path $staging "desktop"
-        if (-not (Test-Path $desktopDir)) { New-Item -ItemType Directory -Path $desktopDir -Force | Out-Null }
+        if (-not (Test-Path $desktopDir)) {
+            New-Item -ItemType Directory -Path $desktopDir -Force | Out-Null
+        }
         $pkgContent = Get-Content $desktopPkg -Raw | ConvertFrom-Json
         $pkgContent.version = $zipVersion
-        # Write UTF-8 without BOM — same fix as generate-desktop-config.ps1.
-        # Windows PowerShell 5.1's -Encoding utf8 emits a BOM that breaks JSON.parse.
         $json = $pkgContent | ConvertTo-Json -Depth 10
         [System.IO.File]::WriteAllText((Join-Path $desktopDir "package.json"), $json, (New-Object System.Text.UTF8Encoding $false))
     }

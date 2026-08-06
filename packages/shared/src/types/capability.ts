@@ -45,6 +45,8 @@ export type McpTransport = 'stdio' | 'streamableHttp';
 export interface McpServerDescriptor {
   /** MCP server name (e.g. 'cat-cafe', 'filesystem') */
   name: string;
+  /** Original capability ID used to prove ownership of managed name migrations. */
+  capabilityId?: string;
   /** Transport type (default: 'stdio'). TD104: 'streamableHttp' for URL-based servers. */
   transport?: McpTransport;
   /** Optional local resolver hint for machine-specific stdio servers (e.g. pencil). */
@@ -63,8 +65,8 @@ export interface McpServerDescriptor {
   enabled: boolean;
   /** Optional working directory */
   workingDir?: string;
-  /** Origin: Clowder AI's own MCP or user-configured external */
-  source: 'cat-cafe' | 'external';
+  /** Origin: Clowder AI's own MCP, plugin-provided, or user-configured external */
+  source: 'cat-cafe' | 'external' | 'plugin';
 }
 
 /** Per-cat override for a capability */
@@ -96,9 +98,9 @@ export interface CapabilityEntry {
    */
   overrides?: CatCapabilityOverride[];
   /** MCP server descriptor (only for type: 'mcp') */
-  mcpServer?: Omit<McpServerDescriptor, 'name' | 'enabled' | 'source'>;
-  /** Source origin */
-  source: 'cat-cafe' | 'external';
+  mcpServer?: Omit<McpServerDescriptor, 'name' | 'capabilityId' | 'enabled' | 'source'>;
+  /** Source origin: cat-cafe = built-in managed, external = user-installed, plugin = plugin-installed */
+  source: 'cat-cafe' | 'external' | 'plugin';
   /**
    * F228: Mount point IDs where this skill is actually mounted in the current project.
    * Only for type: 'skill'. Values are mount point IDs from mountRules (e.g. 'claude', 'codex').
@@ -132,7 +134,7 @@ export interface CapabilityEntry {
    * Absent = use global mcpServer.
    * Only meaningful for type: 'mcp' in project-level capabilities.json.
    */
-  mcpServerOverride?: Omit<McpServerDescriptor, 'name' | 'enabled' | 'source'>;
+  mcpServerOverride?: Omit<McpServerDescriptor, 'name' | 'capabilityId' | 'enabled' | 'source'>;
   /**
    * Which external config file this MCP was discovered from.
    * e.g. "claude-project", "codex-user", "gemini-user", "kimi-project".
@@ -215,7 +217,7 @@ export interface CapabilitySkillMountHealth {
 export interface CapabilityBoardItem {
   id: string;
   type: 'mcp' | 'skill' | 'limb';
-  source: 'cat-cafe' | 'external';
+  source: 'cat-cafe' | 'external' | 'plugin';
   enabled: boolean;
   /** F228: Global enabled for skills (mirrors CapabilityEntry.globalEnabled in board response) */
   globalEnabled?: boolean;
@@ -480,7 +482,7 @@ export interface CapabilityPatchRequest {
   /** Capability type — required to disambiguate same-name MCP/skill entries */
   capabilityType: 'mcp' | 'skill' | 'limb';
   /** Optional source discriminator for same-name capability rows returned by GET. */
-  source?: 'cat-cafe' | 'external';
+  source?: 'cat-cafe' | 'external' | 'plugin';
   /** Optional plugin discriminator for plugin-owned same-name rows returned by GET. */
   pluginId?: string;
   /**

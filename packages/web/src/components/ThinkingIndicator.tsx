@@ -2,6 +2,7 @@
 
 import { useCatData } from '@/hooks/useCatData';
 import { useThreadLiveness } from '@/hooks/useThreadScopedSelectors';
+import { resolveCatDisplayName } from '@/lib/cat-display-name';
 import type { CatStatusType, LivenessWarningSnapshot } from '@/stores/chat-types';
 import { useChatStore } from '@/stores/chatStore';
 
@@ -11,6 +12,16 @@ function formatDuration(ms: number): string {
   const sec = totalSec % 60;
   if (min > 0) return `${min}m ${sec}s`;
   return `${sec}s`;
+}
+
+function livenessDetail(warning: LivenessWarningSnapshot, fallback: string): string {
+  if (warning.firstEventAt === null) {
+    return 'CLI 进程已启动，但尚未返回任何事件；可能卡在客户端初始化';
+  }
+  if (warning.lastEventType === 'turn.started' || warning.lastEventType === 'thread.started') {
+    return 'CLI 已开始回合，但之后没有模型或工具事件；可能卡在客户端初始化或上游连接';
+  }
+  return fallback;
 }
 
 /** Lucide timer icon (inline SVG to avoid emoji per design spec) */
@@ -95,8 +106,7 @@ export function ThinkingIndicator({ onCancel, threadId }: ThinkingIndicatorProps
   const status: CatStatusType = catStatuses[catId] ?? 'pending';
   if (status === 'done') return null;
 
-  const catData = getCatById(catId);
-  const name = catData?.displayName ?? catId;
+  const name = resolveCatDisplayName(catId, getCatById);
   const warning: LivenessWarningSnapshot | undefined = catInvocations?.[catId]?.livenessWarning;
 
   // F118 D2: spawning — CLI not yet connected, earliest signal
@@ -140,9 +150,12 @@ export function ThinkingIndicator({ onCancel, threadId }: ThinkingIndicatorProps
                 {name} 静默等待中… {elapsed}
               </span>
               <span className="text-xs" style={{ color: 'var(--cafe-text-secondary)' }}>
-                {warning.state === 'busy-silent'
-                  ? '进程存活且 CPU 活跃，可能正在执行工具或等待 API 响应'
-                  : '进程存活，等待响应中'}
+                {livenessDetail(
+                  warning,
+                  warning.state === 'busy-silent'
+                    ? '进程存活且 CPU 活跃，可能正在执行工具或等待 API 响应'
+                    : '进程存活，等待响应中',
+                )}
               </span>
             </div>
           </div>
@@ -183,9 +196,12 @@ export function ThinkingIndicator({ onCancel, threadId }: ThinkingIndicatorProps
                 {name} 可能卡住了 — {elapsed} 无输出
               </span>
               <span className="text-xs" style={{ color: 'var(--cafe-text-secondary)' }}>
-                {warning.state === 'idle-silent'
-                  ? '进程存活但 CPU 平坦，未检测到工具执行或 API 活动'
-                  : '进程可能无响应'}
+                {livenessDetail(
+                  warning,
+                  warning.state === 'idle-silent'
+                    ? '进程存活但 CPU 平坦，未检测到工具执行或 API 活动'
+                    : '进程可能无响应',
+                )}
               </span>
             </div>
           </div>

@@ -103,6 +103,58 @@ describe('library register + rebuild endpoints', () => {
     assert.equal(body.indexed, 2);
   });
 
+  it('POST /rebuild reads an embedding service activated after route registration', async () => {
+    const lateCatalog = new LibraryCatalog();
+    const lateStores = new Map();
+    const lateDataDir = mkdtempSync(join(tmpdir(), 'lib-api-late-embed-'));
+    const lateApp = Fastify();
+    let embeddingService;
+    await lateApp.register(libraryRoutes, {
+      catalog: lateCatalog,
+      stores: lateStores,
+      dataDir: lateDataDir,
+      getEmbeddingService: () => embeddingService,
+      getEmbedMode: () => 'on',
+    });
+    await lateApp.ready();
+
+    const dir = mkdtempSync(join(tmpdir(), 'rebuild-late-embed-'));
+    writeFileSync(join(dir, 'a.md'), '# Alpha\n\nLate embedding activation.');
+    try {
+      const register = await lateApp.inject({
+        method: 'POST',
+        url: '/api/library/register',
+        payload: {
+          id: 'domain:late-embed',
+          kind: 'domain',
+          name: 'late-embed',
+          displayName: 'Late Embed',
+          root: dir,
+          sensitivity: 'internal',
+          scannerLevel: 1,
+        },
+      });
+      assert.equal(register.statusCode, 200, register.payload);
+
+      embeddingService = {
+        isReady: () => true,
+        reprobeIfNeeded: async () => {},
+        embed: async (texts) => texts.map(() => new Float32Array([1, 0, 0, 0])),
+        getModelInfo: () => ({ modelId: 'test-model', modelRev: 'test', dim: 4 }),
+      };
+      const rebuild = await lateApp.inject({
+        method: 'POST',
+        url: '/api/library/domain:late-embed/rebuild',
+      });
+      assert.equal(rebuild.statusCode, 200, rebuild.payload);
+      const db = lateStores.get('domain:late-embed').getDb();
+      assert.equal(db.prepare('SELECT count(*) AS c FROM evidence_vectors').get().c, 1);
+    } finally {
+      for (const store of lateStores.values()) store.close?.();
+      await lateApp.close();
+    }
+  });
+
   it('POST /rebuild returns 404 for unknown collection', async () => {
     const res = await app.inject({ method: 'POST', url: '/api/library/world:unknown/rebuild' });
     assert.equal(res.statusCode, 404);
@@ -410,5 +462,75 @@ describe('library register + rebuild endpoints', () => {
       payload: { force: true },
     });
     assert.equal(JSON.parse(res3.body).indexed, 1, 'with force, file should be re-indexed');
+  });
+
+  it('POST /rebuild delegates built-in project collection to the primary IndexBuilder', async () => {
+    await app.close();
+
+    const dir = mkdtempSync(join(tmpdir(), 'builtin-project-'));
+    writeFileSync(join(dir, 'safe.md'), '# Safe\n\nNormal project doc.');
+    writeFileSync(join(dir, 'secret-shaped.md'), '# Example\n\ntoken: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij\n');
+
+    const { SqliteEvidenceStore } = await import('../../dist/domains/memory/SqliteEvidenceStore.js');
+    const dbPath = join(mkdtempSync(join(tmpdir(), 'builtin-project-db-')), 'evidence.sqlite');
+    const projectStore = new SqliteEvidenceStore(dbPath);
+    await projectStore.initialize();
+
+    const builtinCatalog = new LibraryCatalog();
+    builtinCatalog.register({
+      id: 'project:cat-cafe',
+      kind: 'project',
+      name: 'cat-cafe',
+      displayName: 'Clowder AI Project',
+      root: dir,
+      sensitivity: 'internal',
+      scannerLevel: 0,
+      indexPolicy: { autoRebuild: true },
+      reviewPolicy: { authorityCeiling: 'validated', requireOwnerApproval: false },
+      status: 'registered',
+      createdAt: '2026-07-05',
+      updatedAt: '2026-07-05',
+    });
+
+    let receivedForce = null;
+    const indexBuilder = {
+      async rebuild(options) {
+        receivedForce = options?.force ?? false;
+        return { docsIndexed: 7, docsSkipped: 3, durationMs: 12 };
+      },
+      startPassageEmbeddingWarmup() {},
+      isPassageWarmupActive() {
+        return false;
+      },
+      async incrementalUpdate() {},
+      async checkConsistency() {
+        return { ok: true, docCount: 0, ftsCount: 0, mismatches: [] };
+      },
+    };
+
+    app = Fastify();
+    await app.register(libraryRoutes, {
+      catalog: builtinCatalog,
+      stores: new Map([['project:cat-cafe', projectStore]]),
+      dataDir,
+      indexBuilder,
+    });
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/library/project:cat-cafe/rebuild',
+      payload: { force: true },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(receivedForce, true, 'force flag should pass through to the primary IndexBuilder');
+    assert.deepEqual(JSON.parse(res.body), {
+      indexed: 7,
+      skipped: 3,
+      blocked: false,
+      secretFindings: [],
+    });
+    assert.equal(builtinCatalog.get('project:cat-cafe').status, 'active');
   });
 });

@@ -1,15 +1,18 @@
 'use client';
 
+import type { ExternalReviewAggregate } from '@cat-cafe/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CommunityPanelFilters, TIME_RANGES } from '@/components/CommunityPanelFilters';
 import { ClosureChecklistCard } from '@/components/community/ClosureChecklistCard';
 import { UserAssignIcon } from '@/components/community/community-icons';
 import { DecisionQueuePanel } from '@/components/community/DecisionQueuePanel';
 import type { CommunityDecisionQueueItemModel } from '@/components/community/decision-queue-types';
+import { ExternalReviewStatus } from '@/components/community/ExternalReviewStatus';
 import { ReconciliationFindingCard } from '@/components/community/ReconciliationFindingCard';
 import { PR_ICON, TYPE_ICONS } from '@/components/community-panel-icons';
 import { DirectionCard, type DirectionCardProps } from '@/components/DirectionCard';
 import { pushThreadRouteWithHistory } from '@/components/ThreadSidebar/thread-navigation';
+import { useCatNameResolver } from '@/hooks/useCatNameResolver';
 
 function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
@@ -52,6 +55,7 @@ interface PrBoardItem {
   author?: string;
   replyState?: string;
   updatedAt: number;
+  externalReview?: ExternalReviewAggregate | null;
 }
 
 interface BoardData {
@@ -164,6 +168,7 @@ function IssueRow({
   ) => Promise<void>;
   onRefresh: () => void;
 }) {
+  const resolveCatName = useCatNameResolver();
   const color = ISSUE_STATE_COLORS[item.state] ?? 'text-cafe-muted';
   const icon = TYPE_ICONS[item.issueType] ?? TYPE_ICONS.question;
   const hasDirectionCard =
@@ -204,14 +209,14 @@ function IssueRow({
             className="inline-flex items-center gap-0.5 text-micro text-cafe-accent/80 bg-cafe-accent/5 px-1.5 py-0.5 rounded-full shrink-0"
             title={
               item.assignedThreadName
-                ? `${item.assignedCatId} → ${item.assignedThreadName}`
+                ? `${resolveCatName(item.assignedCatId)} → ${item.assignedThreadName}`
                 : item.assignedThreadId
-                  ? `${item.assignedCatId} → ${item.assignedThreadId}`
-                  : item.assignedCatId
+                  ? `${resolveCatName(item.assignedCatId)} → ${item.assignedThreadId}`
+                  : resolveCatName(item.assignedCatId)
             }
           >
             <UserAssignIcon />
-            <span>{item.assignedCatId}</span>
+            <span>{resolveCatName(item.assignedCatId)}</span>
             {item.assignedThreadName && (
               <>
                 <span className="text-cafe-muted/40">→</span>
@@ -276,6 +281,7 @@ function PrRow({
   repo: string;
   onNavigate: (threadId: string) => void;
 }) {
+  const resolveCatName = useCatNameResolver();
   const color = PR_GROUP_COLORS[item.group] ?? 'text-cafe-muted';
   const handleClick = () => {
     if (item.threadId) onNavigate(item.threadId);
@@ -284,24 +290,27 @@ function PrRow({
     <div
       data-testid={`pr-row-${item.taskId}`}
       onClick={handleClick}
-      className={`flex items-center gap-2 px-3 py-1.5 hover:bg-cafe-surface-elevated/30 text-xs ${item.threadId ? 'cursor-pointer' : 'cursor-default opacity-70'}`}
+      className={`hover:bg-cafe-surface-elevated/30 text-xs ${item.threadId ? 'cursor-pointer' : 'cursor-default opacity-70'}`}
     >
-      <span className={color}>{PR_ICON}</span>
-      {item.prNumber != null && (
-        <a
-          href={`https://github.com/${repo}/pull/${item.prNumber}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="text-cafe-muted text-micro hover:text-cafe-accent hover:underline"
-        >
-          #{item.prNumber}
-        </a>
-      )}
-      <span className="truncate flex-1 text-cafe-secondary">{item.title}</span>
-      {item.author && <span className="text-micro text-cafe-muted">@{item.author}</span>}
-      {item.ownerCatId && <span className="text-micro text-cafe-accent/60">{item.ownerCatId}</span>}
-      <span className="text-micro text-cafe-muted">{relativeTime(item.updatedAt)}</span>
+      <div className="flex items-center gap-2 px-3 py-1.5">
+        <span className={color}>{PR_ICON}</span>
+        {item.prNumber != null && (
+          <a
+            href={`https://github.com/${repo}/pull/${item.prNumber}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-cafe-muted text-micro hover:text-cafe-accent hover:underline"
+          >
+            #{item.prNumber}
+          </a>
+        )}
+        <span className="truncate flex-1 text-cafe-secondary">{item.title}</span>
+        {item.author && <span className="text-micro text-cafe-muted">@{item.author}</span>}
+        {item.ownerCatId && <span className="text-micro text-cafe-accent/60">{resolveCatName(item.ownerCatId)}</span>}
+        <span className="text-micro text-cafe-muted">{relativeTime(item.updatedAt)}</span>
+      </div>
+      <ExternalReviewStatus aggregate={item.externalReview} />
     </div>
   );
 }

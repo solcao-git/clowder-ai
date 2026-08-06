@@ -15,18 +15,19 @@
  *   OpenCode:    temp opencode.json via writeOpenCodeRuntimeConfig + OPENCODE_CONFIG
  *
  * Read adapters (readClaudeMcpConfig, readCodexMcpConfig, etc.) are still used
- * for bootstrap discovery. Write adapters are available for invoke-time writers
- * even when not called from PROVIDER_WRITERS.
+ * for bootstrap discovery. Write adapters only exist for persistent-file providers
+ * (Gemini, Kimi, Antigravity); Claude/Codex writers were removed as dead code.
  */
 
-import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import type { McpServerDescriptor } from '@cat-cafe/shared';
-import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
+import { parse as parseToml } from 'smol-toml';
 import { createModuleLogger } from '../../infrastructure/logger.js';
 import { DEPRECATED_MANAGED_SERVERS, isOurOwnedDeprecatedEntry } from './deprecated-managed-servers.js';
 import { MCP_CALLBACK_ENV_KEYS } from './mcp-constants.js';
+import { isRetiredGithubMcpConfigEntry } from './retired-github-mcp.js';
 
 /**
  * F213 Phase B (2026-05-26): shared L5 cleanup helper for any MCP config writer.
@@ -49,6 +50,14 @@ import { MCP_CALLBACK_ENV_KEYS } from './mcp-constants.js';
  * See ADR-036 amendment 2026-05-26 + `docs/features/F213-stale-mcp-config-cleanup.md`.
  */
 export function applyDeprecatedManagedCleanup(existingServers: Record<string, unknown>, contextLabel: string): void {
+  for (const [serverName, entry] of Object.entries(existingServers)) {
+    if (!isRetiredGithubMcpConfigEntry(serverName, entry)) continue;
+    delete existingServers[serverName];
+    log.warn(
+      { serverName, context: contextLabel },
+      `GitHub MCP retirement [${contextLabel}]: removed retired server '${serverName}'; use canonical gh`,
+    );
+  }
   for (const deprecated of DEPRECATED_MANAGED_SERVERS) {
     const entry = existingServers[deprecated.serverName];
     if (entry === undefined || entry === null) continue;
@@ -68,6 +77,24 @@ export function applyDeprecatedManagedCleanup(existingServers: Record<string, un
         { serverName: deprecated.serverName, context: contextLabel },
         `F213 cleanup [${contextLabel}]: reserved server id '${deprecated.serverName}' shadowed by deprecation registry but kept as user-owned (no known managed marker matched)`,
       );
+    }
+  }
+}
+
+/**
+ * Remove only legacy colon-named plugin entries whose ownership is proven by
+ * the resolved descriptor's original capability ID. Name similarity alone is
+ * insufficient because users may own an unrelated `foo:bar` entry alongside
+ * an external `foo__bar` server.
+ */
+function migrateOwnedPluginNames(
+  existingServers: Record<string, unknown>,
+  servers: readonly McpServerDescriptor[],
+): void {
+  for (const server of servers) {
+    const legacyName = server.capabilityId;
+    if (server.source === 'plugin' && legacyName?.includes(':') && legacyName.replace(/:/g, '__') === server.name) {
+      delete existingServers[legacyName];
     }
   }
 }
@@ -360,112 +387,9 @@ export async function readQoderMcpConfig(filePath: string): Promise<McpServerDes
 }
 
 // ────────── Writers ──────────
-
-/** Write McpServerDescriptor[] → Claude .mcp.json (merge: preserves user's non-managed servers) */
-export async function writeClaudeMcpConfig(filePath: string, servers: McpServerDescriptor[]): Promise<void> {
-  // Read existing to preserve user's own MCP servers
-  const raw = await safeReadFile(filePath);
-  const existing = raw ? safeJsonParse(raw) : null;
-  const existingServers: Record<string, unknown> =
-    existing && typeof existing.mcpServers === 'object' && existing.mcpServers !== null
-      ? { ...(existing.mcpServers as Record<string, unknown>) }
-      : {};
-
-  // F213 Phase B: L5 cleanup of deprecated managed entries before update.
-  applyDeprecatedManagedCleanup(existingServers, 'claude');
-
-  // Update managed entries (only enabled — Claude has no enabled field)
-  for (const s of servers) {
-    if (s.enabled) {
-      if (s.transport === 'streamableHttp' && s.url) {
-        const entry: Record<string, unknown> = { type: 'http', url: s.url };
-        if (s.headers && Object.keys(s.headers).length > 0) entry.headers = s.headers;
-        existingServers[s.name] = entry;
-      } else if (!s.command || s.command.trim().length === 0) {
-        delete existingServers[s.name];
-      } else {
-        const entry: Record<string, unknown> = { command: s.command, args: s.args };
-        const env = ensureWorkspaceEnvForManagedCatCafe(s, s.env);
-        if (env && Object.keys(env).length > 0) entry.env = env;
-        if (s.workingDir) entry.cwd = s.workingDir;
-        existingServers[s.name] = entry;
-      }
-    } else {
-      // Disabled managed server → remove from config (Claude has no enabled field)
-      delete existingServers[s.name];
-    }
-  }
-
-  await ensureDir(filePath);
-  await writeFile(filePath, `${JSON.stringify({ mcpServers: existingServers }, null, 2)}\n`, 'utf-8');
-}
-
-/** Write McpServerDescriptor[] → Codex .codex/config.toml (merge: preserves user's non-managed servers) */
-export async function writeCodexMcpConfig(filePath: string, servers: McpServerDescriptor[]): Promise<void> {
-  // Read existing config to preserve non-MCP sections AND user's MCP servers
-  const raw = await safeReadFile(filePath);
-  let existing: Record<string, unknown> = {};
-  if (raw) {
-    try {
-      existing = parseToml(raw) as Record<string, unknown>;
-    } catch {
-      // corrupted file; start fresh
-    }
-  }
-
-  // Get existing MCP servers (user's + old managed)
-  const existingMcp: Record<string, Record<string, unknown>> = existing.mcp_servers &&
-  typeof existing.mcp_servers === 'object'
-    ? { ...(existing.mcp_servers as Record<string, Record<string, unknown>>) }
-    : {};
-
-  // F213 Phase A/B (2026-05-26): L5 selective cleanup of deprecated managed
-  // entries. See `applyDeprecatedManagedCleanup` above + ADR-036 amendment.
-  applyDeprecatedManagedCleanup(existingMcp, 'codex');
-
-  // Codex TOML has no `cwd` field. If the CLI's cwd differs from the project
-  // root, relative args (e.g. "packages/mcp-server/dist/protocol-server.js")
-  // break silently. Resolve relative args to absolute paths as a safety net.
-  // Project root = parent of the .codex/ directory that contains this config.
-  const projectRoot = resolve(dirname(filePath), '..');
-
-  // Update/add only managed entries; preserve user's own servers
-  for (const s of servers) {
-    // Skip URL-based servers — Codex only supports stdio transport.
-    // Also skip entries without a usable stdio command to avoid invalid TOML.
-    if (s.transport === 'streamableHttp' || !s.command || s.command.trim().length === 0) {
-      delete existingMcp[s.name];
-      continue;
-    }
-
-    // Disabled managed server → remove from TOML. Mirrors writeClaudeMcpConfig
-    // (Claude has no enabled field so it deletes unconditionally). For Codex,
-    // we only delete managed entries (source='cat-cafe') to preserve user-owned
-    // servers the user may have manually disabled. Leaving stale disabled managed
-    // entries in TOML causes discovery to re-import them as source:"external"
-    // orphans, blocking plugin re-enable (the "non-plugin entry" error).
-    if (!s.enabled && s.source === 'cat-cafe') {
-      delete existingMcp[s.name];
-      continue;
-    }
-
-    // Resolve relative command/args to absolute for Codex (no cwd support in TOML).
-    const workingDir = resolveMcpWorkingDir(s.workingDir, projectRoot);
-    const command = resolveCodexMcpCommand(s.command, workingDir, projectRoot);
-    const resolvedArgs = s.args.map((arg) => resolveCodexMcpArg(arg, workingDir, projectRoot));
-
-    const entry: Record<string, unknown> = { command, args: resolvedArgs };
-    const env = ensureWorkspaceEnvForManagedCatCafe(s, s.env);
-    if (env && Object.keys(env).length > 0) entry.env = env;
-    entry.enabled = s.enabled;
-    if (s.source === 'cat-cafe') entry.default_tools_approval_mode = 'approve';
-    existingMcp[s.name] = entry;
-  }
-
-  existing.mcp_servers = existingMcp;
-  await ensureDir(filePath);
-  await writeFile(filePath, `${stringifyToml(existing)}\n`, 'utf-8');
-}
+// NOTE: Claude and Codex use invoke-time CLI injection (--mcp-config / --config)
+// — persistent file writers were removed as dead code. Only Gemini, Kimi, and
+// Antigravity still need persistent config files.
 
 /** Write McpServerDescriptor[] → Gemini .gemini/settings.json (merge: preserves user's non-managed servers) */
 export async function writeGeminiMcpConfig(filePath: string, servers: McpServerDescriptor[]): Promise<void> {
@@ -485,6 +409,8 @@ export async function writeGeminiMcpConfig(filePath: string, servers: McpServerD
 
   // F213 Phase B: L5 cleanup of deprecated managed entries before update.
   applyDeprecatedManagedCleanup(existingMcp, 'gemini');
+
+  migrateOwnedPluginNames(existingMcp, servers);
 
   // Update/add managed entries; remove disabled managed; preserve user's own
   for (const s of servers) {
@@ -652,6 +578,8 @@ export async function writeAntigravityMcpConfig(filePath: string, servers: McpSe
 
   // F213 Phase B: L5 cleanup of deprecated managed entries before update.
   applyDeprecatedManagedCleanup(existingMcp, 'antigravity');
+
+  migrateOwnedPluginNames(existingMcp, servers);
 
   for (const s of servers) {
     if (s.transport === 'streamableHttp') {

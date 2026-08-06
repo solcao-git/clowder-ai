@@ -1,6 +1,8 @@
 'use client';
 
+import type { MessageWorkDisposition } from '@cat-cafe/shared';
 import { useCallback, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import type { UploadStatus, WhisperOptions } from '@/hooks/useSendMessage';
 import type { DeliveryMode } from '@/stores/chat-types';
 import { type Thread, useChatStore } from '@/stores/chatStore';
@@ -17,7 +19,8 @@ interface SplitPaneViewProps {
     whisper?: WhisperOptions,
     deliveryMode?: DeliveryMode,
     replyToId?: string,
-  ) => void;
+    messageDisposition?: MessageWorkDisposition,
+  ) => void | boolean | Promise<void | boolean>;
   onStop: (overrideThreadId?: string) => void;
   uploadStatus?: UploadStatus;
   uploadError?: string | null;
@@ -33,7 +36,18 @@ const PANE_COUNT = 4;
  */
 export function SplitPaneView({ onSend, onStop, uploadStatus, uploadError, onZoomToThread }: SplitPaneViewProps) {
   const { threads, splitPaneThreadIds, splitPaneTargetId, setSplitPaneTarget, setSplitPaneThreadIds, getThreadState } =
-    useChatStore();
+    useChatStore(
+      useShallow((s) => ({
+        threads: s.threads,
+        splitPaneThreadIds: s.splitPaneThreadIds,
+        splitPaneTargetId: s.splitPaneTargetId,
+        setSplitPaneTarget: s.setSplitPaneTarget,
+        setSplitPaneThreadIds: s.setSplitPaneThreadIds,
+        getThreadState: s.getThreadState,
+      })),
+    );
+  // getThreadState is stable; its results are backed by threadStates.
+  useChatStore((s) => s.threadStates);
 
   const threadMap = new Map<string, Thread>();
   for (const t of threads) threadMap.set(t.id, t);
@@ -144,8 +158,16 @@ export function SplitPaneView({ onSend, onStop, uploadStatus, uploadError, onZoo
             <ChatInput
               key={splitPaneTargetId ?? 'no-target'}
               threadId={splitPaneTargetId ?? undefined}
-              onSend={(content, images, whisper, deliveryMode, replyToId) =>
-                onSend(content, images, splitPaneTargetId ?? undefined, whisper, deliveryMode, replyToId)
+              onSend={(content, images, whisper, deliveryMode, replyToId, messageDisposition) =>
+                onSend(
+                  content,
+                  images,
+                  splitPaneTargetId ?? undefined,
+                  whisper,
+                  deliveryMode,
+                  replyToId,
+                  messageDisposition,
+                )
               }
               onStop={() => onStop(splitPaneTargetId ?? undefined)}
               disabled={!splitPaneTargetId}

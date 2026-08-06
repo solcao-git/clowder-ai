@@ -33,6 +33,11 @@ import {
   writeQoderMcpConfig,
 } from './mcp-config-adapters.js';
 import { CAT_CAFE_SPLIT_ENTRYPOINTS } from './mcp-constants.js';
+import {
+  isRetiredGithubMcpCapability,
+  isRetiredGithubMcpDescriptor,
+  retireGithubMcpCapabilities,
+} from './retired-github-mcp.js';
 
 // #712: Re-export shared MCP constants from mcp-constants.ts (single source of truth).
 // Consumers import from this file for backwards compatibility.
@@ -839,6 +844,7 @@ export async function discoverExternalMcpServersTagged(paths: DiscoveryPaths): P
   // Deduplicate using the same enabled-preference logic as deduplicateDiscoveredMcpServers.
   const byName = new Map<string, TaggedMcpServer>();
   for (const tagged of all) {
+    if (isRetiredGithubMcpDescriptor(tagged.server)) continue;
     const existing = byName.get(tagged.server.name);
     if (!existing || shouldReplaceDiscoveredMcpServer(existing.server, tagged.server)) {
       byName.set(tagged.server.name, tagged);
@@ -1523,7 +1529,8 @@ export function healCatCafeMcpTopology(
   config: CapabilitiesConfig,
   opts?: { catCafeRepoRoot?: string; projectRoot?: string },
 ): { migrated: boolean; config: CapabilitiesConfig } {
-  const a = migrateLegacyCatCafeCapability(config, opts);
+  const retired = retireGithubMcpCapabilities(config);
+  const a = migrateLegacyCatCafeCapability(retired.config, opts);
   // #1049: ensure managed splits AFTER legacy migration (codex review PR #13 P1).
   // Legacy migration converts overrides→blockedCats; running ensureCoreManagedMcps
   // first would skip that conversion, silently re-enabling blocked cats.
@@ -1532,7 +1539,7 @@ export function healCatCafeMcpTopology(
   const c = ensureCatCafeMainServer(b.config, opts);
   const d = realignManagedCatCafeServerPaths(c.config, opts);
   return {
-    migrated: a.migrated || z.migrated || b.migrated || c.migrated || d.migrated,
+    migrated: retired.migrated || a.migrated || z.migrated || b.migrated || c.migrated || d.migrated,
     config: d.config,
   };
 }
@@ -1601,9 +1608,12 @@ export function resolveServersForCat(
   const provider = entry?.config.clientId;
 
   const result: McpServerDescriptor[] = [];
+  /** Track cap.id → encoded name for collision detection. */
+  const nameOrigin = new Map<string, string>();
 
   for (const cap of config.capabilities) {
     if (cap.type !== 'mcp') continue;
+    if (isRetiredGithubMcpCapability(cap)) continue;
 
     // Priority: mcpServerOverride > mcpServer
     const mcpServer = cap.mcpServerOverride ?? cap.mcpServer;
@@ -1618,12 +1628,35 @@ export function resolveServersForCat(
         : hasUsableTransport(mcpServer);
     const enabled = enabledFromConfig && transportSupported;
 
+    // MCP server names must not contain colons — Codex uses `mcp:<name>/<tool>`
+    // convention, so colons in the name break tool resolution. Plugin capability
+    // IDs use `plugin:pluginId:resourceName`; replace `:` with `__` (double
+    // underscore) for the external-facing server name.
+    const name = cap.id.replace(/:/g, '__');
+
+    // Collision guard: reject if a different cap.id already mapped to the same
+    // encoded name (e.g. `plugin:a:b__c` vs `plugin:a:b:c`).
+    const priorCapId = nameOrigin.get(name);
+    if (priorCapId !== undefined && priorCapId !== cap.id) {
+      console.warn(
+        `[resolveServersForCat] MCP name collision: "${cap.id}" and "${priorCapId}" ` +
+          `both encode to "${name}". Skipping duplicate.`,
+      );
+      continue;
+    }
+    nameOrigin.set(name, cap.id);
+
     const desc: McpServerDescriptor = {
-      name: cap.id,
+      name,
+      capabilityId: cap.id,
       command: mcpServer.command,
       args: mcpServer.args ?? [],
       enabled,
-      source: cap.source,
+      // Plugin MCPs are stored as source=cat-cafe + pluginId so capability
+      // governance can distinguish them from user-owned externals. Runtime
+      // descriptors must expose their actual ownership so writers neither
+      // grant built-in-only privileges nor miss plugin name migrations.
+      source: cap.pluginId ? 'plugin' : cap.source,
     };
     if (mcpServer.transport) desc.transport = mcpServer.transport;
     if (mcpServer.resolver) desc.resolver = mcpServer.resolver;

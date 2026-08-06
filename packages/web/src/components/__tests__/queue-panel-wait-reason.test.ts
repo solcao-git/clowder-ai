@@ -13,6 +13,18 @@ vi.mock('@/utils/api-client', () => ({
   apiFetch: vi.fn(async () => ({ ok: true, json: async () => ({}) })),
 }));
 
+const TEST_CATS = [
+  { id: 'codex', displayName: '缅因猫', variantLabel: 'sol' },
+  { id: 'opus', displayName: '布偶猫', variantLabel: 'Fable' },
+];
+
+vi.mock('@/hooks/useCatData', () => ({
+  useCatData: () => ({
+    cats: TEST_CATS,
+    getCatById: (id: string) => TEST_CATS.find((cat) => cat.id === id),
+  }),
+}));
+
 const NOW = Date.now();
 
 const QUEUED_ENTRY: QueueEntry = {
@@ -45,13 +57,22 @@ describe('formatElapsed', () => {
 });
 
 describe('computeQueueWaitInfo', () => {
-  it('returns null when nothing is active', () => {
-    expect(computeQueueWaitInfo({}, ['opus'], NOW)).toBeNull();
-    expect(computeQueueWaitInfo(undefined, ['opus'], NOW)).toBeNull();
+  it('returns null when nothing is active and the queued work has no explicit target', () => {
+    expect(computeQueueWaitInfo({}, [], NOW)).toBeNull();
+    expect(computeQueueWaitInfo(undefined, [], NOW)).toBeNull();
+  });
+
+  it('keeps an idle explicit target as dispatch truth instead of borrowing another cat', () => {
+    expect(computeQueueWaitInfo({}, ['opus'], NOW)).toEqual({
+      kind: 'target_dispatch',
+      catIds: ['opus'],
+    });
   });
 
   it('reports the targeted active cat + elapsed', () => {
     const info = computeQueueWaitInfo({ inv1: { catId: 'opus', startedAt: NOW - 65_000 } }, ['opus'], NOW);
+    expect(info?.kind).toBe('active_turn');
+    if (info?.kind !== 'active_turn') throw new Error('expected active_turn');
     expect(info?.catId).toBe('opus');
     expect(info?.elapsedLabel).toBe('1m');
   });
@@ -67,6 +88,8 @@ describe('computeQueueWaitInfo', () => {
       ['opus'],
       NOW,
     );
+    expect(info?.kind).toBe('active_turn');
+    if (info?.kind !== 'active_turn') throw new Error('expected active_turn');
     expect(info?.catId).toBe('opus');
     expect(info?.elapsedLabel).toBe('30s');
   });
@@ -80,20 +103,32 @@ describe('computeQueueWaitInfo', () => {
       ['opus', 'sonnet'],
       NOW,
     );
+    expect(info?.kind).toBe('active_turn');
+    if (info?.kind !== 'active_turn') throw new Error('expected active_turn');
     expect(info?.catId).toBe('opus');
     expect(info?.elapsedLabel).toBe('2m');
   });
 
-  it('falls back to oldest active (thread-level) when NO target cat is active', () => {
-    // entry targets opus, but only codex is active → thread-level block; codex is a correct
-    // attribution (no target cat is active, so this branch cannot misattribute a target blocker).
+  it('does not attribute an explicit-target entry to an unrelated active cat', () => {
     const info = computeQueueWaitInfo({ invCodex: { catId: 'codex', startedAt: NOW - 90_000 } }, ['opus'], NOW);
-    expect(info?.catId).toBe('codex');
-    expect(info?.elapsedLabel).toBe('1m');
+    expect(info).toEqual({
+      kind: 'target_dispatch',
+      catIds: ['opus'],
+    });
+  });
+
+  it('falls back to the oldest active turn only for broadcast work', () => {
+    const info = computeQueueWaitInfo({ invCodex: { catId: 'codex', startedAt: NOW - 90_000 } }, [], NOW);
+    expect(info?.kind).toBe('active_turn');
+    if (info?.kind !== 'active_turn') throw new Error('expected active_turn');
+    expect(info.catId).toBe('codex');
+    expect(info.elapsedLabel).toBe('1m');
   });
 
   it('null elapsedLabel when startedAt is missing', () => {
     const info = computeQueueWaitInfo({ inv1: { catId: 'opus' } }, ['opus'], NOW);
+    expect(info?.kind).toBe('active_turn');
+    if (info?.kind !== 'active_turn') throw new Error('expected active_turn');
     expect(info?.catId).toBe('opus');
     expect(info?.elapsedLabel).toBeNull();
   });
@@ -142,17 +177,20 @@ describe('QueuePanel wait-reason render', () => {
     });
     const html = container.innerHTML;
     expect(html).toContain('等待');
-    expect(html).toContain('opus');
+    expect(html).toContain('布偶猫（Fable）');
+    expect(html).not.toContain('等待 <span class="font-medium text-cafe-secondary">opus</span>');
     expect(html).toContain('当前回合');
     expect(html).toContain('已运行');
   });
 
-  it('does NOT show a wait reason when nothing is active (queue draining, not blocked)', () => {
+  it('shows an idle explicit target as waiting for dispatch, not a current turn', () => {
     useChatStore.setState({ queue: [QUEUED_ENTRY], activeInvocations: {} });
     act(() => {
       root.render(React.createElement(QueuePanel, { threadId: 'thread-1' }));
     });
+    expect(container.textContent).toContain('等待 布偶猫（Fable） 调度');
     expect(container.innerHTML).not.toContain('当前回合');
+    expect(container.querySelector('[data-testid="queue-recover"]')?.textContent).toBe('恢复');
   });
 
   // 砚砚 P1 end-to-end: queued entry targets opus; codex is active LONGER but is not the target.
@@ -170,7 +208,23 @@ describe('QueuePanel wait-reason render', () => {
     });
     const html = container.innerHTML;
     expect(html).toContain('当前回合');
-    expect(html).toContain('opus');
-    expect(html).not.toContain('codex');
+    expect(html).toContain('布偶猫（Fable）');
+    expect(html).not.toContain('缅因猫（sol）');
+  });
+
+  it('never says a Sol-targeted entry is waiting for an unrelated active GPT-5.5 turn', () => {
+    const solEntry = { ...QUEUED_ENTRY, targetCats: ['codex-sol'] };
+    useChatStore.setState({
+      queue: [solEntry],
+      activeInvocations: {
+        invCodex55: { catId: 'codex', mode: 'execute', startedAt: NOW - 360_000 },
+      },
+    });
+    act(() => {
+      root.render(React.createElement(QueuePanel, { threadId: 'thread-1' }));
+    });
+    expect(container.textContent).toContain('等待 codex-sol 调度');
+    expect(container.textContent).not.toContain('缅因猫（sol）');
+    expect(container.textContent).not.toContain('当前回合');
   });
 });

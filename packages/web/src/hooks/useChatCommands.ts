@@ -2,8 +2,10 @@
 
 import { useRouter } from 'next/navigation';
 import { useCallback, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useCatData } from '@/hooks/useCatData';
 import { useChatStore } from '@/stores/chatStore';
+import type { EvidenceSourceType } from '@/types/evidence';
 import { apiFetch } from '@/utils/api-client';
 import { getUserId } from '@/utils/userId';
 
@@ -126,7 +128,7 @@ function formatConfigForDisplay(config: ConfigSnapshot): string {
  */
 export function useChatCommands() {
   const router = useRouter();
-  const { addMessage } = useChatStore();
+  const { addMessage } = useChatStore(useShallow((s) => ({ addMessage: s.addMessage })));
   const { cats } = useCatData();
 
   // Build dynamic mention pattern → catId resolver from cat data
@@ -381,8 +383,11 @@ export function useChatCommands() {
               title: string;
               anchor: string;
               snippet: string;
-              confidence: 'high' | 'mid' | 'low';
-              sourceType: 'decision' | 'phase' | 'discussion' | 'commit';
+              matchRank: 'high' | 'mid' | 'low';
+              retrievalScore?: number;
+              sourceType: EvidenceSourceType;
+              authority?: string;
+              updatedAt?: string;
             }>;
             degraded: boolean;
             degradeReason?: string;

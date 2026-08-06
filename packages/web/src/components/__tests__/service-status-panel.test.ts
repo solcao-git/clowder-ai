@@ -88,7 +88,13 @@ describe('ServiceStatusPanel', () => {
   }
 
   it('renders a filtered read-only service status panel', async () => {
-    await render(React.createElement(ServiceStatusPanel, { filterFeatures: ['voice-input'], title: '语音服务' }));
+    await render(
+      React.createElement(ServiceStatusPanel, {
+        filterFeatures: ['voice-input'],
+        title: '语音服务',
+        anchorId: 'voice-service-controls',
+      }),
+    );
 
     expect(mockFetch.mock.calls[0][0]).toBe('/api/services');
     expect(container.textContent).toContain('语音服务');
@@ -99,12 +105,18 @@ describe('ServiceStatusPanel', () => {
     expect(container.textContent).not.toContain('停止');
     expect(container.textContent).not.toContain('安装');
     expect(container.textContent).not.toContain('卸载');
+    expect(container.querySelector('#voice-service-controls')).toBeTruthy();
   });
 
   it('renders unhealthy service errors and endpoint metadata', async () => {
     await render(
       React.createElement(ServiceStatusPanel, { filterFeatures: ['memory-semantic-search'], title: '记忆服务' }),
     );
+
+    const status = container.querySelector<HTMLElement>('[data-testid="service-status-detail-embedding-model"]');
+    const error = container.querySelector<HTMLElement>('[data-testid="service-error-embedding-model"]');
+    await act(async () => status?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
+    await act(async () => error?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
 
     expect(container.textContent).toContain('记忆服务');
     expect(container.textContent).toContain('嵌入模型');
@@ -113,6 +125,35 @@ describe('ServiceStatusPanel', () => {
     expect(container.textContent).toContain('http://127.0.0.1:9880');
     expect(container.textContent).toContain('HTTP 503');
     expect(container.textContent).not.toContain('语音识别 (Whisper)');
+  });
+
+  it('exposes complete status and error diagnostics through bounded disclosures', async () => {
+    const longError = `HTTP 503 · ${'服务依赖尚未就绪'.repeat(40)} · tail-marker`;
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        services: [
+          {
+            ...servicesPayload.services[1],
+            error: longError,
+            selectedModel: 'mlx-community/very-long-model-name-that-must-remain-visible',
+          },
+        ],
+      }),
+    });
+
+    await render(
+      React.createElement(ServiceStatusPanel, { filterFeatures: ['memory-semantic-search'], title: '记忆服务' }),
+    );
+
+    const status = container.querySelector<HTMLElement>('[data-testid="service-status-detail-embedding-model"]');
+    const error = container.querySelector<HTMLElement>('[data-testid="service-error-embedding-model"]');
+    await act(async () => status?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
+    await act(async () => error?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
+
+    expect(status?.querySelector('pre')?.className).toContain('overflow-auto');
+    expect(error?.querySelector('pre')?.className).toContain('overflow-auto');
+    expect(error?.textContent).toContain('tail-marker');
   });
 
   it('shows a 修改 button next to trash when service is installed and disabled', async () => {
@@ -528,7 +569,10 @@ describe('ServiceStatusPanel', () => {
       await new Promise((r) => setTimeout(r, 2100));
     });
 
-    expect(container.textContent).toContain('Installing deps...');
+    const log = container.querySelector<HTMLElement>('[data-testid="service-log-mlx-tts"]');
+    await act(async () => log?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
+    expect(log?.querySelector('pre')?.className).toContain('overflow-auto');
+    expect(log?.textContent).toContain('Installing deps...');
 
     // Resolve install to clean up
     await act(async () => {
@@ -575,6 +619,8 @@ describe('ServiceStatusPanel', () => {
     });
 
     expect(container.textContent).toContain('安装中');
+    const installLog = container.querySelector<HTMLElement>('[data-testid="service-log-mlx-tts"]');
+    await act(async () => installLog?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
     expect(container.textContent).toContain('Installing deps...');
     const installBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '安装中');
     expect(installBtn).toBeTruthy();
@@ -622,6 +668,8 @@ describe('ServiceStatusPanel', () => {
     });
 
     expect(container.textContent).toContain('卸载中');
+    const uninstallLog = container.querySelector<HTMLElement>('[data-testid="service-log-mlx-tts"]');
+    await act(async () => uninstallLog?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
     expect(container.textContent).toContain('[uninstall] stopped owned process(es) before uninstall: 5151');
     const trashBtn = Array.from(container.querySelectorAll('button')).find((b) => b.title === '卸载');
     expect(trashBtn).toBeTruthy();
@@ -669,6 +717,7 @@ describe('ServiceStatusPanel', () => {
     };
 
     let serviceFetchCount = 0;
+    const onStateChange = vi.fn();
     mockFetch.mockImplementation(async (path: string) => {
       if (path === '/api/services') {
         serviceFetchCount += 1;
@@ -684,16 +733,24 @@ describe('ServiceStatusPanel', () => {
     });
 
     await render(
-      React.createElement(ServiceStatusPanel, { filterFeatures: ['memory-semantic-search'], title: '记忆服务' }),
+      React.createElement(ServiceStatusPanel, {
+        filterFeatures: ['memory-semantic-search'],
+        title: '记忆服务',
+        onStateChange,
+      }),
     );
     expect(container.textContent).toContain('启动中');
+    expect(onStateChange).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 2100));
     });
 
     expect(serviceFetchCount).toBeGreaterThanOrEqual(2);
+    expect(onStateChange.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain('异常');
+    const error = container.querySelector<HTMLElement>('[data-testid="service-error-embedding-model"]');
+    await act(async () => error?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
     expect(container.textContent).toContain('connect ECONNREFUSED 127.0.0.1:9880');
   });
 });

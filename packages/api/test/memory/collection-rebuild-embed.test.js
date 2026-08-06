@@ -58,13 +58,67 @@ describe('CollectionIndexBuilder embedding integration (bug #6)', () => {
     };
 
     const builder = new CollectionIndexBuilder(store, manifest, scanner, {
-      embedding: mockEmbedding,
+      getEmbeddingService: () => mockEmbedding,
       vectorStore: mockVectorStore,
     });
     const result = await builder.rebuild();
 
     assert.equal(result.indexed, 2, 'should index 2 docs');
     assert.equal(embedded.length, 2, 'should produce 2 embeddings');
+  });
+
+  it('revokes a captured embedding capability before an in-flight rebuild reaches vector generation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'col-revoked-'));
+    writeFileSync(join(dir, 'a.md'), '# Alpha\n\nAlpha content about lifecycle revocation.');
+
+    const manifest = makeManifest(dir);
+    const scanner = new FlatScanner('test:embed');
+    let activeEmbedding;
+    let embeddingCalls = 0;
+    const legacyCapturedEmbedding = {
+      isReady: () => true,
+      reprobeIfNeeded: async () => {},
+      embed: async (texts) => {
+        embeddingCalls += 1;
+        return texts.map(() => new Float32Array([0.1, 0.2]));
+      },
+      getModelInfo: () => ({ modelId: 'test', modelRev: 'v1', dim: 2 }),
+    };
+    activeEmbedding = legacyCapturedEmbedding;
+
+    let markIndexingStarted;
+    const indexingStarted = new Promise((resolve) => {
+      markIndexingStarted = resolve;
+    });
+    let releaseIndexing;
+    const indexingReleased = new Promise((resolve) => {
+      releaseIndexing = resolve;
+    });
+    const originalUpsert = store.upsert.bind(store);
+    store.upsert = async (...args) => {
+      markIndexingStarted();
+      await indexingReleased;
+      return originalUpsert(...args);
+    };
+
+    const builder = new CollectionIndexBuilder(store, manifest, scanner, {
+      embedding: legacyCapturedEmbedding,
+      getEmbeddingService: () => activeEmbedding,
+      vectorStore: {
+        upsert: () => {},
+        checkMetaConsistency: () => ({ consistent: true, reason: 'ok' }),
+        clearAll: () => {},
+        initMeta: () => {},
+      },
+    });
+
+    const rebuild = builder.rebuild();
+    await indexingStarted;
+    activeEmbedding = undefined;
+    releaseIndexing();
+    await rebuild;
+
+    assert.equal(embeddingCalls, 0, 'a disabled lifecycle must revoke capability held by an in-flight rebuild');
   });
 
   it('rebuild works without embedDeps (FTS-only fallback)', async () => {

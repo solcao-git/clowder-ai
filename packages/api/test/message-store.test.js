@@ -26,6 +26,244 @@ describe('MessageStore', () => {
     assert.equal(store.size, 1);
   });
 
+  test('listOwnerMessagesInWindow returns the exact delivered owner timeline with inclusive boundaries', async () => {
+    const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+    const store = new MessageStore();
+    const append = (overrides) =>
+      store.append({
+        userId: 'owner-1',
+        catId: null,
+        content: 'candidate',
+        mentions: [],
+        threadId: 'thread-a',
+        ...overrides,
+      });
+
+    append({ content: 'before', timestamp: 99 });
+    const lower = append({ content: 'lower', timestamp: 100 });
+    append({ content: 'other owner', timestamp: 105, userId: 'owner-2' });
+    append({ content: 'queued', timestamp: 110, deliveryStatus: 'queued' });
+    const delivered = append({ content: 'delivered later', timestamp: 95, deliveryStatus: 'queued' });
+    store.markDelivered(delivered.id, 115);
+    const canceled = append({ content: 'canceled', timestamp: 120, deliveryStatus: 'queued' });
+    store.markCanceled(canceled.id);
+    const restored = append({ content: 'restored', timestamp: 125 });
+    store.softDelete(restored.id, 'owner-1');
+    const upper = append({ content: 'upper', timestamp: 130 });
+    append({ content: 'after', timestamp: 131 });
+
+    assert.deepEqual(
+      store.listOwnerMessagesInWindow('owner-1', 100, 130).map((message) => message.id),
+      [lower.id, delivered.id, upper.id],
+    );
+
+    store.restore(restored.id);
+    assert.deepEqual(
+      store.listOwnerMessagesInWindow('owner-1', 100, 130).map((message) => message.id),
+      [lower.id, delivered.id, restored.id, upper.id],
+    );
+  });
+
+  test('listOwnerMessagesInWindow has no implicit page limit', async () => {
+    const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+    const store = new MessageStore();
+
+    for (let timestamp = 1; timestamp <= 75; timestamp += 1) {
+      store.append({
+        userId: 'owner-1',
+        catId: null,
+        content: `message ${timestamp}`,
+        mentions: [],
+        timestamp,
+      });
+    }
+
+    assert.equal(store.listOwnerMessagesInWindow('owner-1', 1, 75).length, 75);
+  });
+
+  test('all append entrypoints reject unsafe timestamps and transition-owned metadata before side effects', async () => {
+    const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+    const invalidTimestamps = [
+      -1,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      8_640_000_000_000_001,
+      -8_640_000_000_000_001,
+    ];
+    const appenders = [
+      ['append', (store, message) => store.append(message)],
+      ['appendIfThreadFrontier', (store, message) => store.appendIfThreadFrontier(message, null)],
+      ['appendAndObservePriorFrontier', (store, message) => store.appendAndObservePriorFrontier(message)],
+    ];
+
+    for (const [name, append] of appenders) {
+      for (const timestamp of invalidTimestamps) {
+        let listenerCalls = 0;
+        const store = new MessageStore({ onAppend: () => listenerCalls++ });
+        assert.throws(
+          () =>
+            append(store, {
+              userId: 'user-1',
+              catId: null,
+              content: `${name} invalid timestamp`,
+              mentions: [],
+              timestamp,
+              threadId: `thread-${name}`,
+              idempotencyKey: `${name}-invalid`,
+            }),
+          { name: 'RangeError', message: /non-negative integer ECMAScript Date/ },
+        );
+        assert.equal(store.size, 0, `${name}: ${String(timestamp)} must not append`);
+        assert.equal(listenerCalls, 0, `${name}: ${String(timestamp)} must not notify`);
+      }
+
+      for (const metadata of [
+        { deliveredAt: undefined },
+        { timelineOrderAt: undefined },
+        { deliveredAt: 101, deliveryStatus: 'delivered' },
+        { deliveryStatus: 'delivered' },
+        { deliveryStatus: 'canceled' },
+      ]) {
+        let listenerCalls = 0;
+        const store = new MessageStore({ onAppend: () => listenerCalls++ });
+        assert.throws(
+          () =>
+            append(store, {
+              userId: 'user-1',
+              catId: null,
+              content: `${name} forged terminal state`,
+              mentions: [],
+              timestamp: 100,
+              threadId: `thread-${name}`,
+              idempotencyKey: `${name}-terminal`,
+              ...metadata,
+            }),
+          { name: 'TypeError', message: /append.*delivery metadata|transition owner/i },
+        );
+        assert.equal(store.size, 0, `${name}: ownership rejection must not append`);
+        assert.equal(listenerCalls, 0, `${name}: ownership rejection must not notify`);
+      }
+    }
+  });
+
+  test('append admits the sortable-ID-safe Date boundaries and queued-only lifecycle initialization', async () => {
+    const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+    const store = new MessageStore();
+
+    for (const timestamp of [0, 1, 8_640_000_000_000_000]) {
+      const stored = store.append({
+        userId: 'user-1',
+        catId: null,
+        content: 'valid Date input',
+        mentions: [],
+        timestamp,
+        deliveryStatus: 'queued',
+      });
+      assert.equal(stored.timestamp, timestamp);
+      assert.equal(stored.deliveryStatus, 'queued');
+      assert.equal(stored.deliveredAt, undefined);
+      assert.equal(stored.timelineOrderAt, undefined);
+    }
+    assert.equal(store.size, 3);
+  });
+
+  test('markDelivered rejects unsafe effective-order timestamps before state mutation and permits a valid retry', async () => {
+    const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+    const invalidTimestamps = [
+      -1,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      8_640_000_000_000_001,
+      -8_640_000_000_000_001,
+    ];
+
+    for (const [index, deliveredAt] of invalidTimestamps.entries()) {
+      const store = new MessageStore();
+      const queued = store.append({
+        userId: 'user-1',
+        catId: null,
+        content: `queued ${index}`,
+        mentions: [],
+        timestamp: 100 + index,
+        deliveryStatus: 'queued',
+      });
+      const before = structuredClone(queued);
+
+      assert.throws(() => store.markDelivered(queued.id, deliveredAt), {
+        name: 'RangeError',
+        message: /non-negative integer ECMAScript Date/,
+      });
+      assert.deepEqual(store.getById(queued.id), before);
+
+      const validDeliveredAt = index === 0 ? 0 : index === 1 ? 8_640_000_000_000_000 : 1_000 + index;
+      const delivered = store.markDelivered(queued.id, validDeliveredAt);
+      assert.equal(delivered.deliveryTransitioned, true);
+      assert.equal(delivered.deliveredAt, validDeliveredAt);
+      assert.equal(delivered.timelineOrderAt, validDeliveredAt);
+
+      const afterDelivery = structuredClone(store.getById(queued.id));
+      assert.throws(() => store.markDelivered(queued.id, deliveredAt), RangeError);
+      assert.deepEqual(store.getById(queued.id), afterDelivery, 'validation must not depend on current state');
+    }
+  });
+
+  test('queue custody delivery rejects unsafe effective-order timestamps before revision or state mutation', async () => {
+    const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+    const store = new MessageStore();
+    const custody = {
+      version: 1,
+      entryId: 'entry-1',
+      revision: 1,
+      intent: 'timestamp admission',
+      status: 'terminal',
+      allTargetCats: ['opus'],
+      pendingTargetCats: [],
+      notifiedByCatIds: [],
+      seenByCatIds: [],
+      seenInvocationIdByCatId: {},
+      failedByCatIds: ['opus'],
+      handledByCatIds: [],
+      priority: 'normal',
+      createdAt: 1_000,
+      updatedAt: 1_100,
+    };
+    const queued = store.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'queued with custody',
+      mentions: ['opus'],
+      timestamp: 1_000,
+      deliveryStatus: 'queued',
+      queueCustody: custody,
+    });
+    const next = { ...custody, revision: 2, updatedAt: 1_200 };
+    const before = structuredClone(store.getById(queued.id));
+
+    assert.throws(() => store.transitionQueueCustody(queued.id, { expectedRevision: 1, next, deliveredAt: 1_200.5 }), {
+      name: 'RangeError',
+      message: /non-negative integer ECMAScript Date/,
+    });
+    assert.deepEqual(store.getById(queued.id), before);
+  });
+
+  test('admitted timestamp classes preserve sortable-ID and delivery-cursor monotonicity', async () => {
+    const { generateSortableId } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+    const { DeliveryCursorStore } = await import('../dist/domains/cats/services/stores/ports/DeliveryCursorStore.js');
+    const timestamps = [0, 1, 8_640_000_000_000_000];
+    const ids = timestamps.map((timestamp) => generateSortableId(timestamp));
+
+    assert.deepEqual([...ids].sort(), ids);
+    const cursorStore = new DeliveryCursorStore();
+    for (const id of ids) {
+      await cursorStore.ackCursor('user-1', 'opus', 'thread-sortable-domain', id);
+      assert.equal(await cursorStore.getCursor('user-1', 'opus', 'thread-sortable-domain'), id);
+    }
+  });
+
   test('augmentStreamMetadata() enriches callback messages without replacing canonical content', async () => {
     const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
 
@@ -396,6 +634,37 @@ describe('MessageStore', () => {
     assert.equal(before300.length, 2);
     assert.equal(before300[0].content, 'A');
     assert.equal(before300[1].content, 'B');
+  });
+
+  test('getByThreadBeforeBounded() accounts for the full in-memory buffer in one pass', async () => {
+    const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+    const store = new MessageStore();
+    for (let index = 0; index < 100; index += 1) {
+      store.append({
+        userId: 'u',
+        catId: null,
+        content: `other ${index}`,
+        mentions: [],
+        timestamp: index,
+        threadId: 'other-thread',
+      });
+    }
+    for (let index = 0; index < 600; index += 1) {
+      store.append({
+        userId: 'u',
+        catId: null,
+        content: `target ${index}`,
+        mentions: [],
+        timestamp: index + 100,
+        threadId: 'target-thread',
+      });
+    }
+
+    const page = store.getByThreadBeforeBounded('target-thread', Number.MAX_SAFE_INTEGER, 500, undefined, 'u', 2_000);
+
+    assert.equal(page.scannedCount, 700, 'raw work includes unrelated rows in the global memory buffer');
+    assert.equal(page.messages.length, 600, 'one pass returns every eligible row for route-level ranking');
+    assert.equal(page.exhausted, true);
   });
 
   test('append() preserves contentBlocks', async () => {

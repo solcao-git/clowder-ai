@@ -13,13 +13,38 @@ import './helpers/setup-cat-registry.js';
 // Mock SocketManager
 function createMockSocketManager() {
   const messages = [];
+  const roomEvents = [];
+  const userEvents = [];
   return {
     broadcastAgentMessage(msg) {
       messages.push(msg);
     },
+    broadcastToRoom(room, event, data) {
+      roomEvents.push({ room, event, data });
+    },
     getMessages() {
       return messages;
     },
+    getRoomEvents() {
+      return roomEvents;
+    },
+    emitToUser(userId, event, data) {
+      userEvents.push({ userId, event, data });
+    },
+    getUserEvents() {
+      return userEvents;
+    },
+  };
+}
+
+function prWaitPayload(overrides = {}) {
+  return {
+    repoFullName: 'zts212653/cat-cafe',
+    prNumber: 99,
+    when: [{ kind: 'pr_head_changed' }],
+    nextStep: 'Re-lock the exact HEAD and continue.',
+    expiresAt: Date.now() + 60_000,
+    ...overrides,
   };
 }
 
@@ -35,6 +60,8 @@ describe('Callback Routes', () => {
   let backlogStore;
   let featIndexProvider;
   let labelStore;
+  let invocationQueue;
+  let queueCustodyCoordinator;
 
   beforeEach(async () => {
     const { InvocationRegistry } = await import(
@@ -50,6 +77,8 @@ describe('Callback Routes', () => {
     threadStore = new ThreadStore();
     taskStore = new TaskStore();
     backlogStore = new BacklogStore();
+    invocationQueue = undefined;
+    queueCustodyCoordinator = undefined;
     const { createLabelStore } = await import('../dist/domains/cats/services/stores/factories/LabelStoreFactory.js');
     labelStore = createLabelStore();
     socketManager = createMockSocketManager();
@@ -72,7 +101,7 @@ describe('Callback Routes', () => {
     featIndexProvider = undefined;
   });
 
-  async function createApp() {
+  async function createApp(overrides = {}) {
     const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
     const app = Fastify();
     const options = {
@@ -83,10 +112,29 @@ describe('Callback Routes', () => {
       evidenceStore,
       reflectionService,
       markerQueue,
-      fetchPrTrackingBoundary: async () => ({
-        review: { lastCommentCursor: 0, lastDecisionCursor: 0 },
-        ci: { headSha: 'test-head' },
+      fetchPrWaitBaseline: async (_repoFullName, _prNumber, _when) => ({
+        baseline: {
+          capturedAt: Date.now(),
+          headSha: 'test-head',
+          review: {
+            inlineCommentCursor: 0,
+            conversationCommentCursor: 0,
+            decisionCursor: 0,
+          },
+          ci: { bucket: 'pending', fingerprint: 'test-head:pending' },
+          conflict: { mergeState: 'MERGEABLE' },
+        },
+        collectorState: {
+          review: {
+            lastInlineCommentCursor: 0,
+            lastConversationCommentCursor: 0,
+            lastDecisionCursor: 0,
+          },
+          ci: { headSha: 'test-head', lastFingerprint: 'test-head:pending', lastBucket: 'pending' },
+          conflict: { mergeState: 'MERGEABLE' },
+        },
       }),
+      ...overrides,
     };
     if (backlogStore !== undefined) {
       options.backlogStore = backlogStore;
@@ -99,6 +147,12 @@ describe('Callback Routes', () => {
     }
     if (labelStore !== undefined) {
       options.labelStore = labelStore;
+    }
+    if (invocationQueue !== undefined) {
+      options.invocationQueue = invocationQueue;
+    }
+    if (queueCustodyCoordinator !== undefined) {
+      options.queueCustodyCoordinator = queueCustodyCoordinator;
     }
     await app.register(callbacksRoutes, options);
     return app;
@@ -133,6 +187,145 @@ describe('Callback Routes', () => {
     const recent = messageStore.getRecent(10);
     assert.equal(recent.length, 1);
     assert.equal(recent[0].content, 'Hello from cat!');
+  });
+
+  test('POST post-message projects durable child identity and suppresses a covered same-wave sibling reply', async () => {
+    const { DeliveryCursorStore } = await import('../dist/domains/cats/services/stores/ports/DeliveryCursorStore.js');
+    const { InMemoryTurnExecutionStore } = await import(
+      '../dist/domains/cats/services/stores/memory/InMemoryTurnExecutionStore.js'
+    );
+    const deliveryCursorStore = new DeliveryCursorStore();
+    const turnExecutionStore = new InMemoryTurnExecutionStore();
+    const threadId = 'thread-child-causal-projection';
+    const parentInvocationId = 'parent-child-causal-projection';
+    const trigger = messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'M1: inspect this wave',
+      mentions: ['opus', 'fable5'],
+      timestamp: 1,
+      threadId,
+    });
+    await deliveryCursorStore.ackSeenCursor('user-1', 'opus', threadId, trigger.id);
+    messageStore.append({
+      userId: 'user-1',
+      catId: 'fable5',
+      content: 'Fable sibling answer to M1',
+      mentions: [],
+      timestamp: 2,
+      threadId,
+      extra: { causal: { kind: 'invocation_reply', triggerMessageId: trigger.id } },
+    });
+
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', threadId, parentInvocationId);
+    await turnExecutionStore.createRunning({
+      invocationId,
+      parentInvocationId,
+      threadId,
+      userId: 'user-1',
+      catId: 'opus',
+      executionKind: 'routing_guard',
+      startedAt: 3,
+      causal: { triggerMessageId: trigger.id, coveredMessageIds: [trigger.id] },
+    });
+    const app = await createApp({ deliveryCursorStore, turnExecutionStore });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/post-message',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: { content: 'Guard completion without duplicate wave work' },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(JSON.parse(response.body).status, 'ok');
+    const stored = messageStore
+      .getByThread(threadId, 10, 'user-1')
+      .find((message) => message.content === 'Guard completion without duplicate wave work');
+    assert.deepEqual(stored?.extra?.causal, {
+      kind: 'invocation_reply',
+      triggerMessageId: trigger.id,
+    });
+    assert.deepEqual(stored?.extra?.turnExecution, {
+      invocationId,
+      parentInvocationId,
+      executionKind: 'routing_guard',
+    });
+  });
+
+  test('POST post-message rejects auth and durable child scope mismatch', async () => {
+    const app = await createApp({
+      turnExecutionStore: {
+        async get(invocationId) {
+          return {
+            invocationId,
+            parentInvocationId: 'wrong-parent',
+            threadId: 'wrong-thread',
+            userId: 'user-1',
+            catId: 'opus',
+            executionKind: 'ordinary',
+            status: 'running',
+            startedAt: 1,
+          };
+        },
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/post-message',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: { content: 'must not cross scopes' },
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(JSON.parse(response.body).code, 'TURN_EXECUTION_SCOPE_MISMATCH');
+    assert.equal(messageStore.getRecent(10).length, 0);
+  });
+
+  test('POST post-message fails closed when callback auth has no durable child execution', async () => {
+    const app = await createApp({
+      turnExecutionStore: {
+        async get() {
+          return null;
+        },
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/post-message',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: { content: 'must not become untyped output' },
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(JSON.parse(response.body).code, 'TURN_EXECUTION_NOT_FOUND');
+    assert.equal(messageStore.getRecent(10).length, 0);
+  });
+
+  test('POST post-message rejects invocation-bound soft-deleted thread without storing or broadcasting', async () => {
+    const thread = threadStore.create('user-1', 'Deleted Callback Target');
+    assert.equal(threadStore.softDelete(thread.id), true);
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', thread.id);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/post-message',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: {
+        content: 'should not land in deleted thread',
+      },
+    });
+
+    assert.equal(response.statusCode, 410);
+    const body = JSON.parse(response.body);
+    assert.equal(body.code, 'THREAD_DELETED');
+    assert.equal(messageStore.getByThread(thread.id, 10, 'user-1').length, 0);
+    assert.equal(socketManager.getMessages().length, 0);
   });
 
   test('POST post-message calls outboundHook.deliver when wired', async () => {
@@ -403,7 +596,6 @@ describe('Callback Routes', () => {
       mentions: [],
       origin: 'callback',
       timestamp: now,
-      deliveredAt: now,
       threadId: 'default',
       extra: {
         stream: {
@@ -419,7 +611,6 @@ describe('Callback Routes', () => {
       mentions: [],
       origin: 'callback',
       timestamp: now - 10_000,
-      deliveredAt: now - 10_000,
       threadId: 'default',
     });
 
@@ -754,6 +945,49 @@ describe('Callback Routes', () => {
     assert.equal('content' in body.messages[0], false); // full body not inlined
   });
 
+  test('GET thread-context includes published queued cat speech without exposing queued work', async () => {
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus');
+    messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'queued user work',
+      mentions: ['opus'],
+      timestamp: 1,
+      deliveryStatus: 'queued',
+    });
+    messageStore.append({
+      userId: 'system',
+      catId: 'system',
+      content: 'queued internal work',
+      mentions: [],
+      timestamp: 2,
+      deliveryStatus: 'queued',
+    });
+    const published = messageStore.append({
+      userId: 'user-1',
+      catId: 'codex',
+      content: 'published source-cat seed',
+      mentions: ['opus'],
+      timestamp: 3,
+      deliveryStatus: 'queued',
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200, response.body);
+    const body = JSON.parse(response.body);
+    assert.deepEqual(
+      body.messages.map((message) => message.id),
+      [published.id],
+    );
+    assert.equal(body.messages[0].preview, 'published source-cat seed');
+  });
+
   test('GET thread-context exposes HTTP image urls so external runtimes can fetch them (F211-REG3)', async () => {
     // REG3 Layer B: external runtimes (Antigravity/Bengal) cannot read absolute filesystem
     // imagePaths under cat-cafe-runtime/uploads (workspace-root boundary). An HTTP url served
@@ -862,6 +1096,110 @@ describe('Callback Routes', () => {
     assert.ok(
       hit.preview.includes('REDISLOCKBUG'),
       `keyword-ranked preview must surface the match (anti-变瞎子), got: ${hit.preview}`,
+    );
+  });
+
+  test('thread-context keyword scan is structurally bounded and reports incomplete results', async () => {
+    const thread = threadStore.create('user-1', 'F148 bounded keyword scan');
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', thread.id);
+
+    messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'needle older than the bounded recent scan',
+      mentions: [],
+      timestamp: 1,
+      threadId: thread.id,
+    });
+    for (let i = 0; i < 2_100; i += 1) {
+      messageStore.append({
+        userId: 'user-1',
+        catId: null,
+        content: `recent non-match ${i}`,
+        mentions: [],
+        timestamp: i + 2,
+        threadId: thread.id,
+      });
+    }
+
+    const originalGetByThreadBeforeBounded = messageStore.getByThreadBeforeBounded.bind(messageStore);
+    let pageCalls = 0;
+    let scannedRows = 0;
+    messageStore.getByThreadBeforeBounded = (...args) => {
+      pageCalls += 1;
+      const batch = originalGetByThreadBeforeBounded(...args);
+      scannedRows += batch.scannedCount;
+      return { ...batch, exhausted: false };
+    };
+    const logs = [];
+    app.log.info = (obj) => logs.push(obj);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?catId=user&keyword=needle&limit=10',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.deepEqual(body.messages, [], 'the match beyond the bounded recent scan is not claimed as complete');
+    assert.equal(body.scanCapped, true, 'caller must be told that older history may contain matches');
+    assert.ok(scannedRows <= 2_000, `keyword scan inspected ${scannedRows} rows, expected <= 2,000`);
+    assert.equal(pageCalls, 1, 'bounded in-memory buffer must be inspected once, not re-sorted page by page');
+
+    const scanLog = logs.find((entry) => entry?.tool === 'thread-context' && entry?.keywordScan);
+    assert.ok(scanLog, 'keyword scan must emit timing breakdown telemetry');
+    assert.equal(scanLog.keywordScan.scanCapped, true);
+    assert.equal(scanLog.keywordScan.scannedCount, scannedRows);
+    assert.equal(scanLog.keywordScan.batchCount, pageCalls);
+    assert.ok(scanLog.keywordScan.pageSize >= 500);
+    assert.ok(typeof scanLog.keywordScan.storeMs === 'number');
+    assert.ok(typeof scanLog.keywordScan.scoringMs === 'number');
+    assert.equal(scanLog.keywordScan.batches.length, pageCalls);
+    for (const batch of scanLog.keywordScan.batches) {
+      assert.ok(typeof batch.loaded === 'number');
+      assert.ok(typeof batch.scanned === 'number');
+      assert.ok(typeof batch.storageRoundTrips === 'number');
+      assert.ok(typeof batch.storeMs === 'number');
+      assert.ok(typeof batch.scoringMs === 'number');
+    }
+  });
+
+  test('thread-context keyword scan reports complete when history is exhausted', async () => {
+    const thread = threadStore.create('user-1', 'F148 exhausted keyword scan');
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', thread.id);
+
+    messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'redis lock exact match',
+      mentions: [],
+      timestamp: 1,
+      threadId: thread.id,
+    });
+    messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'redis partial match',
+      mentions: [],
+      timestamp: 2,
+      threadId: thread.id,
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?keyword=redis+lock&limit=10',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.equal(body.scanCapped, false);
+    assert.deepEqual(
+      body.messages.map((message) => message.preview),
+      ['redis lock exact match', 'redis partial match'],
     );
   });
 
@@ -1730,6 +2068,87 @@ describe('Callback Routes', () => {
     });
 
     assert.equal(response.statusCode, 403);
+  });
+
+  test('GET list-tasks can filter owned soft-deleted thread tombstones', async () => {
+    const app = await createApp();
+    const activeThread = await threadStore.create('user-1', 'thread-active');
+    const deletedThread = await threadStore.create('user-1', 'thread-deleted');
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', activeThread.id);
+    const deletedTask = await taskStore.create({
+      threadId: deletedThread.id,
+      title: 'deleted-thread-task',
+      why: 'read-only tombstone context stays available',
+      createdBy: 'user',
+      ownerCatId: 'codex',
+    });
+    assert.equal(await threadStore.softDelete(deletedThread.id), true);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/callbacks/list-tasks?threadId=${deletedThread.id}`,
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.deepEqual(
+      body.tasks.map((task) => task.id),
+      [deletedTask.id],
+    );
+  });
+
+  test('POST create-task rejects invocation-bound soft-deleted thread without creating or broadcasting', async () => {
+    const deletedThread = await threadStore.create('user-1', 'thread-deleted-create-task');
+    assert.equal(await threadStore.softDelete(deletedThread.id), true);
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', deletedThread.id);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/create-task',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: {
+        title: 'should not exist',
+        why: 'deleted callback thread cannot accept task writes',
+      },
+    });
+
+    assert.equal(response.statusCode, 410);
+    const body = JSON.parse(response.body);
+    assert.equal(body.code, 'THREAD_DELETED');
+    assert.equal((await taskStore.listByThread(deletedThread.id)).length, 0);
+    assert.equal(socketManager.getRoomEvents().length, 0, 'deleted thread must not receive task_created');
+  });
+
+  test('POST update-task rejects invocation-bound soft-deleted thread without mutating or broadcasting', async () => {
+    const deletedThread = await threadStore.create('user-1', 'thread-deleted-update-task');
+    const task = await taskStore.create({
+      threadId: deletedThread.id,
+      title: 'still todo',
+      why: 'deleted callback thread cannot accept task updates',
+      createdBy: 'user',
+      ownerCatId: 'opus',
+    });
+    assert.equal(await threadStore.softDelete(deletedThread.id), true);
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', deletedThread.id);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/update-task',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: {
+        taskId: task.id,
+        status: 'done',
+      },
+    });
+
+    assert.equal(response.statusCode, 410);
+    const body = JSON.parse(response.body);
+    assert.equal(body.code, 'THREAD_DELETED');
+    assert.equal((await taskStore.get(task.id)).status, 'todo');
+    assert.equal(socketManager.getRoomEvents().length, 0, 'deleted thread must not receive task_updated');
   });
 
   test('GET list-threads includes labels array in summary', async () => {
@@ -2894,6 +3313,34 @@ describe('Callback Routes', () => {
     assert.equal(msgs[0].invocationId, invocationId, 'create-rich-block broadcast must include invocationId');
   });
 
+  test('POST create-rich-block rejects invocation-bound soft-deleted thread without buffering or broadcasting', async () => {
+    const thread = threadStore.create('user-1', 'Deleted Rich Block Target');
+    assert.equal(threadStore.softDelete(thread.id), true);
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', thread.id);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/create-rich-block',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: {
+        block: { id: 'card-deleted', kind: 'card', v: 1, title: 'Deleted', bodyMarkdown: 'should not show' },
+      },
+    });
+
+    assert.equal(response.statusCode, 410);
+    const body = JSON.parse(response.body);
+    assert.equal(body.code, 'THREAD_DELETED');
+    assert.equal(socketManager.getMessages().length, 0, 'deleted thread must not receive rich_block broadcast');
+
+    const { getRichBlockBuffer } = await import('../dist/domains/cats/services/agents/invocation/RichBlockBuffer.js');
+    assert.deepEqual(
+      getRichBlockBuffer().consume(thread.id, 'opus', invocationId),
+      [],
+      'deleted thread must not receive buffered rich blocks',
+    );
+  });
+
   test('#454: generate-document broadcast includes invocationId', async () => {
     const { tmpdir } = await import('node:os');
     const { rm } = await import('node:fs/promises');
@@ -2922,6 +3369,49 @@ describe('Callback Routes', () => {
       const docMsg = msgs.find((m) => m.type === 'system_info' && JSON.parse(m.content).type === 'rich_block');
       assert.ok(docMsg, 'generate-document should broadcast system_info with rich_block');
       assert.equal(docMsg.invocationId, invocationId, 'generate-document broadcast must include invocationId');
+    } finally {
+      delete process.env.UPLOAD_DIR;
+      await rm(uploadDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  test('POST generate-document rejects invocation-bound soft-deleted thread without buffering or broadcasting', async () => {
+    const { tmpdir } = await import('node:os');
+    const { rm } = await import('node:fs/promises');
+    const uploadDir = `${tmpdir()}/cat-cafe-test-uploads-deleted`;
+    process.env.UPLOAD_DIR = uploadDir;
+    try {
+      const thread = threadStore.create('user-1', 'Deleted Document Target');
+      assert.equal(threadStore.softDelete(thread.id), true);
+      const app = await createApp();
+      const { invocationId, callbackToken } = await registry.create('user-1', 'opus', thread.id);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/callbacks/generate-document',
+        headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+        payload: {
+          markdown: '# Deleted Doc\nShould not generate',
+          format: 'md',
+          baseName: 'deleted-doc',
+        },
+      });
+
+      assert.equal(response.statusCode, 410);
+      const body = JSON.parse(response.body);
+      assert.equal(body.code, 'THREAD_DELETED');
+      assert.equal(
+        socketManager.getMessages().length,
+        0,
+        'deleted thread must not receive document rich_block broadcast',
+      );
+
+      const { getRichBlockBuffer } = await import('../dist/domains/cats/services/agents/invocation/RichBlockBuffer.js');
+      assert.deepEqual(
+        getRichBlockBuffer().consume(thread.id, 'opus', invocationId),
+        [],
+        'deleted thread must not receive generated file rich blocks',
+      );
     } finally {
       delete process.env.UPLOAD_DIR;
       await rm(uploadDir, { recursive: true, force: true }).catch(() => {});
@@ -3258,6 +3748,82 @@ describe('Callback Routes', () => {
     assert.equal(body.messages[1].preview, 'redis connection pool', 'lower relevance second');
   });
 
+  test('GET thread-context play mode + keyword keeps whisper and stream visibility boundaries', async () => {
+    const thread = threadStore.create('user-1', 'Play keyword visibility');
+    threadStore.updateThinkingMode(thread.id, 'play');
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', thread.id);
+
+    const rows = [
+      { catId: null, content: 'needle public user', timestamp: 1 },
+      { catId: 'codex', content: 'needle hidden stream', origin: 'stream', timestamp: 2 },
+      { catId: 'codex', content: 'needle hidden whisper', visibility: 'whisper', whisperTo: ['codex'], timestamp: 3 },
+      { catId: 'codex', content: 'needle visible whisper', visibility: 'whisper', whisperTo: ['opus'], timestamp: 4 },
+    ];
+    for (const row of rows) {
+      messageStore.append({ userId: 'user-1', mentions: [], threadId: thread.id, ...row });
+    }
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?keyword=needle&limit=10',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const previews = JSON.parse(response.body).messages.map((message) => message.preview);
+    assert.deepEqual(previews, ['needle visible whisper', 'needle public user']);
+  });
+
+  test('GET thread-context keyword scan paginates by deliveredAt without duplicating or skipping rows', async () => {
+    const thread = threadStore.create('user-1', 'Delivered cursor keyword scan');
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', thread.id);
+
+    const queued = messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'cursorneedle queued then delivered',
+      mentions: [],
+      timestamp: 1,
+      threadId: thread.id,
+      deliveryStatus: 'queued',
+    });
+    messageStore.markDelivered(queued.id, 1_000);
+    messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'cursorneedle oldest delivered',
+      mentions: [],
+      timestamp: 2,
+      threadId: thread.id,
+    });
+    for (let timestamp = 3; timestamp <= 501; timestamp += 1) {
+      messageStore.append({
+        userId: 'user-1',
+        catId: null,
+        content: `filler ${timestamp}`,
+        mentions: [],
+        timestamp,
+        threadId: thread.id,
+      });
+    }
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?keyword=cursorneedle&limit=10',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.equal(body.scanCapped, false);
+    assert.deepEqual(body.messages.map((message) => message.preview).sort(), [
+      'cursorneedle oldest delivered',
+      'cursorneedle queued then delivered',
+    ]);
+  });
+
   // ---- TD091: threadId echo in thread-context ----
 
   test('GET thread-context response includes threadId field', async () => {
@@ -3347,6 +3913,302 @@ describe('Callback Routes', () => {
     assert.ok(msg.threadId);
     assert.ok(msg.timestamp);
     assert.ok(msg.speaker);
+  });
+
+  test('full thread-context projects published queued cat speech only once while recording queue read evidence', async () => {
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    invocationQueue = new InvocationQueue();
+    const threadId = 'thread-queued-cat-dedup';
+    const stored = messageStore.append({
+      userId: 'user-1',
+      catId: 'codex',
+      content: 'one published A2A message',
+      mentions: ['opus'],
+      timestamp: 100,
+      threadId,
+      deliveryStatus: 'queued',
+    });
+    const queued = invocationQueue.enqueue({
+      ownerAuthProvenance: 'unknown',
+      threadId,
+      userId: 'user-1',
+      content: stored.content,
+      messageId: stored.id,
+      source: 'agent',
+      sourceCategory: 'a2a',
+      targetCats: ['opus'],
+      intent: 'execute',
+      callerCatId: 'codex',
+    });
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', threadId);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?responseMode=full',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200, response.body);
+    const body = JSON.parse(response.body);
+    assert.equal(body.messages.filter((message) => message.id === stored.id).length, 1);
+    assert.equal(body.messages.find((message) => message.id === stored.id).content, stored.content);
+    assert.deepEqual(invocationQueue.getEntrySnapshot(threadId, 'user-1', queued.entry.id).queuedSeenByCatIds, [
+      'opus',
+    ]);
+  });
+
+  test('F254 D1.2a: full contiguous thread-context includes same-target queued body and marks it seen', async () => {
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const { QueuedMessageCustodyCoordinator, createInitialQueuedMessageCustody } = await import(
+      '../dist/domains/cats/services/agents/invocation/QueuedMessageCustodyCoordinator.js'
+    );
+    const { InMemoryTurnExecutionStore } = await import(
+      '../dist/domains/cats/services/stores/memory/InMemoryTurnExecutionStore.js'
+    );
+    const queuedTelemetry = await import('../dist/domains/cats/services/freshness/freshness-queue-telemetry.js');
+    queuedTelemetry.resetFreshnessQueueTelemetryForTest();
+    invocationQueue = new InvocationQueue();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-queued-d12a');
+    const queued = invocationQueue.enqueue({
+      ownerAuthProvenance: 'unknown',
+      threadId: 'thread-queued-d12a',
+      userId: 'user-1',
+      content: 'queued body visible only in full read',
+      source: 'user',
+      targetCats: ['opus'],
+      authorIntentByCatId: {
+        opus: { requested: 'continue_current', boundParentInvocationId: invocationId },
+      },
+      intent: 'execute',
+    });
+    const storedQueuedMessage = messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'queued body visible only in full read',
+      mentions: [],
+      timestamp: 100,
+      threadId: 'thread-queued-d12a',
+      deliveryStatus: 'queued',
+      queueCustody: createInitialQueuedMessageCustody(queued.entry),
+    });
+    invocationQueue.backfillMessageId('thread-queued-d12a', 'user-1', queued.entry.id, storedQueuedMessage.id);
+    queueCustodyCoordinator = new QueuedMessageCustodyCoordinator({ messageStore });
+    const turnExecutionStore = new InMemoryTurnExecutionStore();
+    const app = await createApp({ turnExecutionStore });
+    const activeEntry = invocationQueue.getEntrySnapshot('thread-queued-d12a', 'user-1', queued.entry.id);
+    await queueCustodyCoordinator.requestReminder(activeEntry, 'opus', invocationId, 'reminder-read-boundary');
+
+    const missingLedgerResponse = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?responseMode=full',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+    assert.equal(missingLedgerResponse.statusCode, 409);
+    assert.equal(JSON.parse(missingLedgerResponse.body).code, 'TURN_EXECUTION_NOT_FOUND');
+    assert.deepEqual(messageStore.getById(storedQueuedMessage.id).queueCustody.bodyExposures, undefined);
+
+    await turnExecutionStore.createRunning({
+      invocationId,
+      parentInvocationId: invocationId,
+      threadId: 'thread-queued-d12a',
+      userId: 'user-1',
+      catId: 'opus',
+      executionKind: 'ordinary',
+      startedAt: 101,
+    });
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?responseMode=full',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    const queuedMessage = body.messages.find((message) => message.queueEntryId === queued.entry.id);
+    assert.ok(queuedMessage, 'full contiguous read must include same-target queued body');
+    assert.equal(queuedMessage.content, 'queued body visible only in full read');
+    assert.equal(queuedMessage.deliveryStatus, 'queued');
+    assert.equal(queuedMessage.id, storedQueuedMessage.id);
+    assert.equal(
+      messageStore.getById(storedQueuedMessage.id).deliveryStatus,
+      'queued',
+      'read must not mark queued messages delivered',
+    );
+    assert.equal(
+      invocationQueue.list('thread-queued-d12a', 'user-1').some((entry) => entry.id === queued.entry.id),
+      true,
+      'read must not consume the queued work item',
+    );
+    assert.equal(
+      invocationQueue.getQueuedFreshnessMessagesForCat('thread-queued-d12a', 'user-1', 'opus', {
+        parentInvocationId: invocationId,
+      }).length,
+      0,
+      'returned queued body must be marked seen for freshness suppression',
+    );
+    assert.equal(
+      queuedTelemetry.getFreshnessQueueTelemetrySnapshot().queuedSeenTotal,
+      1,
+      'first full contiguous read should count one queued_seen transition',
+    );
+    assert.deepEqual(messageStore.getById(storedQueuedMessage.id).queueCustody.seenByCatIds, ['opus']);
+    assert.equal(
+      messageStore.getById(storedQueuedMessage.id).queueCustody.seenInvocationIdByCatId.opus,
+      invocationId,
+      'thread-context must persist exact read evidence before returning it',
+    );
+    const firstExposure = messageStore.getById(storedQueuedMessage.id).queueCustody.bodyExposures?.[0];
+    assert.equal(firstExposure?.targetCatId, 'opus');
+    assert.equal(firstExposure?.invocationId, invocationId);
+    assert.equal(Number.isFinite(firstExposure?.seenAt), true);
+    assert.equal(
+      messageStore.getById(storedQueuedMessage.id).queueCustody.reminderAttempts[0].state,
+      'seen',
+      'exact body exposure must close the matching reminder attempt as seen',
+    );
+    const receiptUpdate = socketManager
+      .getUserEvents()
+      .find((event) => event.event === 'queue_updated' && event.data.action === 'queued_seen');
+    assert.ok(receiptUpdate, 'full body read must update the original timeline receipt without waiting for completion');
+    assert.equal(receiptUpdate.data.queue[0].queueReceipt.targets[0].state, 'seen');
+    assert.equal(receiptUpdate.data.queue[0].queueReceipt.targets[0].invocationId, invocationId);
+    assert.equal(receiptUpdate.data.queue[0].queueReceipt.targets[0].seenAt, firstExposure.seenAt);
+    assert.equal(receiptUpdate.data.queue[0].queueReceipt.reminderAttempts[0].state, 'seen');
+
+    const secondResponse = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?responseMode=full',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(secondResponse.statusCode, 200);
+    const secondBody = JSON.parse(secondResponse.body);
+    const secondQueuedMessage = secondBody.messages.find((message) => message.queueEntryId === queued.entry.id);
+    assert.ok(secondQueuedMessage, 'queued_seen must not make unresolved queued body unreadable');
+    assert.equal(secondQueuedMessage.content, 'queued body visible only in full read');
+    assert.equal(
+      queuedTelemetry.getFreshnessQueueTelemetrySnapshot().queuedSeenTotal,
+      1,
+      'repeat full read should refresh evidence if needed but not double-count queued_seen',
+    );
+    assert.deepEqual(
+      messageStore.getById(storedQueuedMessage.id).queueCustody.bodyExposures,
+      [firstExposure],
+      'repeat exposure by the same child must preserve the first exact seenAt',
+    );
+  });
+
+  test('F254/F264: queued body exposure and handled closure use the exact child invocation id', async () => {
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    invocationQueue = new InvocationQueue();
+    const app = await createApp();
+    const outerParentInv = 'outer-parent-d12b-token';
+    const { invocationId: innerInv, callbackToken } = await registry.create(
+      'user-1',
+      'opus',
+      'thread-queued-d12b-token',
+      outerParentInv,
+    );
+    const storedQueuedMessage = messageStore.append({
+      userId: 'user-1',
+      catId: null,
+      content: 'queued body whose seen token must match completion evidence',
+      mentions: [],
+      timestamp: 100,
+      threadId: 'thread-queued-d12b-token',
+      deliveryStatus: 'queued',
+    });
+
+    const queued = invocationQueue.enqueue({
+      ownerAuthProvenance: 'unknown',
+      threadId: 'thread-queued-d12b-token',
+      userId: 'user-1',
+      content: 'queued body whose seen token must match completion evidence',
+      source: 'user',
+      targetCats: ['opus'],
+      authorIntentByCatId: {
+        opus: { requested: 'continue_current', boundParentInvocationId: outerParentInv },
+      },
+      intent: 'execute',
+      messageId: storedQueuedMessage.id,
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?responseMode=full',
+      headers: { 'x-invocation-id': innerInv, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.ok(
+      body.messages.some((message) => message.queueEntryId === queued.entry.id),
+      'full read must include the queued body before marking seen',
+    );
+
+    const parentHandled = invocationQueue.markQueuedHandledForCatAcrossUsers(
+      'thread-queued-d12b-token',
+      'opus',
+      outerParentInv,
+    );
+    assert.deepEqual(parentHandled, [], 'parent aggregate identity must not impersonate the child that read the body');
+    const handled = invocationQueue.markQueuedHandledForCatAcrossUsers('thread-queued-d12b-token', 'opus', innerInv);
+    assert.equal(handled.length, 1, 'exact child completion must close its queued_seen evidence');
+    assert.equal(handled[0].fullyConsumed, true);
+    assert.equal(
+      invocationQueue.list('thread-queued-d12b-token', 'user-1').some((entry) => entry.id === queued.entry.id),
+      false,
+      'handled closure should consume the queued entry when completion evidence uses the exact child id',
+    );
+  });
+
+  test('F254 D1.2a: sparse thread-context read does not include queued body or mark queued_seen', async () => {
+    const { InvocationQueue } = await import('../dist/domains/cats/services/agents/invocation/InvocationQueue.js');
+    const queuedTelemetry = await import('../dist/domains/cats/services/freshness/freshness-queue-telemetry.js');
+    queuedTelemetry.resetFreshnessQueueTelemetryForTest();
+    invocationQueue = new InvocationQueue();
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-queued-sparse');
+
+    invocationQueue.enqueue({
+      ownerAuthProvenance: 'unknown',
+      threadId: 'thread-queued-sparse',
+      userId: 'user-1',
+      content: 'queued searchable body',
+      source: 'user',
+      targetCats: ['opus'],
+      authorIntentByCatId: {
+        opus: { requested: 'continue_current', boundParentInvocationId: invocationId },
+      },
+      intent: 'execute',
+      messageId: '0000000000000101-000001-queued',
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/callbacks/thread-context?responseMode=full&keyword=queued',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.equal(
+      body.messages.some((message) => message.deliveryStatus === 'queued'),
+      false,
+    );
+    assert.equal(
+      invocationQueue.getQueuedFreshnessMessagesForCat('thread-queued-sparse', 'user-1', 'opus', {
+        parentInvocationId: invocationId,
+      }).length,
+      1,
+      'sparse reads must not mark queued body seen',
+    );
+    assert.equal(
+      queuedTelemetry.getFreshnessQueueTelemetrySnapshot().queuedSeenTotal,
+      0,
+      'sparse reads must not count queued_seen telemetry',
+    );
   });
 
   test('GET thread-context responseMode=anchor keeps anchor behavior (F236 Track-1)', async () => {
@@ -3584,11 +4446,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 99,
-        catId: 'opus',
-      },
+      payload: prWaitPayload(),
     });
 
     assert.equal(response.statusCode, 200);
@@ -3599,6 +4457,9 @@ describe('Callback Routes', () => {
     assert.equal(body.task.ownerCatId, 'opus');
     assert.equal(body.task.threadId, 'thread-pr');
     assert.ok(body.task.createdAt > 0);
+    assert.equal(body.await.generation, 1);
+    assert.deepEqual(body.await.continuation.when, [{ kind: 'pr_head_changed' }]);
+    assert.equal(body.await.baseline.headSha, 'test-head');
 
     // Verify stored in taskStore
     const found = taskStore.getBySubject('pr:zts212653/cat-cafe#99');
@@ -3606,108 +4467,985 @@ describe('Callback Routes', () => {
     assert.equal(found.threadId, 'thread-pr');
   });
 
+  test('POST register-pr-tracking snapshots live baseline before verifying an exact review-result trigger', async () => {
+    const verificationCalls = [];
+    const callOrder = [];
+    const app = await createApp({
+      fetchPrWaitBaseline: async () => {
+        callOrder.push('fetch-baseline');
+        return {
+          baseline: {
+            capturedAt: 100,
+            headSha: 'head-before-review',
+            review: {
+              inlineCommentCursor: 10,
+              conversationCommentCursor: 11,
+              decisionCursor: 20,
+              resultTriggerCommentId: 4936000000,
+              resultTriggerHeadSha: 'head-before-review',
+            },
+          },
+          collectorState: {
+            review: {
+              lastInlineCommentCursor: 10,
+              lastConversationCommentCursor: 11,
+              lastDecisionCursor: 20,
+            },
+          },
+        };
+      },
+      verifyPrReviewEventWaitCoverage: async (input) => {
+        callOrder.push('verify-coverage');
+        verificationCalls.push(input);
+        return {
+          covered: true,
+          triggerCommentId: input.triggerCommentId,
+          observedAt: 1_783_700_000_000,
+        };
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-sol', 'thread-pr-event');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: prWaitPayload({
+        repoFullName: 'Zts212653/Cat-Cafe',
+        prNumber: 2856,
+        when: [{ kind: 'pr_review_result_available', triggerCommentId: 4936000000 }],
+      }),
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      callOrder,
+      ['fetch-baseline', 'verify-coverage'],
+      'baseline must be frozen before coverage verification so a result posted in between cannot be lost',
+    );
+    assert.deepEqual(verificationCalls, [
+      {
+        repoFullName: 'Zts212653/Cat-Cafe',
+        prNumber: 2856,
+        triggerCommentId: 4936000000,
+      },
+    ]);
+    const body = JSON.parse(response.body);
+    assert.deepEqual(body.await, {
+      v: 1,
+      generation: 1,
+      subjectRef: 'pr:zts212653/cat-cafe#2856',
+      ownerFence: { kind: 'containing_task', generation: 1 },
+      baseline: {
+        capturedAt: 100,
+        headSha: 'head-before-review',
+        review: {
+          inlineCommentCursor: 10,
+          conversationCommentCursor: 11,
+          decisionCursor: 20,
+          resultTriggerCommentId: 4936000000,
+          resultTriggerHeadSha: 'head-before-review',
+        },
+      },
+      continuation: {
+        when: [{ kind: 'pr_review_result_available', triggerCommentId: 4936000000 }],
+        // biome-ignore lint/suspicious/noThenProperty: F280's frozen wait contract field.
+        then: 'Re-lock the exact HEAD and continue.',
+      },
+      expiresAt: body.await.expiresAt,
+      createdAt: body.await.createdAt,
+      provenance: 'explicit_registration',
+    });
+  });
+
+  test('POST register-pr-tracking atomically supersedes the active generation with a fresh baseline', async () => {
+    const baselineCalls = [];
+    const lifecycleEvents = [];
+    const baselines = [
+      {
+        baseline: { capturedAt: 100, headSha: 'head-before-push' },
+        collectorState: { ci: { headSha: 'head-before-push' } },
+      },
+      {
+        baseline: {
+          capturedAt: 200,
+          headSha: 'head-after-push',
+          review: {
+            inlineCommentCursor: 30,
+            conversationCommentCursor: 31,
+            decisionCursor: 40,
+            resultTriggerCommentId: 4936000010,
+            resultTriggerHeadSha: 'head-after-push',
+          },
+        },
+        collectorState: {
+          ci: { headSha: 'head-after-push' },
+          review: {
+            lastInlineCommentCursor: 30,
+            lastConversationCommentCursor: 31,
+            lastDecisionCursor: 40,
+          },
+        },
+      },
+    ];
+    const app = await createApp({
+      fetchPrWaitBaseline: async () => {
+        baselineCalls.push('fetch-baseline');
+        return baselines.shift();
+      },
+      verifyPrReviewEventWaitCoverage: async (input) => ({
+        covered: true,
+        triggerCommentId: input.triggerCommentId,
+        observedAt: 1_783_700_000_010,
+      }),
+      waitLifecycleHolder: {
+        current: {
+          async recordOutcomeEvent(taskId, outcome) {
+            lifecycleEvents.push({ taskId, outcome });
+          },
+        },
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-sol', 'thread-pr-event-refresh');
+    const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
+
+    const initial = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers,
+      payload: prWaitPayload({ prNumber: 2860 }),
+    });
+    assert.equal(initial.statusCode, 200);
+    assert.equal(JSON.parse(initial.body).task.automationState.ci.headSha, 'head-before-push');
+
+    const refreshed = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers,
+      payload: prWaitPayload({
+        prNumber: 2860,
+        when: [{ kind: 'pr_review_result_available', triggerCommentId: 4936000010 }],
+      }),
+    });
+
+    assert.equal(refreshed.statusCode, 200);
+    assert.deepEqual(baselineCalls, ['fetch-baseline', 'fetch-baseline']);
+    const body = JSON.parse(refreshed.body);
+    assert.equal(body.await.generation, 2);
+    assert.equal(body.await.baseline.headSha, 'head-after-push');
+    assert.equal(body.task.automationState.ci.headSha, 'head-after-push');
+    assert.equal(body.task.automationState.review.lastInlineCommentCursor, 30);
+    assert.equal(body.task.automationState.review.lastConversationCommentCursor, 31);
+    assert.equal(body.task.automationState.review.lastDecisionCursor, 40);
+    assert.equal(body.task.automationState.waitOutcome.reason, 'superseded');
+    assert.equal(body.task.automationState.waitOutcome.generation, 1);
+    assert.equal(lifecycleEvents.length, 1);
+    assert.equal(lifecycleEvents[0].outcome.reason, 'superseded');
+  });
+
+  test('POST register-pr-tracking rejects an unverified exact review-result trigger without creating a wait', async () => {
+    const app = await createApp({
+      verifyPrReviewEventWaitCoverage: async (input) => ({
+        covered: false,
+        reason: 'review_not_accepted',
+        triggerCommentId: input.triggerCommentId,
+        observedAt: 1_783_700_000_001,
+      }),
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-sol', 'thread-pr-event');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: prWaitPayload({
+        prNumber: 2857,
+        when: [{ kind: 'pr_review_result_available', triggerCommentId: 4936000001 }],
+      }),
+    });
+
+    assert.equal(response.statusCode, 422);
+    const body = JSON.parse(response.body);
+    assert.equal(body.reason, 'review_not_accepted');
+    assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#2857'), null);
+  });
+
+  test('POST register-pr-tracking rejects every deleted legacy PR mode field', async () => {
+    let verificationCalled = false;
+    const app = await createApp({
+      verifyPrReviewEventWaitCoverage: async () => {
+        verificationCalled = true;
+        throw new Error('must not verify an ineligible wait intent');
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-sol', 'thread-pr-event');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: prWaitPayload({
+        prNumber: 2859,
+        intent: 'merge',
+        eventWait: { expectedSignal: 'review_posted', triggerCommentId: 4936000003 },
+        wakePolicy: 'human_participant_activity',
+        instructions: 'legacy prose',
+      }),
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(JSON.parse(response.body).error, 'Invalid request body');
+    assert.equal(verificationCalled, false);
+    assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#2859'), null);
+  });
+
+  test('POST register-pr-tracking fails closed when callback coverage query fails', async () => {
+    const app = await createApp({
+      verifyPrReviewEventWaitCoverage: async () => {
+        throw new Error('GitHub unavailable');
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-sol', 'thread-pr-event');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: prWaitPayload({
+        prNumber: 2858,
+        when: [{ kind: 'pr_review_result_available', triggerCommentId: 4936000002 }],
+      }),
+    });
+
+    assert.equal(response.statusCode, 503);
+    assert.match(JSON.parse(response.body).error, /coverage unavailable/i);
+    assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#2858'), null);
+  });
+
+  test('POST register-pr-tracking rejects invocation-bound soft-deleted thread without creating a task', async () => {
+    const deletedThread = await threadStore.create('user-1', 'thread-deleted-pr-tracking');
+    assert.equal(await threadStore.softDelete(deletedThread.id), true);
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', deletedThread.id);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: prWaitPayload({ prNumber: 2771 }),
+    });
+
+    assert.equal(response.statusCode, 410);
+    const body = JSON.parse(response.body);
+    assert.equal(body.code, 'THREAD_DELETED');
+    assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#2771'), null);
+  });
+
+  test('POST record-external-review-verdict binds the verdict and delivery outcome to the callback principal', async () => {
+    const calls = [];
+    const app = await createApp({
+      externalReviewVerdictService: {
+        async record(input) {
+          calls.push(input);
+          return {
+            subjectKey: 'pr:zts212653/cat-cafe#2856',
+            headSha: 'head-current',
+            verdict: input.verdict,
+            delivery: {
+              kind: 'pending_delivery',
+              headSha: 'head-current',
+              ownerCatId: input.principal.catId,
+              reason: input.delivery.reason,
+              createdAt: 10_000,
+            },
+            lifecycle: 'pending_delivery',
+          };
+        },
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-sol', 'thread-pr-event');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: {
+        repoFullName: 'zts212653/cat-cafe',
+        prNumber: 2856,
+        reviewedHeadSha: 'head-current',
+        verdict: 'changes_requested',
+        summary: 'One blocking finding remains.',
+        userNudgeRequired: true,
+        delivery: { kind: 'pending_delivery', reason: 'GitHub write unavailable' },
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(JSON.parse(response.body).delivery.ownerCatId, 'codex-sol');
+    assert.deepEqual(calls[0].principal, { catId: 'codex-sol', threadId: 'thread-pr-event' });
+    assert.equal(calls[0].userNudgeRequired, true);
+    assert.equal(calls[0].delivery.ownerCatId, undefined, 'caller cannot supply the pending owner');
+  });
+
+  test('POST record-external-review-verdict recovers the invocation-carried action lease and rejects caller drift', async () => {
+    const { InvocationRecordStore } = await import(
+      '../dist/domains/cats/services/stores/ports/InvocationRecordStore.js'
+    );
+    const invocationRecordStore = new InvocationRecordStore();
+    const { invocationId: parentInvocationId } = invocationRecordStore.create({
+      threadId: 'thread-pr-event',
+      userId: 'user-1',
+      targetCats: ['codex-sol'],
+      intent: 'execute',
+      idempotencyKey: 'review-verdict-action-carrier',
+      actionLeaseCarrier: {
+        kind: 'action_successor',
+        leaseId: 'lease-review-1',
+        generation: 2,
+      },
+    });
+    const calls = [];
+    const app = await createApp({
+      invocationRecordStore,
+      externalReviewVerdictService: {
+        async record(input) {
+          calls.push(input);
+          return {
+            subjectKey: 'pr:zts212653/cat-cafe#2856',
+            headSha: 'head-current',
+            verdict: input.verdict,
+            delivery: {
+              kind: 'delivered',
+              headSha: 'head-current',
+              githubUrl: input.delivery.githubUrl,
+              createdAt: 10_000,
+            },
+            lifecycle: 'delivered',
+          };
+        },
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create(
+      'user-1',
+      'codex-sol',
+      'thread-pr-event',
+      parentInvocationId,
+    );
+    const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
+    const payload = {
+      repoFullName: 'zts212653/cat-cafe',
+      prNumber: 2856,
+      reviewedHeadSha: 'head-current',
+      verdict: 'approved',
+      summary: 'LGTM',
+      delivery: {
+        kind: 'delivered',
+        githubUrl: 'https://github.com/zts212653/clowder-ai/pull/2856#pullrequestreview-101',
+      },
+    };
+
+    const recovered = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers,
+      payload,
+    });
+    assert.equal(recovered.statusCode, 200);
+    assert.deepEqual(calls[0].actionLeaseRef, { leaseId: 'lease-review-1', generation: 2 });
+
+    const mismatched = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers,
+      payload: {
+        ...payload,
+        actionLeaseRef: { leaseId: 'lease-other', generation: 3 },
+      },
+    });
+    assert.equal(mismatched.statusCode, 409);
+    assert.equal(JSON.parse(mismatched.body).code, 'action_lease_mismatch');
+    assert.equal(calls.length, 1, 'caller drift must fail before verdict persistence');
+
+    const { invocationId: wrongScopeParentId } = invocationRecordStore.create({
+      threadId: 'thread-pr-event',
+      userId: 'user-1',
+      targetCats: ['opus'],
+      intent: 'execute',
+      idempotencyKey: 'review-verdict-wrong-holder',
+      actionLeaseCarrier: {
+        kind: 'action_successor',
+        leaseId: 'lease-review-2',
+        generation: 1,
+      },
+    });
+    const wrongScopeAuth = await registry.create('user-1', 'codex-sol', 'thread-pr-event', wrongScopeParentId);
+    const wrongScope = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers: {
+        'x-invocation-id': wrongScopeAuth.invocationId,
+        'x-callback-token': wrongScopeAuth.callbackToken,
+      },
+      payload,
+    });
+    assert.equal(wrongScope.statusCode, 403);
+    assert.equal(JSON.parse(wrongScope.body).code, 'wrong_principal');
+    assert.equal(calls.length, 1, 'out-of-scope carrier must fail before verdict persistence');
+  });
+
+  test('POST record-external-review-verdict fails closed on missing carriers but permits explicit non-action parents', async () => {
+    const { InvocationRecordStore } = await import(
+      '../dist/domains/cats/services/stores/ports/InvocationRecordStore.js'
+    );
+    const invocationRecordStore = new InvocationRecordStore();
+    const calls = [];
+    const externalReviewVerdictService = {
+      async record(input) {
+        calls.push(input);
+        return {
+          subjectKey: 'pr:zts212653/cat-cafe#2856',
+          headSha: 'head-current',
+          verdict: input.verdict,
+          delivery: {
+            kind: 'delivered',
+            headSha: 'head-current',
+            githubUrl: input.delivery.githubUrl,
+            createdAt: 10_000,
+          },
+          lifecycle: 'delivered',
+        };
+      },
+    };
+    const app = await createApp({
+      invocationRecordStore,
+      externalReviewVerdictService,
+    });
+    const payload = {
+      repoFullName: 'zts212653/cat-cafe',
+      prNumber: 2856,
+      reviewedHeadSha: 'head-current',
+      verdict: 'approved',
+      summary: 'LGTM',
+      delivery: {
+        kind: 'delivered',
+        githubUrl: 'https://github.com/zts212653/clowder-ai/pull/2856#pullrequestreview-102',
+      },
+    };
+
+    const missingParentAuth = await registry.create(
+      'user-1',
+      'codex-sol',
+      'thread-pr-event',
+      'missing-parent-invocation',
+    );
+    const missingParent = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers: {
+        'x-invocation-id': missingParentAuth.invocationId,
+        'x-callback-token': missingParentAuth.callbackToken,
+      },
+      payload,
+    });
+    assert.equal(missingParent.statusCode, 409);
+    assert.equal(JSON.parse(missingParent.body).code, 'action_lease_required');
+    assert.equal(calls.length, 0, 'missing parent must fail before verdict persistence');
+
+    const noStoreApp = await createApp({ externalReviewVerdictService });
+    const noStoreAuth = await registry.create('user-1', 'codex-sol', 'thread-pr-event', 'parent-without-store');
+    const noStore = await noStoreApp.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers: {
+        'x-invocation-id': noStoreAuth.invocationId,
+        'x-callback-token': noStoreAuth.callbackToken,
+      },
+      payload,
+    });
+    assert.equal(noStore.statusCode, 503);
+    assert.equal(JSON.parse(noStore.body).code, 'action_lease_preflight_unavailable');
+    assert.equal(calls.length, 0, 'missing carrier read surface must fail before verdict persistence');
+
+    const unclassifiedApp = await createApp({
+      invocationRecordStore: {
+        async get() {
+          return {
+            id: 'unclassified-parent',
+            threadId: 'thread-pr-event',
+            userId: 'user-1',
+            userMessageId: null,
+            targetCats: ['codex-sol'],
+            intent: 'execute',
+            status: 'running',
+            idempotencyKey: 'unclassified-parent',
+            createdAt: 1,
+            updatedAt: 1,
+          };
+        },
+      },
+      externalReviewVerdictService,
+    });
+    const unclassifiedAuth = await registry.create('user-1', 'codex-sol', 'thread-pr-event', 'unclassified-parent');
+    const unclassified = await unclassifiedApp.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers: {
+        'x-invocation-id': unclassifiedAuth.invocationId,
+        'x-callback-token': unclassifiedAuth.callbackToken,
+      },
+      payload,
+    });
+    assert.equal(unclassified.statusCode, 409);
+    assert.equal(JSON.parse(unclassified.body).code, 'action_lease_required');
+    assert.equal(calls.length, 0, 'unclassified parent must fail before verdict persistence');
+
+    const { invocationId: ordinaryParentId } = invocationRecordStore.create({
+      threadId: 'thread-pr-event',
+      userId: 'user-1',
+      targetCats: ['codex-sol'],
+      intent: 'execute',
+      idempotencyKey: 'ordinary-review-parent',
+      actionLeaseCarrier: { kind: 'none' },
+    });
+    const ordinaryAuth = await registry.create('user-1', 'codex-sol', 'thread-pr-event', ordinaryParentId);
+    const ordinaryHeaders = {
+      'x-invocation-id': ordinaryAuth.invocationId,
+      'x-callback-token': ordinaryAuth.callbackToken,
+    };
+    const ordinary = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers: ordinaryHeaders,
+      payload,
+    });
+    assert.equal(ordinary.statusCode, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].actionLeaseRef, undefined);
+
+    const injectedLease = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers: ordinaryHeaders,
+      payload: {
+        ...payload,
+        actionLeaseRef: { leaseId: 'lease-injected', generation: 1 },
+      },
+    });
+    assert.equal(injectedLease.statusCode, 409);
+    assert.equal(JSON.parse(injectedLease.body).code, 'action_lease_mismatch');
+    assert.equal(calls.length, 1, 'explicit non-action carrier must reject caller-injected leases');
+  });
+
+  test('POST record-external-review-verdict rejects a naked verdict and maps stale HEAD conflicts', async () => {
+    const { ExternalReviewVerdictError } = await import(
+      '../dist/domains/community/external-review/ExternalReviewVerdictService.js'
+    );
+    let calls = 0;
+    const app = await createApp({
+      externalReviewVerdictService: {
+        async record() {
+          calls += 1;
+          throw new ExternalReviewVerdictError('stale_head', 'reviewedHeadSha is stale');
+        },
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-sol', 'thread-pr-event');
+    const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
+    const base = {
+      repoFullName: 'zts212653/cat-cafe',
+      prNumber: 2856,
+      reviewedHeadSha: 'head-old',
+      verdict: 'approved',
+      summary: 'LGTM',
+    };
+
+    const unauthenticatedNaked = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      payload: base,
+    });
+    assert.equal(unauthenticatedNaked.statusCode, 401);
+
+    const naked = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers,
+      payload: base,
+    });
+    assert.equal(naked.statusCode, 400);
+    assert.equal(calls, 0);
+
+    const stale = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-external-review-verdict',
+      headers,
+      payload: {
+        ...base,
+        delivery: {
+          kind: 'delivered',
+          githubUrl: 'https://github.com/zts212653/clowder-ai/pull/2856#pullrequestreview-100',
+        },
+      },
+    });
+    assert.equal(stale.statusCode, 409);
+    assert.equal(JSON.parse(stale.body).code, 'stale_head');
+  });
+
+  test('POST record-local-review-verdict recovers the action carrier and binds the callback principal', async () => {
+    const { InvocationRecordStore } = await import(
+      '../dist/domains/cats/services/stores/ports/InvocationRecordStore.js'
+    );
+    const invocationRecordStore = new InvocationRecordStore();
+    const { invocationId: parentInvocationId } = invocationRecordStore.create({
+      threadId: 'thread-review',
+      userId: 'user-1',
+      targetCats: ['codex-terra'],
+      intent: 'execute',
+      idempotencyKey: 'local-review-action-carrier',
+      actionLeaseCarrier: {
+        kind: 'action_successor',
+        leaseId: 'lease-review-local-1',
+        generation: 3,
+      },
+    });
+    const calls = [];
+    const app = await createApp({
+      invocationRecordStore,
+      localReviewVerdictService: {
+        async record(input) {
+          calls.push(input);
+          return {
+            outcome: 'committed',
+            leaseId: input.leaseId,
+            generation: input.generation,
+            evidenceRef: `local-review:${input.messageId}:g${input.generation}:${input.verdict}`,
+          };
+        },
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create(
+      'user-1',
+      'codex-terra',
+      'thread-review',
+      parentInvocationId,
+    );
+    const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
+    const payload = {
+      messageId: 'message-verdict-1',
+      reviewedHeadSha: 'a'.repeat(40),
+      verdict: 'changes_requested',
+    };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-local-review-verdict',
+      headers,
+      payload,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(calls[0], {
+      leaseId: 'lease-review-local-1',
+      generation: 3,
+      messageId: 'message-verdict-1',
+      headSha: 'a'.repeat(40),
+      verdict: 'changes_requested',
+      now: calls[0].now,
+      principal: { catId: 'codex-terra', threadId: 'thread-review', tenantScope: 'user-1' },
+    });
+
+    const drift = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-local-review-verdict',
+      headers,
+      payload: { ...payload, actionLeaseRef: { leaseId: 'other-lease', generation: 1 } },
+    });
+    assert.equal(drift.statusCode, 409);
+    assert.equal(JSON.parse(drift.body).code, 'action_lease_mismatch');
+    assert.equal(calls.length, 1);
+
+    for (const messageId of ['message:verdict:1', 'message verdict 1']) {
+      const malformedMessage = await app.inject({
+        method: 'POST',
+        url: '/api/callbacks/record-local-review-verdict',
+        headers,
+        payload: { ...payload, messageId },
+      });
+      assert.equal(malformedMessage.statusCode, 400);
+      assert.equal(calls.length, 1, 'malformed message ids must be rejected before the service boundary');
+    }
+
+    const ordinaryInvocation = await registry.create('user-1', 'codex-terra', 'thread-review');
+    const uncarried = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-local-review-verdict',
+      headers: {
+        'x-invocation-id': ordinaryInvocation.invocationId,
+        'x-callback-token': ordinaryInvocation.callbackToken,
+      },
+      payload: {
+        ...payload,
+        actionLeaseRef: { leaseId: 'lease-review-local-1', generation: 3 },
+      },
+    });
+    assert.equal(uncarried.statusCode, 409);
+    assert.equal(JSON.parse(uncarried.body).code, 'action_lease_required');
+    assert.equal(calls.length, 1, 'request-body lease truth must not replace a verified invocation carrier');
+  });
+
+  test('POST record-local-review-verdict accepts only an exact invocation action-successor carrier', async () => {
+    const calls = [];
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-terra', 'thread-review-exact');
+    let carrier = {
+      kind: 'action_successor',
+      leaseId: 'lease-review-exact-1',
+      generation: 2,
+    };
+    const app = await createApp({
+      invocationRecordStore: {
+        async get(requestedInvocationId) {
+          assert.equal(requestedInvocationId, invocationId);
+          return {
+            threadId: 'thread-review-exact',
+            userId: 'user-1',
+            targetCats: ['codex-terra'],
+            actionLeaseCarrier: carrier,
+          };
+        },
+      },
+      localReviewVerdictService: {
+        async record(input) {
+          calls.push(input);
+          return {
+            outcome: 'committed',
+            leaseId: input.leaseId,
+            generation: input.generation,
+            evidenceRef: `local-review:${input.messageId}:g${input.generation}:${input.verdict}`,
+          };
+        },
+      },
+    });
+    const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
+    const payload = {
+      messageId: 'message-verdict-exact-1',
+      reviewedHeadSha: 'b'.repeat(40),
+      verdict: 'approved',
+    };
+
+    const exactCarrier = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-local-review-verdict',
+      headers,
+      payload,
+    });
+    assert.equal(exactCarrier.statusCode, 200);
+    assert.equal(calls[0].leaseId, 'lease-review-exact-1');
+    assert.equal(calls[0].generation, 2);
+
+    carrier = { kind: 'none' };
+    const nonActionCarrier = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/record-local-review-verdict',
+      headers,
+      payload: {
+        ...payload,
+        actionLeaseRef: { leaseId: 'lease-review-exact-1', generation: 2 },
+      },
+    });
+    assert.equal(nonActionCarrier.statusCode, 409);
+    assert.equal(JSON.parse(nonActionCarrier.body).code, 'action_lease_required');
+    assert.equal(calls.length, 1);
+  });
+
+  test('POST recover-local-review-verdict uses predecessor callback identity without accepting a caller-supplied carrier', async () => {
+    const calls = [];
+    const app = await createApp({
+      localReviewVerdictService: {
+        async record() {
+          throw new Error('ordinary carrier path must remain separate');
+        },
+        async recover(input) {
+          calls.push(input);
+          return {
+            outcome: 'committed',
+            leaseId: input.leaseId,
+            generation: input.generation,
+            evidenceRef: `local-review:${input.messageId}:g${input.generation}:${input.verdict}`,
+          };
+        },
+      },
+    });
+    const { invocationId, callbackToken } = await registry.create('user-1', 'codex-sol', 'thread-author');
+    const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
+    const payload = {
+      messageId: 'message-verdict-recovery-1',
+      reviewedHeadSha: 'c'.repeat(40),
+      verdict: 'changes_requested',
+      actionLeaseRef: { leaseId: 'lease-stale-review-1', generation: 1 },
+    };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/recover-local-review-verdict',
+      headers,
+      payload,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(calls[0], {
+      leaseId: 'lease-stale-review-1',
+      generation: 1,
+      messageId: 'message-verdict-recovery-1',
+      headSha: 'c'.repeat(40),
+      verdict: 'changes_requested',
+      now: calls[0].now,
+      principal: { catId: 'codex-sol', threadId: 'thread-author', tenantScope: 'user-1' },
+    });
+
+    const missingFence = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/recover-local-review-verdict',
+      headers,
+      payload: {
+        messageId: payload.messageId,
+        reviewedHeadSha: payload.reviewedHeadSha,
+        verdict: payload.verdict,
+      },
+    });
+    assert.equal(missingFence.statusCode, 400);
+    assert.equal(calls.length, 1);
+  });
+
   // F140: wake intent — default 'review' (quiet), explicit 'merge', and re-register preserves it.
 
-  test('POST register-pr-tracking defaults intent to review and persists it structurally', async () => {
+  test('POST register-pr-tracking persists only the explicit predicate contract', async () => {
     const app = await createApp();
     const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-pr');
     const response = await app.inject({
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
-      payload: { repoFullName: 'zts212653/cat-cafe', prNumber: 101 },
+      payload: prWaitPayload({ prNumber: 101 }),
     });
     assert.equal(response.statusCode, 200);
     const body = JSON.parse(response.body);
-    assert.equal(body.task.automationState.intent, 'review', 'absent intent persists as review');
+    assert.deepEqual(body.task.automationState.await.continuation.when, [{ kind: 'pr_head_changed' }]);
+    for (const legacyKey of ['intent', 'wakePolicy', 'trackingInstructions', 'eventWait']) {
+      assert.equal(Object.hasOwn(body.task.automationState, legacyKey), false);
+    }
   });
 
-  test('POST register-pr-tracking accepts intent=merge', async () => {
+  test('POST register-pr-tracking accepts a bounded flat any-of predicate set', async () => {
     const app = await createApp();
     const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-pr');
     const response = await app.inject({
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
-      payload: { repoFullName: 'zts212653/cat-cafe', prNumber: 102, intent: 'merge' },
+      payload: prWaitPayload({
+        prNumber: 102,
+        when: [{ kind: 'pr_ci_terminal' }, { kind: 'pr_became_conflicting' }],
+        nextStep: 'Re-check checks and mergeability.',
+      }),
     });
     assert.equal(response.statusCode, 200);
-    assert.equal(JSON.parse(response.body).task.automationState.intent, 'merge');
+    assert.deepEqual(JSON.parse(response.body).await.continuation.when, [
+      { kind: 'pr_ci_terminal' },
+      { kind: 'pr_became_conflicting' },
+    ]);
   });
 
-  test('POST register-pr-tracking re-register without intent preserves a prior merge intent', async () => {
+  test('POST register-pr-tracking re-register creates the next generation and replaces the predicate set', async () => {
     const app = await createApp();
     const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-pr');
     const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
-    // 1) register with merge intent
-    await app.inject({
+    const first = await app.inject({
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers,
-      payload: { repoFullName: 'zts212653/cat-cafe', prNumber: 103, intent: 'merge' },
+      payload: prWaitPayload({ prNumber: 103, when: [{ kind: 'pr_ci_terminal' }] }),
     });
-    // 2) re-register WITHOUT intent — must not silently downgrade to review
+    assert.equal(first.statusCode, 200);
     const response = await app.inject({
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers,
-      payload: { repoFullName: 'zts212653/cat-cafe', prNumber: 103 },
+      payload: prWaitPayload({ prNumber: 103, when: [{ kind: 'pr_head_changed' }] }),
     });
-    assert.equal(response.statusCode, 200);
-    assert.equal(
-      JSON.parse(response.body).task.automationState.intent,
-      'merge',
-      'intent-less re-register preserves merge',
-    );
-  });
-
-  test('POST register-pr-tracking allows empty instructions to clear stored instructions', async () => {
-    const app = await createApp();
-    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-pr');
-    const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
-
-    await app.inject({
-      method: 'POST',
-      url: '/api/callbacks/register-pr-tracking',
-      headers,
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 104,
-        instructions: 'Old guidance',
-      },
-    });
-
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/callbacks/register-pr-tracking',
-      headers,
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 104,
-        instructions: '',
-      },
-    });
-
     assert.equal(response.statusCode, 200);
     const body = JSON.parse(response.body);
-    assert.equal(body.task.automationState.trackingInstructions, '');
-
-    const stored = taskStore.getBySubject('pr:zts212653/cat-cafe#104');
-    assert.equal(stored.automationState.trackingInstructions, '');
+    assert.equal(body.await.generation, 2);
+    assert.deepEqual(body.await.continuation.when, [{ kind: 'pr_head_changed' }]);
+    assert.equal(body.task.automationState.waitOutcome.reason, 'superseded');
   });
 
-  test('POST register-pr-tracking seeds PR feedback and CI boundaries after unregister/re-register', async () => {
+  test('POST register-pr-tracking rejects an actor policy instead of guessing signal value from identity', async () => {
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-pr-policy');
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: prWaitPayload({
+        prNumber: 1185,
+        wakePolicy: 'human_participant_activity',
+      }),
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#1185'), null);
+  });
+
+  test('POST register-pr-tracking rejects source prose injection', async () => {
+    const app = await createApp();
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-pr');
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-pr-tracking',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: prWaitPayload({
+        prNumber: 104,
+        instructions: 'Raw source text must never enter a PR wake.',
+      }),
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#104'), null);
+  });
+
+  test('POST register-pr-tracking captures a fresh live baseline after unregister/re-register', async () => {
     const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
     const app = Fastify();
-    const boundaryCalls = [];
-    const boundaries = [
+    const baselineCalls = [];
+    const baselines = [
       {
-        review: { lastCommentCursor: 10, lastDecisionCursor: 20 },
-        ci: { headSha: 'sha-old', lastFingerprint: 'sha-old:pass', lastBucket: 'pass' },
+        baseline: {
+          capturedAt: 10,
+          headSha: 'sha-old',
+          review: { inlineCommentCursor: 10, conversationCommentCursor: 11, decisionCursor: 20 },
+          ci: { bucket: 'pass', fingerprint: 'sha-old:pass' },
+        },
+        collectorState: {
+          review: {
+            lastInlineCommentCursor: 10,
+            lastConversationCommentCursor: 11,
+            lastDecisionCursor: 20,
+          },
+          ci: { headSha: 'sha-old', lastFingerprint: 'sha-old:pass', lastBucket: 'pass' },
+        },
       },
       {
-        review: { lastCommentCursor: 110, lastDecisionCursor: 220 },
-        ci: { headSha: 'sha-current', lastFingerprint: 'sha-current:fail', lastBucket: 'fail' },
+        baseline: {
+          capturedAt: 20,
+          headSha: 'sha-current',
+          review: { inlineCommentCursor: 110, conversationCommentCursor: 111, decisionCursor: 220 },
+          ci: { bucket: 'fail', fingerprint: 'sha-current:fail' },
+        },
+        collectorState: {
+          review: {
+            lastInlineCommentCursor: 110,
+            lastConversationCommentCursor: 111,
+            lastDecisionCursor: 220,
+          },
+          ci: { headSha: 'sha-current', lastFingerprint: 'sha-current:fail', lastBucket: 'fail' },
+        },
       },
     ];
     await app.register(callbacksRoutes, {
@@ -3719,9 +5457,9 @@ describe('Callback Routes', () => {
       evidenceStore,
       reflectionService,
       markerQueue,
-      fetchPrTrackingBoundary: async (repoFullName, prNumber) => {
-        boundaryCalls.push({ repoFullName, prNumber });
-        return boundaries.shift();
+      fetchPrWaitBaseline: async (repoFullName, prNumber) => {
+        baselineCalls.push({ repoFullName, prNumber });
+        return baselines.shift();
       },
     });
 
@@ -3734,10 +5472,11 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: firstHeaders,
-      payload: { repoFullName: 'zts212653/cat-cafe', prNumber: 105 },
+      payload: prWaitPayload({ prNumber: 105 }),
     });
     assert.equal(first.statusCode, 200);
-    assert.equal(JSON.parse(first.body).task.automationState.review.lastCommentCursor, 10);
+    assert.equal(JSON.parse(first.body).task.automationState.review.lastInlineCommentCursor, 10);
+    assert.equal(JSON.parse(first.body).task.automationState.review.lastConversationCommentCursor, 11);
     assert.equal(JSON.parse(first.body).task.automationState.review.lastDecisionCursor, 20);
     assert.equal(JSON.parse(first.body).task.automationState.ci.lastFingerprint, 'sha-old:pass');
 
@@ -3757,22 +5496,24 @@ describe('Callback Routes', () => {
         'x-invocation-id': secondInvocation.invocationId,
         'x-callback-token': secondInvocation.callbackToken,
       },
-      payload: { repoFullName: 'zts212653/cat-cafe', prNumber: 105 },
+      payload: prWaitPayload({ prNumber: 105 }),
     });
     assert.equal(second.statusCode, 200);
-    assert.deepEqual(boundaryCalls, [
+    assert.deepEqual(baselineCalls, [
       { repoFullName: 'zts212653/cat-cafe', prNumber: 105 },
       { repoFullName: 'zts212653/cat-cafe', prNumber: 105 },
     ]);
 
     const updated = taskStore.getBySubject('pr:zts212653/cat-cafe#105');
     assert.equal(updated.threadId, 'thread-pr-new');
-    assert.equal(updated.automationState.review.lastCommentCursor, 110);
+    assert.equal(updated.automationState.await.baseline.headSha, 'sha-current');
+    assert.equal(updated.automationState.review.lastInlineCommentCursor, 110);
+    assert.equal(updated.automationState.review.lastConversationCommentCursor, 111);
     assert.equal(updated.automationState.review.lastDecisionCursor, 220);
     assert.equal(updated.automationState.ci.lastFingerprint, 'sha-current:fail');
   });
 
-  test('POST register-pr-tracking rejects boundary seeding when CI cursor is unavailable', async () => {
+  test('POST register-pr-tracking fails closed when the live baseline cannot be read', async () => {
     const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
     const app = Fastify();
     await app.register(callbacksRoutes, {
@@ -3784,9 +5525,9 @@ describe('Callback Routes', () => {
       evidenceStore,
       reflectionService,
       markerQueue,
-      fetchPrTrackingBoundary: async () => ({
-        review: { lastCommentCursor: 10, lastDecisionCursor: 20 },
-      }),
+      fetchPrWaitBaseline: async () => {
+        throw new Error('GitHub unavailable');
+      },
     });
 
     const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-pr');
@@ -3794,11 +5535,11 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
-      payload: { repoFullName: 'zts212653/cat-cafe', prNumber: 106 },
+      payload: prWaitPayload({ prNumber: 106 }),
     });
 
     assert.equal(response.statusCode, 503);
-    assert.match(JSON.parse(response.body).error, /PR tracking boundary unavailable/);
+    assert.match(JSON.parse(response.body).error, /PR wait baseline unavailable/);
     assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#106'), null);
   });
 
@@ -3809,36 +5550,29 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': 'bogus', 'x-callback-token': 'bogus' },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 1,
-        catId: 'opus',
-      },
+      payload: prWaitPayload({ prNumber: 1 }),
     });
 
     assert.equal(response.statusCode, 401);
   });
 
-  test('POST register-pr-tracking ignores payload catId, uses invocation identity', async () => {
+  test('POST register-pr-tracking rejects caller-supplied owner identity', async () => {
     const app = await createApp();
 
-    // Invocation is opus, payload sends bogus catId — server must ignore payload
     const { invocationId, callbackToken } = await registry.create('user-1', 'opus');
 
     const response = await app.inject({
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
+      payload: prWaitPayload({
         prNumber: 1,
-        catId: 'nonexistent-cat', // bogus — should be ignored
-      },
+        catId: 'nonexistent-cat',
+      }),
     });
 
-    assert.equal(response.statusCode, 200, 'payload catId is ignored, so bogus value must not cause 400');
-    const body = JSON.parse(response.body);
-    assert.equal(body.task.ownerCatId, 'opus', 'must use invocation catId, not payload');
+    assert.equal(response.statusCode, 400);
+    assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#1'), null);
   });
 
   test('POST register-pr-tracking rejects overwrite from different user (P1-2 ownership)', async () => {
@@ -3850,11 +5584,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': userA.invocationId, 'x-callback-token': userA.callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 42,
-        catId: 'opus',
-      },
+      payload: prWaitPayload({ prNumber: 42 }),
     });
     assert.equal(regA.statusCode, 200);
 
@@ -3864,11 +5594,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': userB.invocationId, 'x-callback-token': userB.callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 42,
-        catId: 'codex',
-      },
+      payload: prWaitPayload({ prNumber: 42 }),
     });
     assert.equal(regB.statusCode, 409, 'must reject overwrite from different user');
 
@@ -3896,11 +5622,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': attacker.invocationId, 'x-callback-token': attacker.callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 406,
-        instructions: 'reroute notifications',
-      },
+      payload: prWaitPayload({ prNumber: 406 }),
     });
 
     assert.equal(response.statusCode, 409);
@@ -3910,11 +5632,7 @@ describe('Callback Routes', () => {
     assert.equal(entry.threadId, 'thread-owner', 'legacy task must stay on its original thread');
     assert.equal(entry.ownerCatId, 'opus', 'legacy task owner must not be overwritten');
     assert.equal(entry.userId, undefined, 'failed takeover must not stamp attacker userId');
-    assert.equal(
-      entry.automationState?.trackingInstructions,
-      undefined,
-      'failed takeover must not update instructions',
-    );
+    assert.equal(entry.automationState, undefined, 'failed takeover must not install a wait');
   });
 
   test('POST register-pr-tracking converts atomic store ownership conflicts into 409', async () => {
@@ -3937,15 +5655,29 @@ describe('Callback Routes', () => {
             createdAt: 1,
             updatedAt: 1,
             userId: 'user-A',
+            automationState: undefined,
           };
         }
         const error = new Error('subject ownership conflict');
         error.code = 'TASK_SUBJECT_OWNERSHIP_CONFLICT';
         throw error;
       },
-      // F140: handler persists intent via patchAutomationState after a successful upsert.
-      async patchAutomationState(_taskId, patch) {
-        return { id: 'task-user-a', automationState: patch };
+      async replaceAutomationStateIfGeneration(_taskId, input) {
+        return {
+          id: 'task-user-a',
+          kind: 'pr_tracking',
+          subjectKey: 'pr:zts212653/cat-cafe#77',
+          threadId: 'thread-A',
+          title: 'PR tracking: zts212653/cat-cafe#77',
+          ownerCatId: 'opus',
+          status: 'todo',
+          why: 'track pr',
+          createdBy: 'opus',
+          createdAt: 1,
+          updatedAt: 2,
+          userId: 'user-A',
+          automationState: input.automationState,
+        };
       },
     };
 
@@ -3956,10 +5688,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': userA.invocationId, 'x-callback-token': userA.callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 77,
-      },
+      payload: prWaitPayload({ prNumber: 77 }),
     });
     assert.equal(first.statusCode, 200);
 
@@ -3968,10 +5697,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': userB.invocationId, 'x-callback-token': userB.callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 77,
-      },
+      payload: prWaitPayload({ prNumber: 77 }),
     });
 
     assert.equal(second.statusCode, 409, 'atomic ownership conflict must surface as 409');
@@ -3987,11 +5713,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': inv1.invocationId, 'x-callback-token': inv1.callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 42,
-        catId: 'opus',
-      },
+      payload: prWaitPayload({ prNumber: 42 }),
     });
 
     // Same user re-registers from thread-2 (should succeed — update)
@@ -4000,11 +5722,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': inv2.invocationId, 'x-callback-token': inv2.callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 42,
-        catId: 'opus',
-      },
+      payload: prWaitPayload({ prNumber: 42 }),
     });
     assert.equal(res.statusCode, 200);
 
@@ -4028,11 +5746,7 @@ describe('Callback Routes', () => {
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 1,
-        catId: 'opus',
-      },
+      payload: prWaitPayload({ prNumber: 1 }),
     });
 
     assert.equal(response.statusCode, 503);
@@ -4040,31 +5754,59 @@ describe('Callback Routes', () => {
     assert.ok(body.error.includes('not configured'));
   });
 
-  test('POST register-pr-tracking uses invocation catId, not payload catId (authority bug)', async () => {
+  test('POST register-pr-tracking derives owner identity from the invocation', async () => {
     const app = await createApp();
 
-    // Invocation is for opencode, but payload says opus
     const { invocationId, callbackToken } = await registry.create('user-1', 'opencode', 'thread-opencode');
 
     const response = await app.inject({
       method: 'POST',
       url: '/api/callbacks/register-pr-tracking',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
-      payload: {
-        repoFullName: 'zts212653/cat-cafe',
-        prNumber: 832,
-        catId: 'opus', // ← LLM passed wrong catId
-      },
+      payload: prWaitPayload({ prNumber: 832 }),
     });
 
     assert.equal(response.statusCode, 200);
     const body = JSON.parse(response.body);
 
-    // Server must use the authoritative catId from invocation record, not the payload
-    assert.equal(body.task.ownerCatId, 'opencode', 'must use invocation catId, not payload catId');
+    assert.equal(body.task.ownerCatId, 'opencode', 'must use invocation catId');
 
     const stored = taskStore.getBySubject('pr:zts212653/cat-cafe#832');
     assert.equal(stored.ownerCatId, 'opencode', 'stored task must have authoritative catId');
+  });
+
+  test('POST register-issue-tracking rejects invocation-bound soft-deleted thread without creating a task', async () => {
+    const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
+    const app = Fastify();
+    await app.register(callbacksRoutes, {
+      registry,
+      messageStore,
+      socketManager,
+      taskStore,
+      threadStore,
+      evidenceStore,
+      reflectionService,
+      markerQueue,
+      fetchIssueCommentCursor: async () => 1234,
+    });
+
+    const deletedThread = await threadStore.create('user-1', 'thread-deleted-issue-tracking');
+    assert.equal(await threadStore.softDelete(deletedThread.id), true);
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', deletedThread.id);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-issue-tracking',
+      headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
+      payload: {
+        repoFullName: 'zts212653/cat-cafe',
+        issueNumber: 861,
+      },
+    });
+
+    assert.equal(response.statusCode, 410);
+    const body = JSON.parse(response.body);
+    assert.equal(body.code, 'THREAD_DELETED');
+    assert.equal(taskStore.getBySubject('issue:zts212653/cat-cafe#861'), null);
   });
 
   test('POST register-issue-tracking seeds cursor from current issue comments', async () => {
@@ -4112,6 +5854,7 @@ describe('Callback Routes', () => {
       'Cloud R17 P1: lastDeliveredCursor must be seeded alongside lastCommentCursor at registration',
     );
     assert.equal(body.task.automationState.trackingInstructions, 'Watch for maintainer updates');
+    assert.equal(body.task.automationState.wakePolicy, 'all_feedback');
 
     const stored = taskStore.getBySubject('issue:zts212653/cat-cafe#861');
     assert.equal(stored.automationState.issue.lastCommentCursor, 1234);
@@ -4180,6 +5923,46 @@ describe('Callback Routes', () => {
     assert.equal(updated.automationState.issue.lastCommentCursor, 10001);
     assert.equal(updated.automationState.issue.lastNotifiedAt, 1000);
     assert.equal(updated.automationState.trackingInstructions, 'Updated instructions');
+  });
+
+  test('POST register-issue-tracking accepts and preserves human participant wake policy', async () => {
+    const { callbacksRoutes } = await import('../dist/routes/callbacks.js');
+    const app = Fastify();
+    await app.register(callbacksRoutes, {
+      registry,
+      messageStore,
+      socketManager,
+      taskStore,
+      threadStore,
+      evidenceStore,
+      reflectionService,
+      markerQueue,
+      fetchIssueCommentCursor: async () => 25,
+    });
+
+    const { invocationId, callbackToken } = await registry.create('user-1', 'opus', 'thread-issue-policy');
+    const headers = { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken };
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-issue-tracking',
+      headers,
+      payload: {
+        repoFullName: 'zts212653/cat-cafe',
+        issueNumber: 1862,
+        wakePolicy: 'human_participant_activity',
+      },
+    });
+    assert.equal(first.statusCode, 200);
+    assert.equal(JSON.parse(first.body).task.automationState.wakePolicy, 'human_participant_activity');
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/register-issue-tracking',
+      headers,
+      payload: { repoFullName: 'zts212653/cat-cafe', issueNumber: 1862 },
+    });
+    assert.equal(second.statusCode, 200);
+    assert.equal(JSON.parse(second.body).task.automationState.wakePolicy, 'human_participant_activity');
   });
 
   test('POST register-issue-tracking reseeds cursor when reactivating a done tracker', async () => {
@@ -4386,6 +6169,34 @@ describe('Callback Routes', () => {
 
     assert.equal(response.statusCode, 200);
     assert.equal(taskStore.getBySubject('pr:zts212653/cat-cafe#405'), null);
+  });
+
+  test('POST unregister-tracking rejects invocation-bound soft-deleted thread without deleting tracking task', async () => {
+    const deletedThread = await threadStore.create('user-owner', 'thread-deleted-unregister-tracking');
+    taskStore.create({
+      kind: 'pr_tracking',
+      threadId: deletedThread.id,
+      subjectKey: 'pr:zts212653/cat-cafe#406',
+      title: 'Deleted thread PR tracking',
+      why: 'must survive blocked callback delete',
+      createdBy: 'opus',
+      ownerCatId: 'opus',
+    });
+    assert.equal(await threadStore.softDelete(deletedThread.id), true);
+    const app = await createApp();
+
+    const owner = await registry.create('user-owner', 'opus', deletedThread.id);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/callbacks/unregister-tracking',
+      headers: { 'x-invocation-id': owner.invocationId, 'x-callback-token': owner.callbackToken },
+      payload: { subjectKey: 'pr:zts212653/cat-cafe#406' },
+    });
+
+    assert.equal(response.statusCode, 410);
+    const body = JSON.parse(response.body);
+    assert.equal(body.code, 'THREAD_DELETED');
+    assert.ok(taskStore.getBySubject('pr:zts212653/cat-cafe#406'), 'tracking task must remain registered');
   });
 
   // ---- F052: cross-thread identity isolation ----

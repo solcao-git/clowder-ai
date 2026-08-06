@@ -5,6 +5,7 @@
  * Data model:
  * - Hash per session record (session:{id})
  * - Sorted Set per cat+thread chain (session-chain:{catId}:{threadId}, score=seq)
+ * - Set per thread (session-chain-by-thread:{threadId} → cat+thread chain keys)
  * - String for active index (session-active:{catId}:{threadId} → id)
  * - String for CLI index (session-cli:{cliSessionId} → id)
  *
@@ -22,6 +23,8 @@ import type {
 } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import type { CreateSessionInput, ISessionChainStore, SessionRecordPatch } from '../ports/SessionChainStore.js';
+import type { StoreReadOptions } from '../ports/StoreReadOptions.js';
+import { awaitStoreRead, throwIfStoreReadAborted } from '../ports/StoreReadOptions.js';
 import { SessionChainKeys } from '../redis-keys/session-chain-keys.js';
 
 const DEFAULT_TTL_SECONDS = 0; // persistent — set >0 via env to enable expiry
@@ -29,11 +32,13 @@ const DEFAULT_TTL_SECONDS = 0; // persistent — set >0 via env to enable expiry
 /**
  * Lua: atomic create session record.
  * KEYS[1] = active key, KEYS[2] = chain key, KEYS[3] = detail key,
- * KEYS[4] = cli key, KEYS[5] = chainKey index key (F198; dummy when no chainKey)
+ * KEYS[4] = cli key, KEYS[5] = chainKey index key (F198; dummy when no chainKey),
+ * KEYS[6] = thread chain-key index
  * ARGV[1] = id, ARGV[2] = cliSessionId, ARGV[3] = threadId, ARGV[4] = catId,
  * ARGV[5] = userId, ARGV[6] = now, ARGV[7] = reuseExistingCliSession flag,
  * ARGV[8] = chainKey value ('' = none, KEYS[5] left untouched)
  * ARGV[9] = workingDirectory ('' = none), ARGV[10] = workspaceFingerprint ('' = none)
+ * ARGV[11] = bare cat+thread chain key (Lua KEYS are keyPrefix-expanded by ioredis)
  *
  * Returns: {'existing', existingId} when cliSessionId is already claimed,
  *          {'created', id, seq} when a new record is created.
@@ -58,6 +63,8 @@ if ARGV[10] ~= '' then redis.call('HSET', KEYS[3], 'workspaceFingerprint', ARGV[
 ${DEFAULT_TTL_SECONDS > 0 ? `redis.call('EXPIRE', KEYS[3], ${DEFAULT_TTL_SECONDS})` : '-- persistent mode: no EXPIRE'}
 redis.call('ZADD', KEYS[2], seq, ARGV[1])
 ${DEFAULT_TTL_SECONDS > 0 ? `redis.call('EXPIRE', KEYS[2], ${DEFAULT_TTL_SECONDS})` : '-- persistent mode: no EXPIRE'}
+redis.call('SADD', KEYS[6], ARGV[11])
+${DEFAULT_TTL_SECONDS > 0 ? `redis.call('EXPIRE', KEYS[6], ${DEFAULT_TTL_SECONDS})` : '-- persistent mode: no EXPIRE'}
 ${DEFAULT_TTL_SECONDS > 0 ? `redis.call('SET', KEYS[1], ARGV[1], 'EX', ${DEFAULT_TTL_SECONDS})` : `redis.call('SET', KEYS[1], ARGV[1])`}
 ${DEFAULT_TTL_SECONDS > 0 ? `redis.call('SET', KEYS[4], ARGV[1], 'EX', ${DEFAULT_TTL_SECONDS})` : `redis.call('SET', KEYS[4], ARGV[1])`}
 return {'created', ARGV[1], tostring(seq)}
@@ -79,6 +86,7 @@ return newCount
 
 export class RedisSessionChainStore implements ISessionChainStore {
   private readonly redis: RedisClient;
+  private threadIndexReady = false;
 
   constructor(redis: RedisClient) {
     this.redis = redis;
@@ -98,15 +106,17 @@ export class RedisSessionChainStore implements ISessionChainStore {
       // pass a placeholder 5th key to keep numkeys fixed; the Lua guards on
       // ARGV[8] !== '' so the placeholder is never written.
       const chainKeyIndexKey = SessionChainKeys.byChainKey(input.chainKey ?? '__none__');
+      const threadIndexKey = SessionChainKeys.byThread(input.threadId);
 
       const result = (await this.redis.eval(
         CREATE_LUA,
-        5,
+        6,
         activeKey,
         chainSetKey,
         detailKey,
         cliKey,
         chainKeyIndexKey,
+        threadIndexKey,
         id,
         input.cliSessionId,
         input.threadId,
@@ -117,6 +127,7 @@ export class RedisSessionChainStore implements ISessionChainStore {
         input.chainKey ?? '',
         input.workingDirectory ?? '',
         input.workspaceFingerprint ?? '',
+        chainSetKey,
       )) as [string, string, string?];
 
       const [status, recordId, seqRaw] = result;
@@ -182,30 +193,31 @@ export class RedisSessionChainStore implements ISessionChainStore {
     return records.sort((a, b) => a.seq - b.seq);
   }
 
-  async getChainByThread(threadId: string): Promise<SessionRecord[]> {
-    // Scan for all session-chain:*:{threadId} keys
-    // Since we can't easily enumerate by threadId with sorted sets,
-    // we use a secondary approach: scan detail hashes.
-    // For Phase A this is acceptable (low volume); Phase B+ can add a thread index.
-    const pattern = `session-chain:*:${threadId}`;
-    const chainKeys = await this.scanKeys(pattern);
+  async getChainByThread(threadId: string, options?: StoreReadOptions): Promise<SessionRecord[]> {
+    throwIfStoreReadAborted(options);
+    await this.ensureThreadIndex(options);
+    throwIfStoreReadAborted(options);
+    const chainKeys = await awaitStoreRead(this.redis.smembers(SessionChainKeys.byThread(threadId)), options);
 
     const allIds: string[] = [];
     for (const chainKey of chainKeys) {
-      const ids = await this.redis.zrange(chainKey, 0, -1);
+      throwIfStoreReadAborted(options);
+      const ids = await awaitStoreRead(this.redis.zrange(chainKey, 0, -1), options);
       allIds.push(...ids);
     }
     if (!allIds.length) return [];
 
     const pipeline = this.redis.pipeline();
     for (const id of allIds) {
+      throwIfStoreReadAborted(options);
       pipeline.hgetall(SessionChainKeys.detail(id));
     }
-    const results = await pipeline.exec();
+    const results = await awaitStoreRead(pipeline.exec(), options);
     if (!results) return [];
 
     const records: SessionRecord[] = [];
     for (const [err, data] of results) {
+      throwIfStoreReadAborted(options);
       if (err || !data) continue;
       const d = data as Record<string, string>;
       if (d.id) records.push(this.hydrate(d));
@@ -214,6 +226,29 @@ export class RedisSessionChainStore implements ISessionChainStore {
       if (a.catId !== b.catId) return a.catId.localeCompare(b.catId);
       return a.seq - b.seq;
     });
+  }
+
+  /**
+   * Phase A shipped before the per-thread index existed. Rebuild it once per
+   * store instance from the durable chain keys, then keep it current in the
+   * create Lua transaction. A failed/aborted rebuild deliberately leaves the
+   * flag false so the next caller retries instead of trusting a partial index.
+   */
+  private async ensureThreadIndex(options?: StoreReadOptions): Promise<void> {
+    if (this.threadIndexReady) return;
+    const chainKeys = await this.scanKeys('session-chain:*', options);
+    const BATCH_SIZE = 500;
+    for (let i = 0; i < chainKeys.length; i += BATCH_SIZE) {
+      throwIfStoreReadAborted(options);
+      const pipeline = this.redis.pipeline();
+      for (const chainKey of chainKeys.slice(i, i + BATCH_SIZE)) {
+        const threadId = parseThreadIdFromChainKey(chainKey);
+        if (threadId) pipeline.sadd(SessionChainKeys.byThread(threadId), chainKey);
+      }
+      await awaitStoreRead(pipeline.exec(), options);
+    }
+    throwIfStoreReadAborted(options);
+    this.threadIndexReady = true;
   }
 
   async update(id: string, patch: SessionRecordPatch): Promise<SessionRecord | null> {
@@ -396,23 +431,55 @@ export class RedisSessionChainStore implements ISessionChainStore {
    * We must manually add the keyPrefix for matching, then strip it from results
    * so that subsequent commands (which DO auto-prefix) work correctly.
    */
-  private async scanKeys(pattern: string): Promise<string[]> {
+  private async scanKeys(pattern: string, options?: StoreReadOptions): Promise<string[]> {
+    throwIfStoreReadAborted(options);
     const prefix = (this.redis.options as { keyPrefix?: string }).keyPrefix ?? '';
     const prefixedPattern = `${prefix}${pattern}`;
     return new Promise((resolve, reject) => {
       const keys: string[] = [];
       const stream = this.redis.scanStream({ match: prefixedPattern, count: 100 });
-      stream.on('data', (batch: string[]) => {
+      let settled = false;
+      const cleanup = (): void => {
+        options?.signal?.removeEventListener('abort', onAbort);
+        stream.removeListener('data', onData);
+        stream.removeListener('end', onEnd);
+        stream.removeListener('error', onError);
+      };
+      const finish = (error?: unknown): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error !== undefined) reject(error);
+        else resolve(keys);
+      };
+      const onData = (batch: string[]): void => {
         for (const k of batch) {
           // Strip prefix so subsequent auto-prefixing commands work
           const stripped = prefix && k.startsWith(prefix) ? k.slice(prefix.length) : k;
           keys.push(stripped);
         }
-      });
-      stream.on('end', () => resolve(keys));
-      stream.on('error', reject);
+      };
+      const onEnd = (): void => finish();
+      const onError = (error: unknown): void => finish(error);
+      const onAbort = (): void => {
+        stream.destroy();
+        finish(options?.signal?.reason);
+      };
+      stream.on('data', onData);
+      stream.on('end', onEnd);
+      stream.on('error', onError);
+      options?.signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
+}
+
+function parseThreadIdFromChainKey(chainKey: string): string | null {
+  const prefix = 'session-chain:';
+  if (!chainKey.startsWith(prefix)) return null;
+  const catAndThread = chainKey.slice(prefix.length);
+  const separator = catAndThread.indexOf(':');
+  if (separator <= 0 || separator === catAndThread.length - 1) return null;
+  return catAndThread.slice(separator + 1);
 }
 
 function safeParseJson<T>(value: string | undefined): T | null {

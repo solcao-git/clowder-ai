@@ -3,10 +3,11 @@
 import type { CapabilityTipContext } from '@cat-cafe/shared';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useShallow } from 'zustand/react/shallow';
 import { useAgentHookHealth } from '@/hooks/useAgentHookHealth';
 import { useAgentMessages } from '@/hooks/useAgentMessages';
 import { useAuthorization } from '@/hooks/useAuthorization';
-import { useCatData } from '@/hooks/useCatData';
+import { formatCatName, useCatData } from '@/hooks/useCatData';
 import { useChatHistory } from '@/hooks/useChatHistory';
 import { useChatSocketCallbacks } from '@/hooks/useChatSocketCallbacks';
 import { useCoCreatorConfig } from '@/hooks/useCoCreatorConfig';
@@ -26,7 +27,6 @@ import { useThreadLiveness, useThreadMessages } from '@/hooks/useThreadScopedSel
 import { useVadInterrupt } from '@/hooks/useVadInterrupt';
 import { useVoiceAutoPlay } from '@/hooks/useVoiceAutoPlay';
 import { useVoiceStream } from '@/hooks/useVoiceStream';
-import { useWorkspaceNavigate } from '@/hooks/useWorkspaceNavigate';
 import { type ChatMessage as ChatMessageData, type Thread, useChatStore } from '@/stores/chatStore';
 import { useGameStore } from '@/stores/gameStore';
 import { useGuideStore } from '@/stores/guideStore';
@@ -44,7 +44,11 @@ import { ChatContainerHeader } from './ChatContainerHeader';
 import { ChatInput } from './ChatInput';
 import { ChatMessage } from './ChatMessage';
 import { ConnectionStatusBar } from './ConnectionStatusBar';
-import { getStreamingTipContexts, isStreamingTipSuppressedByStatus } from './capability-tip-placement';
+import {
+  getSilentActiveTurnDeadline,
+  getStreamingTipContexts,
+  isStreamingTipSuppressed,
+} from './capability-tip-placement';
 import { FirstRunQuestWizard } from './FirstRunQuestWizard';
 import { BootcampGuideOverlay } from './first-run-quest/BootcampGuideOverlay';
 import { QuestBanner } from './first-run-quest/QuestBanner';
@@ -58,12 +62,14 @@ import { BootcampIcon } from './icons/BootcampIcon';
 import { PawIcon } from './icons/PawIcon';
 import { MessageActions } from './MessageActions';
 import { MessageNavigator } from './MessageNavigator';
+import { MobileApprovalSheet } from './MobileApprovalSheet';
 import { MobileStatusSheet } from './MobileStatusSheet';
 import { ParallelStatusBar } from './ParallelStatusBar';
 import { PendingMemberBubble } from './PendingMemberBubble';
 import { ProjectSetupCard } from './ProjectSetupCard';
-
+import { derivePendingMemberInvocations } from './pending-member-projection';
 import { QueuePanel } from './QueuePanel';
+import { collectExactLiveInvocationIds } from './queue-receipt-projection';
 import { RightStatusPanel } from './RightStatusPanel';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { SplitPaneView } from './SplitPaneView';
@@ -95,9 +101,30 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     confirmUnreadAck,
     armUnreadSuppression,
     rightPanelMode,
+    workspaceMode,
     setRightPanelMode,
     closeRightPanel,
-  } = useChatStore();
+    showVoteModal,
+    setShowVoteModal,
+    addMessage,
+  } = useChatStore(
+    useShallow((s) => ({
+      setCurrentThread: s.setCurrentThread,
+      viewMode: s.viewMode,
+      setViewMode: s.setViewMode,
+      isLoading: s.isLoading,
+      clearUnread: s.clearUnread,
+      confirmUnreadAck: s.confirmUnreadAck,
+      armUnreadSuppression: s.armUnreadSuppression,
+      rightPanelMode: s.rightPanelMode,
+      workspaceMode: s.workspaceMode,
+      setRightPanelMode: s.setRightPanelMode,
+      closeRightPanel: s.closeRightPanel,
+      showVoteModal: s.showVoteModal,
+      setShowVoteModal: s.setShowVoteModal,
+      addMessage: s.addMessage,
+    })),
+  );
   // F173 Phase C Task 3 — full read-side migration. All thread liveness +
   // messages now flow through thread-scoped selectors keyed off this
   // component's `threadId` prop, not the flat current-thread mirror. Closes
@@ -105,26 +132,9 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // covered hasActiveInvocation; this finishes the job).
   const allMessages = useThreadMessages(threadId);
 
-  // #697: Filter out messages that are still queued (not yet delivered).
-  // Without this, queued messages render in the chat stream AND in QueuePanel,
-  // causing visual duplication until the queue processor dequeues them.
-  const queueRaw = useChatStore((s) => s.queue);
-  const queuedMessageIds = useMemo(() => {
-    const ids = new Set<string>();
-    if (!queueRaw || queueRaw.length === 0) return ids;
-    for (const entry of queueRaw) {
-      if (entry.status !== 'queued') continue;
-      if (entry.messageId) ids.add(entry.messageId);
-      if (entry.mergedMessageIds) {
-        for (const mid of entry.mergedMessageIds) ids.add(mid);
-      }
-    }
-    return ids;
-  }, [queueRaw]);
-  const messages = useMemo(
-    () => (queuedMessageIds.size === 0 ? allMessages : allMessages.filter((m) => !queuedMessageIds.has(m.id))),
-    [allMessages, queuedMessageIds],
-  );
+  // F264: the timeline is the durable authoring history. QueuePanel presents
+  // custody/actions for the same message, but must not erase its user bubble.
+  const messages = allMessages;
   const {
     hasActive: hasActiveInvocation,
     activeInvocations,
@@ -133,6 +143,10 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     intentMode,
     targetCats,
   } = useThreadLiveness(threadId);
+  const activeInvocationIds = useMemo(
+    () => collectExactLiveInvocationIds(activeInvocations, catInvocations),
+    [activeInvocations, catInvocations],
+  );
   const navigateToThread = useCallback((tid: string) => {
     pushThreadRouteWithHistory(tid, typeof window !== 'undefined' ? window : undefined);
   }, []);
@@ -167,7 +181,6 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   const { cats, getCatById, refresh: refreshCats, isLoading, hasFetched } = useCatData();
   const workspaceWorktreeId = useChatStore((s) => s.workspaceWorktreeId);
   usePreviewAutoOpen(workspaceWorktreeId, threadId);
-  useWorkspaceNavigate(workspaceWorktreeId, threadId);
   useTeleport(); // F227: drive the Hub to a teleport target message (thread:teleport)
   const { isOpen: sidebarOpen, open: openSidebar, close: closeSidebar, toggle: toggleSidebar } = useSidebarStore();
   const [statusPanelOpen, setStatusPanelOpen] = useState(true);
@@ -278,9 +291,6 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   }, [handleSend]);
 
   // F079: Vote modal
-  const showVoteModal = useChatStore((s) => s.showVoteModal);
-  const setShowVoteModal = useChatStore((s) => s.setShowVoteModal);
-  const { addMessage } = useChatStore();
   const handleVoteSubmit = useCallback(
     async (config: VoteConfig) => {
       setShowVoteModal(false);
@@ -606,6 +616,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
       error: agentHookHealth.error,
       syncing: agentHookHealth.syncing,
       synced: agentHookHealth.synced,
+      syncAttempted: agentHookHealth.syncAttempted,
     });
 
   // F152 Phase B: memory bootstrap state
@@ -637,13 +648,6 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
   // F212 follow-up — UI-layer dedup for adjacent identical CliDiagnostics panels.
   // Compute once per messages change; map is keyed by messageId.
   const cliDedupMap = useMemo(() => computeCliDiagnosticsDedup(messages), [messages]);
-  // F244: Tips show in PendingMemberBubble (the "分析处理中" wait phase), not in
-  // streaming ChatMessage — operator dogfood confirmed pending is the correct timing.
-  // streamingTipMessageId removed; contexts kept for PendingMemberBubble.
-  const pendingTipContexts = useMemo<readonly CapabilityTipContext[]>(
-    () => getStreamingTipContexts(intentMode),
-    [intentMode],
-  );
   const renderSingleMessage = useCallback(
     (msg: ChatMessageData) => {
       const dedupInfo = cliDedupMap.get(msg.id);
@@ -651,6 +655,8 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
         <MessageActions key={msg.id} message={msg} threadId={threadId}>
           <ChatMessage
             message={msg}
+            threadId={threadId}
+            activeInvocationIds={activeInvocationIds}
             getCatById={getCatById}
             onEditCat={handleEditCat}
             onEditCoCreator={handleEditCoCreator}
@@ -660,10 +666,18 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
         </MessageActions>
       );
     },
-    [threadId, getCatById, handleEditCat, handleEditCoCreator, cliDedupMap],
+    [threadId, activeInvocationIds, getCatById, handleEditCat, handleEditCoCreator, cliDedupMap],
   );
 
-  const { cancelInvocation, syncRooms, socketConnected } = useSocket(socketCallbacks, threadId);
+  const splitPaneThreadIds = useChatStore((s) => s.splitPaneThreadIds);
+  const socketThreadIds = useMemo(
+    () =>
+      viewMode === 'split' && splitPaneThreadIds.length > 0
+        ? [...new Set([...splitPaneThreadIds, threadId])]
+        : [threadId],
+    [viewMode, splitPaneThreadIds, threadId],
+  );
+  const { cancelInvocation, socketConnected } = useSocket(socketCallbacks, threadId, socketThreadIds);
   const connectionStatus = useConnectionStatus(socketConnected);
 
   // Single-slot execution can be recovered from queue truth even when the
@@ -678,43 +692,42 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
     intentMode === 'execute' ||
     (intentMode == null && hasActiveInvocation && (activeInvocationCount === 1 || singleSpawningTarget));
 
-  // #936: Identify active invocations that don't yet have a corresponding message
-  // bubble — these need a pending placeholder with member avatar + animation.
-  const pendingInvocations = useMemo(() => {
-    if (!hasActiveInvocation || activeInvocationCount === 0) return [];
-    // Collect catIds that already have a streaming/recent assistant message
-    const streamingCatIds = new Set<string>();
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (!m) continue;
-      if (m.type === 'user') break; // stop at last user message boundary
-      if (m.type === 'assistant' && m.catId) {
-        streamingCatIds.add(m.catId);
-      }
+  const pendingInvocations = useMemo(
+    () => (hasActiveInvocation ? derivePendingMemberInvocations(activeInvocations, messages, threadId) : []),
+    [hasActiveInvocation, activeInvocations, messages, threadId],
+  );
+  const pendingTipContexts = useMemo<readonly CapabilityTipContext[]>(
+    () => getStreamingTipContexts(intentMode),
+    [intentMode],
+  );
+  const [, bumpPendingTipLiveness] = useState(0);
+  useEffect(() => {
+    const now = Date.now();
+    const futureDeadlines = new Set<number>();
+    for (const invocation of pendingInvocations) {
+      const deadline = getSilentActiveTurnDeadline(catInvocations[invocation.catId]?.appServerLifecycle);
+      if (deadline !== null && deadline > now) futureDeadlines.add(deadline);
     }
-    // Active invocations without a corresponding bubble = pending
-    return Object.entries(activeInvocations)
-      .filter(([, inv]) => !streamingCatIds.has(inv.catId))
-      .map(([invId, inv]) => ({ invocationId: invId, catId: inv.catId }));
-  }, [hasActiveInvocation, activeInvocationCount, activeInvocations, messages]);
+    if (futureDeadlines.size === 0) return;
 
-  // F244 dedup: only one pending bubble per thread shows tips (cloud P2).
-  // Pick the first non-stalled pending invocation.
-  const pendingTipInvocationId = useMemo(() => {
-    for (const inv of pendingInvocations) {
-      if (!isStreamingTipSuppressedByStatus(catStatuses[inv.catId])) {
-        return inv.invocationId;
-      }
-    }
-    return null;
-  }, [pendingInvocations, catStatuses]);
+    const timers = [...futureDeadlines].map((deadline) =>
+      window.setTimeout(() => bumpPendingTipLiveness((epoch) => epoch + 1), Math.max(1, deadline - now + 1)),
+    );
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [pendingInvocations, catInvocations]);
+  const pendingTipInvocationId =
+    pendingInvocations.find(
+      (invocation) =>
+        !isStreamingTipSuppressed(catStatuses[invocation.catId], catInvocations[invocation.catId]?.appServerLifecycle),
+    )?.invocationId ?? null;
 
   useVoiceAutoPlay();
   useVoiceStream();
   useVadInterrupt();
 
   useSplitPaneKeys();
-  const splitPaneThreadIds = useChatStore((s) => s.splitPaneThreadIds);
   const setSplitPaneThreadIds = useChatStore((s) => s.setSplitPaneThreadIds);
   const setSplitPaneTarget = useChatStore((s) => s.setSplitPaneTarget);
 
@@ -724,14 +737,6 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
       setSplitPaneTarget(threadId);
     }
   }, [viewMode, splitPaneThreadIds.length, threadId, setSplitPaneThreadIds, setSplitPaneTarget]);
-
-  useEffect(() => {
-    if (viewMode === 'split' && splitPaneThreadIds.length > 0) {
-      // Join rooms for all threads in panes + the current active thread
-      const allIds = new Set([...splitPaneThreadIds, threadId]);
-      syncRooms([...allIds]);
-    }
-  }, [viewMode, splitPaneThreadIds, threadId, syncRooms]);
 
   useEffect(() => {
     clearUnread(threadId);
@@ -886,7 +891,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
             aria-hidden="true"
           />
           <div className="fixed inset-y-0 left-0 z-30 w-[240px]">
-            <ThreadSidebar onClose={closeSidebar} className="w-full" />
+            <ThreadSidebar onClose={closeSidebar} className="w-full" routeThreadId={threadId} />
           </div>
         </>
       )}
@@ -950,6 +955,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
                     error={agentHookHealth.error}
                     syncing={agentHookHealth.syncing}
                     synced={agentHookHealth.synced}
+                    syncAttempted={agentHookHealth.syncAttempted}
                     onSync={agentHookHealth.sync}
                   />
                 </div>
@@ -977,10 +983,12 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
                       agentHookHealthError={agentHookHealth.error}
                       agentHookSyncing={agentHookHealth.syncing}
                       agentHookSynced={agentHookHealth.synced}
+                      agentHookSyncAttempted={agentHookHealth.syncAttempted}
                       onSyncAgentHooks={agentHookHealth.sync}
                       onComplete={() => {
                         setSetupDone(true);
                         govRefetch();
+                        void agentHookHealth.refresh();
                       }}
                     />
                   </div>
@@ -1041,14 +1049,15 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
             ) : (
               <>
                 {messages.map(renderSingleMessage)}
-                {pendingInvocations.map((inv) => (
+                {pendingInvocations.map((invocation) => (
                   <PendingMemberBubble
-                    key={`pending-${inv.invocationId}`}
-                    catId={inv.catId}
-                    invocationId={inv.invocationId}
-                    catStatus={catStatuses[inv.catId]}
+                    key={`pending-${invocation.invocationId}`}
+                    catId={invocation.catId}
+                    invocationId={invocation.invocationId}
+                    catStatus={catStatuses[invocation.catId]}
+                    appServerLifecycle={catInvocations[invocation.catId]?.appServerLifecycle}
                     tipContexts={pendingTipContexts}
-                    showCapabilityTip={inv.invocationId === pendingTipInvocationId}
+                    showCapabilityTip={invocation.invocationId === pendingTipInvocationId}
                   />
                 ))}
               </>
@@ -1120,8 +1129,8 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
             <ChatInput
               key={threadId}
               threadId={threadId}
-              onSend={(content, images, whisper, deliveryMode, replyToId) =>
-                handleSend(content, images, undefined, whisper, deliveryMode, replyToId)
+              onSend={(content, images, whisper, deliveryMode, replyToId, messageDisposition) =>
+                handleSend(content, images, undefined, whisper, deliveryMode, replyToId, messageDisposition)
               }
               onStop={handleStop}
               disabled={connectionStatus.isReadonly}
@@ -1249,6 +1258,10 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
         </>
       )}
       <FloatingTranscriptContainer />
+      <MobileApprovalSheet
+        open={!isDesktop && rightPanelMode === 'workspace' && workspaceMode === 'approval'}
+        onClose={closeRightPanel}
+      />
       <MobileStatusSheet
         open={mobileStatusOpen}
         onClose={() => setMobileStatusOpen(false)}
@@ -1329,7 +1342,7 @@ export function ChatContainer({ threadId }: ChatContainerProps) {
         const isLifecyclePhase = /^phase-(5|6|7|8|9|10|11)-/.test(phase);
         if (!isLifecyclePhase && messages.length > 0) return null;
         const leadCat = cats.find((c) => c.id === raw.leadCat) ?? cats[0];
-        const catName = leadCat?.displayName ?? leadCat?.nickname ?? leadCat?.name;
+        const catName = leadCat ? formatCatName(leadCat) : undefined;
         if (!catName) return null;
         return <BootcampGuideOverlay phase={phase} catName={catName} hasMessages={messages.length > 0} />;
       })()}

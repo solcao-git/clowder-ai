@@ -6,7 +6,12 @@ import { BindingDryRun } from '../domains/memory/BindingDryRun.js';
 import type { CollectionEmbedDeps } from '../domains/memory/CollectionIndexBuilder.js';
 import { CollectionIndexBuilder } from '../domains/memory/CollectionIndexBuilder.js';
 import { CollectionReadModel } from '../domains/memory/CollectionReadModel.js';
-import type { CollectionKind, CollectionManifest, CollectionSensitivity } from '../domains/memory/collection-types.js';
+import type {
+  CollectionKind,
+  CollectionManifest,
+  CollectionSensitivity,
+  CollectionStatus,
+} from '../domains/memory/collection-types.js';
 import { COLLECTION_SENSITIVITY_ORDER, validateManifestInput } from '../domains/memory/collection-types.js';
 import {
   resolveCollectionStorePath,
@@ -24,6 +29,7 @@ import { resolveCollectionScanner } from '../domains/memory/scanner-resolver.js'
 import { ensureVectorTable } from '../domains/memory/schema.js';
 import { computeFromThreads } from '../domains/memory/ToolUsageMetricsAggregator.js';
 import { VectorStore } from '../domains/memory/VectorStore.js';
+import { resolveHeaderUserId } from '../utils/request-identity.js';
 import { buildThreadCrossPostSuggestion, extractThreadIdFromRecentAnchor } from './cross-thread-affordance.js';
 
 export interface LibraryRoutesOptions {
@@ -33,6 +39,10 @@ export interface LibraryRoutesOptions {
   managedVaultBase?: string;
   embeddingService?: IEmbeddingService;
   embedMode?: 'shadow' | 'on';
+  /** Runtime owner used when a local private collection has no persisted owner yet. */
+  privateOwnerUserId?: string;
+  getEmbeddingService?: () => IEmbeddingService | undefined;
+  getEmbedMode?: () => 'shadow' | 'on' | undefined;
   // F188 Phase F AC-F9: optional Redis client for tool-usage-metrics endpoint.
   // Typed as `unknown` to accept any RedisClient implementation (ioredis, etc.);
   // ToolEventLog will narrow internally via its own constructor signature.
@@ -75,6 +85,23 @@ function validateBindDryRunBody(body: BindDryRunRequestBody | undefined): ValidB
     exclude: body.exclude as string[] | undefined,
     authorityCeiling: typeof body.authorityCeiling === 'string' ? body.authorityCeiling : undefined,
   };
+}
+
+function setCollectionStatusBestEffort(catalog: LibraryCatalog, id: string, status: CollectionStatus): void {
+  try {
+    catalog.setStatus(id, status);
+  } catch {
+    // already in target state, concurrently mutated, or legacy manifest with invalid transition
+  }
+}
+
+function persistCollectionStatusBestEffort(dataDir: string | undefined, id: string, status: CollectionStatus): void {
+  if (!dataDir) return;
+  try {
+    updateExternalCollection(dataDir, id, { status });
+  } catch {
+    /* persist best-effort */
+  }
 }
 
 export const libraryRoutes: FastifyPluginAsync<LibraryRoutesOptions> = async (app, opts) => {
@@ -169,13 +196,19 @@ export const libraryRoutes: FastifyPluginAsync<LibraryRoutesOptions> = async (ap
     }
 
     const now = new Date().toISOString();
+    const sensitivity = (body.sensitivity ?? 'private') as CollectionSensitivity;
+    const ownerUserId =
+      sensitivity === 'private' || sensitivity === 'restricted'
+        ? (resolveHeaderUserId(request) ?? opts.privateOwnerUserId)
+        : undefined;
     const manifest: CollectionManifest = {
       id: body.id,
       kind: body.kind as CollectionKind,
       name: body.name,
       displayName: body.displayName,
       root: resolvedRoot,
-      sensitivity: (body.sensitivity ?? 'private') as CollectionSensitivity,
+      sensitivity,
+      ...(ownerUserId ? { ownerUserId } : {}),
       scannerLevel: (body.scannerLevel ?? 'auto') as CollectionManifest['scannerLevel'],
       status: 'registered',
       indexPolicy: { autoRebuild: false },
@@ -264,47 +297,55 @@ export const libraryRoutes: FastifyPluginAsync<LibraryRoutesOptions> = async (ap
       reply.status(404);
       return { error: 'Store not found' };
     }
-    const scanner = resolveCollectionScanner(manifest);
     const body = request.body as { force?: boolean } | undefined;
+    const force = body?.force === true;
+
+    if (manifest.id === 'project:cat-cafe' && opts.indexBuilder) {
+      setCollectionStatusBestEffort(opts.catalog, manifest.id, 'indexing');
+      const result = await opts.indexBuilder.rebuild({ force });
+      setCollectionStatusBestEffort(opts.catalog, manifest.id, 'active');
+      persistCollectionStatusBestEffort(opts.dataDir, manifest.id, 'active');
+      return { indexed: result.docsIndexed, skipped: result.docsSkipped, blocked: false, secretFindings: [] };
+    }
+
+    const scanner = resolveCollectionScanner(manifest);
 
     let embedDeps: CollectionEmbedDeps | undefined;
     const db = (store as StoreWithDb).getDb?.();
-    if (opts.embeddingService && db) {
+    const resolveEmbeddingService = () =>
+      opts.getEmbeddingService ? opts.getEmbeddingService() : opts.embeddingService;
+    const resolveEmbedMode = () => (opts.getEmbedMode ? opts.getEmbedMode() : (opts.embedMode ?? 'shadow'));
+    const embeddingService = resolveEmbeddingService();
+    if (embeddingService && db) {
       try {
         const sqliteVecMod = await import('sqlite-vec');
         sqliteVecMod.load(db);
-        const dim = opts.embeddingService.getModelInfo().dim;
+        const dim = embeddingService.getModelInfo().dim;
         if (ensureVectorTable(db, dim)) {
           const vectorStore = new VectorStore(db, dim);
-          embedDeps = { embedding: opts.embeddingService, vectorStore };
-          const mode = opts.embedMode ?? 'shadow';
-          (store as SqliteEvidenceStore).setEmbedDeps({ embedding: opts.embeddingService, vectorStore, mode });
+          embedDeps = {
+            getEmbeddingService: () => {
+              const current = resolveEmbeddingService();
+              return current === embeddingService && resolveEmbedMode() ? current : undefined;
+            },
+            vectorStore,
+          };
+          const mode = resolveEmbedMode() ?? 'shadow';
+          (store as SqliteEvidenceStore).setEmbedDeps({ embedding: embeddingService, vectorStore, mode });
         }
       } catch {
         // fail-open: sqlite-vec not available → FTS-only
       }
     }
 
-    try {
-      opts.catalog.setStatus(manifest.id, 'indexing');
-    } catch {
-      // already indexing or invalid transition — proceed anyway
-    }
+    setCollectionStatusBestEffort(opts.catalog, manifest.id, 'indexing');
 
     const builder = new CollectionIndexBuilder(store as SqliteEvidenceStore, manifest, scanner, embedDeps);
-    const result = await builder.rebuild({ force: body?.force ?? false });
+    const result = await builder.rebuild({ force });
 
     const finalStatus = result.blocked ? 'blocked' : 'active';
-    try {
-      opts.catalog.setStatus(manifest.id, finalStatus);
-    } catch {
-      // transition guard may reject if state was mutated concurrently
-    }
-    try {
-      if (opts.dataDir) updateExternalCollection(opts.dataDir, manifest.id, { status: finalStatus });
-    } catch {
-      /* persist best-effort */
-    }
+    setCollectionStatusBestEffort(opts.catalog, manifest.id, finalStatus);
+    persistCollectionStatusBestEffort(opts.dataDir, manifest.id, finalStatus);
     return result;
   });
 
@@ -456,10 +497,16 @@ export const libraryRoutes: FastifyPluginAsync<LibraryRoutesOptions> = async (ap
       };
     }
 
-    const change = opts.catalog.updateSensitivity(collectionId, sensitivity as CollectionSensitivity);
+    const nextSensitivity = sensitivity as CollectionSensitivity;
+    const change = opts.catalog.updateSensitivity(collectionId, nextSensitivity);
+    const ownerUserId =
+      nextSensitivity === 'private' || nextSensitivity === 'restricted'
+        ? (existing.ownerUserId ?? resolveHeaderUserId(request) ?? opts.privateOwnerUserId)
+        : existing.ownerUserId;
+    if (ownerUserId && existing.ownerUserId !== ownerUserId) existing.ownerUserId = ownerUserId;
     try {
       if (opts.dataDir)
-        updateExternalCollection(opts.dataDir, collectionId, { sensitivity: sensitivity as CollectionSensitivity });
+        updateExternalCollection(opts.dataDir, collectionId, { sensitivity: nextSensitivity, ownerUserId });
     } catch {
       /* persist best-effort */
     }
@@ -564,19 +611,21 @@ export const libraryRoutes: FastifyPluginAsync<LibraryRoutesOptions> = async (ap
     const eventLog = new ToolEventLog(opts.redis as ConstructorParameters<typeof ToolEventLog>[0]);
     const threadIds = await eventLog.listThreadIds();
     const threads = threadIds.map((threadId) => ({ threadId }));
-    const metrics = await computeFromThreads(eventLog, threads);
 
     // F200 AC-A4: attach recall event stats from evidence.sqlite
+    let recallDb: import('better-sqlite3').Database | undefined;
     let recallEventStats: ReturnType<typeof getRecallStats24h> | undefined;
     for (const store of opts.stores.values()) {
       const db = (store as StoreWithDb).getDb?.();
       if (db) {
+        recallDb = db;
         try {
           recallEventStats = getRecallStats24h(db);
         } catch {}
         break;
       }
     }
+    const metrics = await computeFromThreads(eventLog, threads, { recallDb });
 
     return { ...metrics, recallEventStats };
   });

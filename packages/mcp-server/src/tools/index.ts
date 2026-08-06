@@ -17,6 +17,15 @@ export {
   handleAudioReadTranscript,
 } from './audio-tools.js';
 export {
+  autoDreamTools,
+  handleListDiaries,
+  handleReadDiary,
+  handleSettlePresentLoop,
+  listDiariesToolInputSchema,
+  readDiaryToolInputSchema,
+  settlePresentLoopToolInputSchema,
+} from './auto-dream-tools.js';
+export {
   callbackEvidenceSearchInputSchema,
   callbackMemoryTools,
   callbackReflectInputSchema,
@@ -37,6 +46,7 @@ export {
   handleAckMentions,
   handleCheckPermissionStatus,
   handleCrossPostMessage,
+  handleDrillMemoryCue,
   handleFeatIndex,
   handleGetPendingMentions,
   handleGetThreadCats,
@@ -44,6 +54,7 @@ export {
   handleListTasks,
   handleListThreads,
   handlePostMessage,
+  handleRecordMemoryCueOutcome,
   handleRegisterPrTracking,
   handleRequestPermission,
   handleUpdateTask,
@@ -54,7 +65,11 @@ export {
   requestPermissionInputSchema,
   updateTaskInputSchema,
 } from './callback-tools.js';
-
+export {
+  communityRouteAcceptanceInputSchema,
+  communityRouteAcceptanceTools,
+  handleCommunityRouteAcceptance,
+} from './community-route-acceptance-tool.js';
 export {
   distillationTools,
   handleMarkGeneralizable,
@@ -64,6 +79,11 @@ export {
   nominateForGlobalInputSchema,
   reviewDistillationInputSchema,
 } from './distillation-tools.js';
+export {
+  evalLifecycleTools,
+  handleRecordEvalLifecycle,
+  recordEvalLifecycleInputSchema,
+} from './eval-lifecycle-tools.js';
 export {
   backfillEventsInputSchema,
   eventMemoryTools,
@@ -78,6 +98,11 @@ export {
   handleSearchEvidence,
   searchEvidenceInputSchema,
 } from './evidence-tools.js';
+export {
+  externalReviewVerdictInputSchema,
+  externalReviewVerdictTools,
+  handleExternalReviewVerdict,
+} from './external-review-verdict-tool.js';
 export {
   externalRuntimeSessionCallbackTools,
   externalRuntimeSessionReadTools,
@@ -142,10 +167,34 @@ export {
   limbTools,
 } from './limb-tools.js';
 export {
+  handleLocalReviewVerdict,
+  handleRecoverLocalReviewVerdict,
+  localReviewRecoveryInputSchema,
+  localReviewVerdictInputSchema,
+  localReviewVerdictTools,
+} from './local-review-verdict-tool.js';
+export {
+  createMemoryCueTools,
+  drillMemoryCueInputSchema,
+  recordMemoryCueOutcomeInputSchema,
+} from './memory-cue-tools.js';
+export {
+  handleListPawFeelInbox,
+  handleTriagePawFeel,
+  listPawFeelInboxInputSchema,
+  pawFeelDispositionTools,
+  triagePawFeelInputSchema,
+} from './paw-feel-disposition-tools.js';
+export {
   handleRunPerspective,
   perspectiveTools,
   runPerspectiveInputSchema,
 } from './perspective-tools.js';
+export {
+  buildCredentialsFromEnv,
+  buildProviderFromEnv,
+  createProtocolTools,
+} from './protocol-tools.js';
 // F192 Phase H AC-H4: cat_cafe_publish_verdict tool
 export { handlePublishVerdict, publishVerdictInputSchema, publishVerdictTools } from './publish-verdict-tool.js';
 export {

@@ -89,6 +89,27 @@ describe('env-registry', () => {
     assert.equal(def.hubVisible, false);
   });
 
+  it('exposes official quota credential configuration in Hub as bootstrap-only paths', () => {
+    const summaryNames = new Set(buildEnvSummary().map((entry) => entry.name));
+    for (const name of ['QUOTA_OFFICIAL_REFRESH_ENABLED', 'CLAUDE_CREDENTIALS_PATH', 'CODEX_CREDENTIALS_PATH']) {
+      const def = ENV_VARS.find((entry) => entry.name === name);
+      assert.ok(def, `${name} should be registered`);
+      assert.ok(summaryNames.has(name), `${name} should be visible in Hub`);
+    }
+    for (const name of ['CLAUDE_CREDENTIALS_PATH', 'CODEX_CREDENTIALS_PATH']) {
+      const def = ENV_VARS.find((entry) => entry.name === name);
+      assert.equal(def.runtimeEditable, false, `${name} should require restart instead of a misleading hot edit`);
+    }
+  });
+
+  it('documents connector autostart as wrapper process authority rather than dotenv configuration', () => {
+    const def = ENV_VARS.find((v) => v.name === 'CONNECTOR_GATEWAY_AUTOSTART');
+
+    assert.ok(def, 'CONNECTOR_GATEWAY_AUTOSTART should be in registry');
+    assert.doesNotMatch(def.description, /\.env/);
+    assert.match(def.description, /启动进程环境|wrapper/);
+  });
+
   it('REDIS_URL has maskMode url', () => {
     const redis = ENV_VARS.find((v) => v.name === 'REDIS_URL');
     assert.ok(redis, 'REDIS_URL should be in registry');
@@ -111,6 +132,21 @@ describe('env-registry', () => {
     assert.ok(redisUrl, 'REDIS_URL should be in registry');
     assert.equal(templatePath.runtimeEditable, false);
     assert.equal(redisUrl.runtimeEditable, false);
+  });
+
+  it('registers the F255 awakened lease as bootstrap-only runtime configuration', () => {
+    const lease = ENV_VARS.find((v) => v.name === 'CAT_CAFE_F255_AWAKENED_LEASE_MS');
+    assert.ok(lease, 'CAT_CAFE_F255_AWAKENED_LEASE_MS should be in registry');
+    assert.equal(lease.defaultValue, '5400000');
+    assert.equal(lease.runtimeEditable, false);
+  });
+
+  it('registers the Codex OAuth transport rollback as a hot-editable enum', () => {
+    const transport = ENV_VARS.find((v) => v.name === 'CAT_CAFE_CODEX_OAUTH_TRANSPORT');
+    assert.ok(transport, 'CAT_CAFE_CODEX_OAUTH_TRANSPORT should be in registry');
+    assert.equal(transport.defaultValue, 'builtin');
+    assert.equal(transport.runtimeEditable, true);
+    assert.deepEqual(transport.allowedValues, ['builtin', 'https']);
   });
 
   it('marks client-bundled NEXT_PUBLIC vars as bootstrap-only in the hub env editor', () => {

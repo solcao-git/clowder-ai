@@ -21,6 +21,11 @@ import type { CatId } from '@cat-cafe/shared';
 import type { IBallCustodyIngest } from '../../../../ball-custody/BallCustodyIngest.js';
 import { buildInvocationDiedEvent } from '../../../../ball-custody/ball-custody-events.js';
 import type { IInvocationRecordStore } from '../../stores/ports/InvocationRecordStore.js';
+import {
+  convergeZombieQueueEntry,
+  type QueueConvergedHandler,
+  type ZombieQueueConverger,
+} from './convergeZombieQueue.js';
 import type { ZombieRecord } from './getThreadLiveInvocations.js';
 import type { TaskProgressStore } from './TaskProgressStore.js';
 
@@ -35,6 +40,32 @@ export interface ReconcileZombieDeps {
     warn: (obj: unknown, msg?: string) => void;
   };
   ballCustody?: IBallCustodyIngest;
+  /**
+   * Exact terminal side effect for the CAS winner. Runtime composition uses this
+   * to retire only the matching tracker owner and re-enter normal queue recovery.
+   */
+  onReconciledZombie?: (event: ReconciledZombieEvent) => void | Promise<void>;
+  /**
+   * F220 Phase 2a (#972) — optional. When present, a zombie sweep also converges the
+   * dead invocation's stale `processing` queue entry, so later user work stops queuing
+   * behind a corpse. Absent → record-only cleanup (previous behavior).
+   */
+  invocationQueue?: ZombieQueueConverger;
+  /**
+   * F220 Phase 2a (#972) — optional broadcast hook, fired once per thread whose queue
+   * actually changed. Kept as a callback so this module stays free of socket coupling;
+   * the caller (queue.ts / messages.ts) owns the `queue_updated` emit.
+   */
+  onQueueConverged?: QueueConvergedHandler;
+}
+
+export interface ReconciledZombieEvent {
+  invocationId: string;
+  threadId: string;
+  /** Durable parent scope. catId below is detector provenance only. */
+  targetCats: CatId[];
+  catId: string | null;
+  status: 'failed';
 }
 
 export interface ReconcileZombieResult {
@@ -44,6 +75,8 @@ export interface ReconcileZombieResult {
   alreadyTerminal: number;
   /** TaskProgress snapshots cleared. */
   taskProgressCleared: number;
+  /** F220 Phase 2a (#972): stale `processing` queue entries removed. */
+  queueConverged: number;
   /** Errors during cleanup (non-fatal). */
   errors: number;
   durationMs: number;
@@ -58,30 +91,44 @@ export interface ReconcileZombieResult {
 interface PerZombieOutcome {
   reconciled: boolean;
   alreadyTerminal: boolean;
-  taskProgressCleared: boolean;
+  taskProgressCleared: number;
+  queueConverged: number;
   errors: number;
 }
 
 async function clearTaskProgress(
   taskProgressStore: TaskProgressStore | undefined,
   threadId: string,
-  zombie: ZombieRecord,
+  invocationId: string,
+  targetCats: readonly CatId[],
   log: NonNullable<ReconcileZombieDeps['log']>,
-): Promise<{ cleared: boolean; errors: number }> {
-  if (!taskProgressStore || !zombie.catId) return { cleared: false, errors: 0 };
-  try {
-    await taskProgressStore.deleteSnapshot(threadId, zombie.catId as CatId);
-    return { cleared: true, errors: 0 };
-  } catch (err) {
-    log.warn(
-      {
-        invocationId: zombie.invocationId,
-        err: err instanceof Error ? err.message : String(err),
-      },
-      '[reconcile-zombies] failed to clear TaskProgress',
-    );
-    return { cleared: false, errors: 1 };
+): Promise<{ cleared: number; errors: number }> {
+  if (!taskProgressStore) return { cleared: 0, errors: 0 };
+  let cleared = 0;
+  let errors = 0;
+  for (const catId of new Set(targetCats)) {
+    try {
+      const deleted = await taskProgressStore.deleteSnapshotIfOwner(threadId, catId, invocationId);
+      if (deleted) cleared += 1;
+    } catch (err) {
+      errors += 1;
+      log.warn(
+        {
+          invocationId,
+          catId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        '[reconcile-zombies] failed to clear TaskProgress',
+      );
+    }
   }
+  return { cleared, errors };
+}
+
+function taskProgressTargets(targetCats: readonly CatId[], detectorCatId: string | null): CatId[] {
+  const durableTargets = [...new Set(targetCats)];
+  if (durableTargets.length > 0) return durableTargets;
+  return detectorCatId ? [detectorCatId as CatId] : [];
 }
 
 async function processZombie(
@@ -98,9 +145,9 @@ async function processZombie(
     if (!updated) {
       // Cloud R15 P1: CAS returned null — record is missing OR already non-running.
       // If a concurrent reconcile already flipped it to terminal, that path's
-      // deleteSnapshot might have failed transiently. Future zombie sweeps won't
+      // Owner-bound snapshot deletion might have failed transiently. Future zombie sweeps won't
       // re-surface it (only running records are zombies), so phantom progress
-      // would persist indefinitely. Defensively re-attempt deleteSnapshot for
+      // would persist indefinitely. Defensively re-attempt the owner-bound delete for
       // terminal records — cleanup is idempotent so redundancy is safe.
       //
       // Cloud R17 P2: distinguish three sub-cases. The Redis store's update() can
@@ -114,11 +161,28 @@ async function processZombie(
           { invocationId: zombie.invocationId, reason: zombie.reason },
           '[reconcile-zombies] skipped (record missing)',
         );
-        return { reconciled: false, alreadyTerminal: true, taskProgressCleared: false, errors: 0 };
+        return {
+          reconciled: false,
+          alreadyTerminal: true,
+          taskProgressCleared: 0,
+          queueConverged: 0,
+          errors: 0,
+        };
       }
       const isTerminal = current.status === 'succeeded' || current.status === 'failed' || current.status === 'canceled';
       if (isTerminal) {
-        const tp = await clearTaskProgress(deps.taskProgressStore, current.threadId, zombie, log);
+        const tp = await clearTaskProgress(
+          deps.taskProgressStore,
+          current.threadId,
+          zombie.invocationId,
+          taskProgressTargets(current.targetCats, zombie.catId),
+          log,
+        );
+        // #972: same redundancy rationale as the R15 P1 TaskProgress retry — a concurrent
+        // reconcile may have flipped the record terminal but died before converging the
+        // queue, and future sweeps only enumerate *running* records, so this entry would
+        // pin the head forever. removeProcessed is idempotent, so retrying is safe.
+        const qc = convergeZombieQueueEntry(deps.invocationQueue, current, zombie, log, deps.onQueueConverged);
         log.info(
           { invocationId: zombie.invocationId, currentStatus: current.status, reason: zombie.reason },
           '[reconcile-zombies] skipped (already terminal); re-attempted TaskProgress cleanup',
@@ -127,7 +191,8 @@ async function processZombie(
           reconciled: false,
           alreadyTerminal: true,
           taskProgressCleared: tp.cleared,
-          errors: tp.errors,
+          queueConverged: qc.converged,
+          errors: tp.errors + qc.errors,
         };
       }
       // Record still alive (queued/running) but CAS update returned null — could be
@@ -137,7 +202,13 @@ async function processZombie(
         { invocationId: zombie.invocationId, currentStatus: current.status, reason: zombie.reason },
         '[reconcile-zombies] update returned null but record still alive — transient failure',
       );
-      return { reconciled: false, alreadyTerminal: false, taskProgressCleared: false, errors: 1 };
+      return {
+        reconciled: false,
+        alreadyTerminal: false,
+        taskProgressCleared: 0,
+        queueConverged: 0,
+        errors: 1,
+      };
     }
     log.info(
       {
@@ -162,8 +233,39 @@ async function processZombie(
       .catch((err) =>
         log.warn({ invocationId: zombie.invocationId, err }, '[reconcile-zombies] failed to record invocation.died'),
       );
-    const tp = await clearTaskProgress(deps.taskProgressStore, updated.threadId, zombie, log);
-    return { reconciled: true, alreadyTerminal: false, taskProgressCleared: tp.cleared, errors: tp.errors };
+    const targetCats = [...new Set(updated.targetCats)];
+    const tp = await clearTaskProgress(
+      deps.taskProgressStore,
+      updated.threadId,
+      zombie.invocationId,
+      taskProgressTargets(targetCats, zombie.catId),
+      log,
+    );
+    // #972: the record is now terminal, so its `processing` queue entry is a corpse
+    // pinning the queue head. Converge it or later user work never runs.
+    const qc = convergeZombieQueueEntry(deps.invocationQueue, updated, zombie, log, deps.onQueueConverged);
+    let terminalRecoveryErrors = 0;
+    if (deps.onReconciledZombie) {
+      try {
+        await deps.onReconciledZombie({
+          invocationId: zombie.invocationId,
+          threadId: updated.threadId,
+          targetCats,
+          catId: zombie.catId,
+          status: 'failed',
+        });
+      } catch (err) {
+        terminalRecoveryErrors = 1;
+        log.warn({ invocationId: zombie.invocationId, err }, '[reconcile-zombies] terminal recovery callback failed');
+      }
+    }
+    return {
+      reconciled: true,
+      alreadyTerminal: false,
+      taskProgressCleared: tp.cleared,
+      queueConverged: qc.converged,
+      errors: tp.errors + qc.errors + terminalRecoveryErrors,
+    };
   } catch (err) {
     log.warn(
       {
@@ -172,7 +274,13 @@ async function processZombie(
       },
       '[reconcile-zombies] update failed',
     );
-    return { reconciled: false, alreadyTerminal: false, taskProgressCleared: false, errors: 1 };
+    return {
+      reconciled: false,
+      alreadyTerminal: false,
+      taskProgressCleared: 0,
+      queueConverged: 0,
+      errors: 1,
+    };
   }
 }
 
@@ -189,13 +297,15 @@ export async function reconcileZombies(
   let reconciled = 0;
   let alreadyTerminal = 0;
   let taskProgressCleared = 0;
+  let queueConverged = 0;
   let errors = 0;
 
   for (const zombie of zombies) {
     const outcome = await processZombie(zombie, deps, log);
     if (outcome.reconciled) reconciled += 1;
     if (outcome.alreadyTerminal) alreadyTerminal += 1;
-    if (outcome.taskProgressCleared) taskProgressCleared += 1;
+    taskProgressCleared += outcome.taskProgressCleared;
+    queueConverged += outcome.queueConverged;
     errors += outcome.errors;
   }
 
@@ -203,6 +313,7 @@ export async function reconcileZombies(
     reconciled,
     alreadyTerminal,
     taskProgressCleared,
+    queueConverged,
     errors,
     durationMs: Date.now() - start,
   };

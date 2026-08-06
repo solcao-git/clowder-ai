@@ -55,10 +55,14 @@ import { useSendMessage } from '@/hooks/useSendMessage';
 function SendRunner({
   activeThreadId,
   overrideThreadId,
+  deliveryMode,
+  messageDisposition,
   onDone,
 }: {
   activeThreadId?: string;
   overrideThreadId?: string;
+  deliveryMode?: 'queue';
+  messageDisposition?: 'continue_current' | 'next_work';
   onDone: () => void;
 }) {
   const { handleSend } = useSendMessage(activeThreadId);
@@ -67,8 +71,16 @@ function SendRunner({
   useEffect(() => {
     if (called.current) return;
     called.current = true;
-    handleSend('@布偶 @缅因 看图', undefined, overrideThreadId).then(onDone);
-  }, [handleSend, onDone, overrideThreadId]);
+    handleSend(
+      '@布偶 @缅因 看图',
+      undefined,
+      overrideThreadId,
+      undefined,
+      deliveryMode,
+      undefined,
+      messageDisposition,
+    ).then(onDone);
+  }, [deliveryMode, handleSend, messageDisposition, onDone, overrideThreadId]);
 
   return null;
 }
@@ -132,6 +144,26 @@ describe('useSendMessage thread source', () => {
     const payload = JSON.parse(String(mockApiFetch.mock.calls[0]?.[1]?.body));
     expect(payload.threadId).toBe('thread-route');
     expect(payload.threadId).not.toBe('thread-stale');
+  });
+
+  it('sends the typed author disposition in the JSON admission payload', async () => {
+    await act(async () => {
+      root.render(
+        React.createElement(SendRunner, {
+          activeThreadId: 'thread-route',
+          deliveryMode: 'queue',
+          messageDisposition: 'continue_current',
+          onDone: () => {},
+        }),
+      );
+    });
+
+    const payload = JSON.parse(String(mockApiFetch.mock.calls[0]?.[1]?.body));
+    expect(payload).toMatchObject({
+      threadId: 'thread-route',
+      deliveryMode: 'queue',
+      messageDisposition: 'continue_current',
+    });
   });
 
   it('falls back to useChatStore.getState().currentThreadId when route threadId is absent', async () => {
@@ -251,7 +283,7 @@ describe('useSendMessage thread source', () => {
     expect(mockReplaceThreadMessageId).toHaveBeenCalledWith('thread-route', optimisticMessage.id, 'msg-server-1');
   });
 
-  it('removes an optimistic active-thread user bubble when server smart-defaults to queued', async () => {
+  it('keeps and reconciles an active-thread user bubble when server smart-defaults to queued', async () => {
     mockApiFetch.mockResolvedValue({
       ok: true,
       json: async () => ({ status: 'queued', userMessageId: 'msg-server-queued' }),
@@ -270,7 +302,30 @@ describe('useSendMessage thread source', () => {
     const optimisticUserCall = mockAddMessage.mock.calls[0];
     const optimisticMessage = optimisticUserCall?.[0] as { id: string };
     expect(optimisticMessage).toMatchObject({ type: 'user' });
-    expect(mockRemoveMessage).toHaveBeenCalledWith(optimisticMessage.id);
+    expect(mockRemoveMessage).not.toHaveBeenCalled();
+    expect(mockReplaceThreadMessageId).toHaveBeenCalledWith('thread-route', optimisticMessage.id, 'msg-server-queued');
+  });
+
+  it('publishes an explicit queue send only after the server returns its durable message id', async () => {
+    mockApiFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'queued', userMessageId: 'msg-server-explicit-queue' }),
+    });
+
+    await act(async () => {
+      root.render(
+        React.createElement(SendRunner, {
+          activeThreadId: 'thread-route',
+          overrideThreadId: undefined,
+          deliveryMode: 'queue',
+          onDone: () => {},
+        }),
+      );
+    });
+
+    expect(mockAddMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'msg-server-explicit-queue', type: 'user' }),
+    );
     expect(mockReplaceThreadMessageId).not.toHaveBeenCalled();
   });
 
@@ -307,7 +362,7 @@ describe('useSendMessage thread source', () => {
     }
   });
 
-  it('removes an optimistic split-pane user bubble when server smart-defaults to queued', async () => {
+  it('keeps and reconciles a split-pane user bubble when server smart-defaults to queued', async () => {
     mockApiFetch.mockResolvedValue({
       ok: true,
       json: async () => ({ status: 'queued', userMessageId: 'msg-server-2' }),
@@ -329,7 +384,7 @@ describe('useSendMessage thread source', () => {
     );
     const optimisticMessage = optimisticUserCall?.[1] as { id: string };
     expect(optimisticUserCall?.[0]).toBe('thread-target');
-    expect(mockRemoveThreadMessage).toHaveBeenCalledWith('thread-target', optimisticMessage.id);
-    expect(mockReplaceThreadMessageId).not.toHaveBeenCalled();
+    expect(mockRemoveThreadMessage).not.toHaveBeenCalled();
+    expect(mockReplaceThreadMessageId).toHaveBeenCalledWith('thread-target', optimisticMessage.id, 'msg-server-2');
   });
 });

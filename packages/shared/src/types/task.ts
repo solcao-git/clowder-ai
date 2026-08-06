@@ -9,6 +9,7 @@
 
 import type { BallResolveMode } from './ball-custody.js';
 import type { DispatchGateState } from './cross-thread-affordance.js';
+import type { AwaitStateV1, WaitOutcomeV1 } from './github-wait.js';
 import type { CatId } from './ids.js';
 
 // Re-export affordance types so existing consumers don't break
@@ -44,6 +45,17 @@ export interface CiAutomationState {
   readonly skipNotified?: boolean;
   /** Terminal PR state — persisted by CiCdRouter on lifecycle close (F200 AC-D2.3). */
   readonly prState?: 'merged' | 'closed';
+  /**
+   * Durable receipts for PR-terminal world-truth effects. The terminal collector
+   * remains schedulable until `completedAt` is present for the current `prState`.
+   */
+  readonly terminalEffects?: {
+    readonly prState: 'merged' | 'closed';
+    readonly prLifecycle?: true;
+    readonly distillation?: true;
+    readonly communityProjection?: true;
+    readonly completedAt?: number;
+  };
 }
 
 /** Conflict detection automation state for pr_tracking tasks */
@@ -55,23 +67,25 @@ export interface ConflictAutomationState {
 
 /** Review feedback automation state for pr_tracking tasks */
 export interface ReviewAutomationState {
+  /** @deprecated Combined cursor from schema v1. Inline and conversation IDs are incomparable. */
   readonly lastCommentCursor?: number;
+  readonly lastInlineCommentCursor?: number;
+  readonly lastConversationCommentCursor?: number;
+  /**
+   * True while a legacy combined cursor is being replayed into the two source-specific
+   * cursors. Backfill through the frozen source targets remains state-only until durable.
+   */
+  readonly commentCursorMigrationPending?: boolean;
+  /** Snapshot frontier for the one-time legacy backfill; later source activity remains live. */
+  readonly commentCursorMigrationTargets?: {
+    readonly inline: number;
+    readonly conversation: number;
+  };
   readonly lastDecisionCursor?: number;
   readonly lastNotifiedAt?: number;
   /** Terminal PR state observed by ReviewFeedbackTaskSpec before CI lifecycle delivery. */
   readonly prState?: 'merged' | 'closed';
 }
-
-/**
- * F140: what the cat is currently waiting on for this tracked PR — the wake intent, NOT the repo
- * type (a private PR can be 'merge'; an open-source PR can be 'review'). Decides whether a CI-pass
- * is noise (review-wait) or an action signal (merge-wait). Cats re-register to flip it.
- *   - review (default): waiting on review feedback → CI-pass is recorded state-only, with no connector message.
- *   - merge: waiting on CI-green to merge (own approved PR / outbound PR / owner-merge of another's
- *     PR) → CI-pass wakes (→ merge-gate).
- * CI fail / review feedback / conflict always wake under both intents.
- */
-export type PrTrackingIntent = 'review' | 'merge';
 
 /** Issue comment automation state for issue_tracking tasks (F202 Phase 2D) */
 export interface IssueAutomationState {
@@ -80,25 +94,55 @@ export interface IssueAutomationState {
   readonly issueState?: 'open' | 'closed';
   /**
    * F168 Phase B: dual-cursor delivery tracking.
-   * Tracks the max comment id that was successfully delivered (notified) to the owner.
+   * Tracks the max comment id routed to the thread or intentionally suppressed as an echo.
    * Separate from lastCommentCursor (collection) so delivery retries don't re-append events.
+   * lastNotifiedAt is updated separately only after the owner wake is accepted.
    * Undefined means "not yet managed by dual-cursor; default to lastCommentCursor".
    */
   readonly lastDeliveredCursor?: number;
+  /** Routed connector message whose owner wake has not yet reached durable admission. */
+  readonly pendingWake?: IssuePendingWake | null;
 }
 
-/** Composite automation state embedded in pr_tracking/issue_tracking tasks (#320 KD-14, F202-2D) */
-export interface AutomationState {
+export interface IssuePendingWake {
+  readonly messageId: string;
+  readonly threadId: string;
+  readonly catId: string;
+  readonly content: string;
+  readonly deliveredCursor: number;
+  readonly closeTaskAfterWake?: boolean;
+}
+
+/** F280 Phase B: PR-only collector and wait state. */
+export interface PrAutomationState {
   readonly ci?: CiAutomationState;
   readonly conflict?: ConflictAutomationState;
   readonly review?: ReviewAutomationState;
+  readonly closedAt?: number;
+  readonly await?: AwaitStateV1;
+  readonly waitOutcome?: WaitOutcomeV1;
+  /** Type-level quarantine: issue compatibility cannot be installed on a PR state. */
+  readonly issue?: never;
+}
+
+/** F280 Phase B: issue-only compatibility surface until Phase C. */
+export type IssueTrackingWakePolicy = 'all_feedback' | 'human_participant_activity';
+
+export interface LegacyIssueAutomationState {
   readonly issue?: IssueAutomationState;
   readonly closedAt?: number;
-  /** F140: wake intent for this tracked PR (defaults to 'review' when absent). */
-  readonly intent?: PrTrackingIntent;
-  /** F202 Phase 2C: user-provided instructions appended to trigger messages. Task preference, not system override. */
+  readonly wakePolicy?: IssueTrackingWakePolicy;
   readonly trackingInstructions?: string;
+  /** Type-level quarantine: PR facts and waits cannot be installed on an issue state. */
+  readonly ci?: never;
+  readonly conflict?: never;
+  readonly review?: never;
+  readonly await?: never;
+  readonly waitOutcome?: never;
 }
+
+/** Composite automation state embedded in pr_tracking/issue_tracking tasks (#320 KD-14, F202-2D). */
+export type AutomationState = PrAutomationState | LegacyIssueAutomationState;
 
 export type TaskProbeSpec =
   | {

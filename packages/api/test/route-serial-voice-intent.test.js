@@ -14,6 +14,8 @@ import './helpers/setup-cat-registry.js';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { catRegistry } from '@cat-cafe/shared';
 
 const REPO_TEMPLATE_PATH = fileURLToPath(new URL('../../../cat-template.json', import.meta.url));
@@ -58,7 +60,7 @@ function createServiceWithAudioBlock(catId, text) {
   };
 }
 
-function createMockDeps(services, { threadVoiceMode = false } = {}) {
+function createMockDeps(services, { threadVoiceMode = false, threadProjectPath } = {}) {
   let counter = 0;
   const storedMessages = [];
   return {
@@ -73,7 +75,7 @@ function createMockDeps(services, { threadVoiceMode = false } = {}) {
         resolveWorkingDirectory: () => '/tmp/test',
       },
       threadStore: {
-        get: async () => ({ voiceMode: threadVoiceMode }),
+        get: async () => ({ voiceMode: threadVoiceMode, ...(threadProjectPath ? { projectPath: threadProjectPath } : {}) }),
         consumeMentionRoutingFeedback: async () => null,
         updateParticipantActivity: async () => {},
       },
@@ -185,7 +187,7 @@ describe('Voice intent auto-wrap', { concurrency: false }, () => {
     await loadRealRoster();
     try {
       const opencodeService = createCapturingService('opencode', '我是温迪，风神。');
-      const deps = createMockDeps({ opencode: opencodeService });
+      const deps = createMockDeps({ opencode: opencodeService }, { threadProjectPath: path.dirname(REPO_TEMPLATE_PATH) });
       const events = await collectEvents(deps, 'opencode', '讲两句', 'thread-voice-3');
       const blocks = findRichBlocks(deps, events);
       const audioBlocks = findAudioBlocks(blocks);

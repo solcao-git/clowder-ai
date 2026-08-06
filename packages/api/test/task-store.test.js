@@ -62,6 +62,96 @@ describe('TaskStore', () => {
     });
   });
 
+  describe('private managed-work binding', () => {
+    const binding = Object.freeze({ workId: 'work-1', attemptId: 'attempt-1' });
+
+    it('rejects a managed registration over a non-PR subject owner without mutating it', () => {
+      const subjectKey = 'pr:owner/repo#500';
+      const original = store.create(
+        makeInput({
+          kind: 'work',
+          subjectKey,
+          threadId: 'thread-original',
+          title: 'Existing non-PR work',
+          ownerCatId: 'codex-sol',
+          userId: 'user-1',
+        }),
+      );
+      const snapshot = structuredClone(original);
+
+      assert.throws(
+        () =>
+          store.upsertBySubjectWithManagedWorkBinding(
+            makeInput({
+              kind: 'pr_tracking',
+              subjectKey,
+              threadId: 'thread-attacker',
+              title: 'Mutated into PR tracking',
+              ownerCatId: 'codex-sol',
+              userId: 'user-1',
+            }),
+            binding,
+          ),
+        /requires a pr_tracking subject anchor/,
+      );
+
+      assert.deepEqual(store.get(original.id), snapshot);
+      assert.equal(store.getManagedWorkBinding(original.id), null);
+    });
+
+    it('binds once to a live pr_tracking task and keeps the binding out of TaskItem', () => {
+      const task = store.create(
+        makeInput({
+          kind: 'pr_tracking',
+          subjectKey: 'pr:owner/repo#501',
+          title: 'PR tracking: owner/repo#501',
+        }),
+      );
+
+      assert.deepEqual(store.bindManagedWorkBinding(task.id, binding), binding);
+      assert.deepEqual(store.getManagedWorkBinding(task.id), binding);
+      assert.equal(JSON.stringify(store.get(task.id)).includes('work-1'), false);
+      assert.equal(JSON.stringify(store.get(task.id)).includes('attempt-1'), false);
+    });
+
+    it('is idempotent for the same binding and conflicts without overwriting a different binding', () => {
+      const task = store.create(
+        makeInput({
+          kind: 'pr_tracking',
+          subjectKey: 'pr:owner/repo#502',
+          title: 'PR tracking: owner/repo#502',
+        }),
+      );
+
+      assert.deepEqual(store.bindManagedWorkBinding(task.id, binding), binding);
+      assert.deepEqual(store.bindManagedWorkBinding(task.id, { ...binding }), binding);
+      assert.throws(
+        () => store.bindManagedWorkBinding(task.id, { workId: 'work-2', attemptId: 'attempt-2' }),
+        (error) => error?.code === 'TASK_MANAGED_WORK_BINDING_CONFLICT',
+      );
+      assert.deepEqual(store.getManagedWorkBinding(task.id), binding);
+    });
+
+    it('fails closed for a missing or non-tracking task and deletes private metadata with its task', () => {
+      assert.equal(store.bindManagedWorkBinding('missing', binding), null);
+      assert.equal(store.getManagedWorkBinding('missing'), null);
+
+      const workTask = store.create(makeInput());
+      assert.equal(store.bindManagedWorkBinding(workTask.id, binding), null);
+
+      const trackingTask = store.create(
+        makeInput({
+          kind: 'pr_tracking',
+          subjectKey: 'pr:owner/repo#503',
+          title: 'PR tracking: owner/repo#503',
+        }),
+      );
+      store.bindManagedWorkBinding(trackingTask.id, binding);
+      assert.equal(store.delete(trackingTask.id), true);
+      assert.equal(store.getManagedWorkBinding(trackingTask.id), null);
+    });
+  });
+
   describe('update', () => {
     it('updates status', () => {
       const task = store.create(makeInput());
@@ -391,6 +481,52 @@ describe('TaskStore', () => {
         90,
         'lastDeliveredCursor must not be lowered by stale re-patch',
       );
+    });
+
+    it('explicit null clears a pending wake after durable admission', () => {
+      const task = store.create(
+        makeInput({ kind: 'issue_tracking', subjectKey: 'issue:owner/repo#11', title: 'Track issue #11' }),
+      );
+      store.patchAutomationState(task.id, {
+        issue: {
+          pendingWake: {
+            messageId: 'msg-1',
+            threadId: 'thread-1',
+            catId: 'opus',
+            content: 'wake',
+            deliveredCursor: 10,
+          },
+        },
+      });
+      store.patchAutomationState(task.id, { issue: { pendingWake: null } });
+      assert.equal(store.get(task.id).automationState.issue.pendingWake, null);
+    });
+  });
+
+  describe('patchAutomationState: review source cursor anti-regression', () => {
+    it('does not lower independent inline, conversation, or decision cursors', () => {
+      const task = store.create(
+        makeInput({ kind: 'pr_tracking', subjectKey: 'pr:owner/repo#12', title: 'Track PR #12' }),
+      );
+      store.patchAutomationState(task.id, {
+        review: {
+          lastInlineCommentCursor: 30,
+          lastConversationCommentCursor: 50,
+          lastDecisionCursor: 40,
+        },
+      });
+      store.patchAutomationState(task.id, {
+        review: {
+          lastInlineCommentCursor: 3,
+          lastConversationCommentCursor: 5,
+          lastDecisionCursor: 4,
+        },
+      });
+      assert.deepEqual(store.get(task.id).automationState.review, {
+        lastInlineCommentCursor: 30,
+        lastConversationCommentCursor: 50,
+        lastDecisionCursor: 40,
+      });
     });
   });
 });

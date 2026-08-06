@@ -32,8 +32,14 @@ export const RICH_BLOCK_RULES = `### 富消息块使用规则（B 风格：平�
   - 待办事项 / 下一步行动
   - review 要点清单
   - 验证步骤 / 测试计划
+- **file**（已有文件 / 成片视频）
+  - 发送已有文件、导出物、成片视频
+  - \`url\` + \`fileName\` 必填，\`mimeType\`/\`fileSize\` 可选
+  - \`mimeType\` 以 \`video/\` 开头时，Web UI 渲染内联视频播放器
+  - 本地视频/通用文件需先放到 \`/uploads/...\`；当前自动发布合约只覆盖图片
 - **media_gallery**（图片展示 — 不一定要现场生成！）
   - 发送已有图片（头像 \`/avatars/\`、照片 \`/uploads/\`、设计稿）
+  - \`/uploads/xxx\` 的磁盘真身是 \`cat-cafe-runtime/packages/api/uploads/\`（运行中 API 的 uploadDir）；不要手动 cp 到源码仓 \`uploads/\` 或 \`packages/api/uploads/\`
   - 截图展示、多图对比
   - 定时任务/主动触发中展示图片
 - **audio**（语音消息 — 你"说出来"的话）
@@ -68,6 +74,7 @@ export const RICH_BLOCK_RULES = `### 富消息块使用规则（B 风格：平�
 - card: \`title\` 必填，\`bodyMarkdown\`/\`tone\`/\`fields\` 可选
 - diff: \`filePath\` + \`diff\` 必填，\`languageHint\` 可选
 - checklist: \`items\` 必填（每项需 \`id\` + \`text\`），\`title\` 可选
+- file: \`url\` + \`fileName\` 必填，\`mimeType\`/\`fileSize\` 可选；\`video/*\` 会内联播放
 - media_gallery: \`items\` 必填（每项需 \`url\`），\`title\`/\`alt\`/\`caption\` 可选
 - audio: \`text\` 必填（你想说的话，简短口语化，1-2 句）
 - interactive: \`interactiveType\` + \`options\` (id+label) 必填，优先用 \`icon\` 不用 emoji，多块用 \`groupId\` 批量提交
@@ -80,5 +87,5 @@ export const RICH_BLOCK_RULES = `### 富消息块使用规则（B 风格：平�
  */
 export const RICH_BLOCK_SHORT = `富消息块：结构化信息用富块，普通对话不用。先写 1-2 句摘要再发。
 ⚠️ 字段名是 "kind"（不是 "type"！），必须有 "v": 1 和唯一 id。
-支持: card / diff / checklist / media_gallery / audio / interactive / html_widget。
+支持: card / diff / checklist / file / media_gallery / audio / interactive / html_widget。
 interactive: 用户可交互选择（select/multi-select/card-grid/confirm），详见 rich-blocks rules。`;

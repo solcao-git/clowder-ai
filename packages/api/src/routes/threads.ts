@@ -11,15 +11,21 @@ import type { CatId } from '@cat-cafe/shared';
 import { catIdSchema } from '@cat-cafe/shared';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
+import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
 import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/TaskProgressStore.js';
 import {
   aggregateThreadArtifacts,
   collectAllThreadMessages,
 } from '../domains/cats/services/agents/routing/thread-artifacts-aggregator.js';
 import { resolveBootcampWorkspaceRoot } from '../domains/cats/services/bootcamp/workspace-root.js';
+import { recordFreshnessClosureTransition } from '../domains/cats/services/freshness/freshness-closure-telemetry.js';
+import { projectFreshnessClosure } from '../domains/cats/services/freshness/glass-box/FreshnessOutputCommitCoordinator.js';
+import { projectFreshnessSupplementForHistory } from '../domains/cats/services/freshness/glass-box/freshness-supplement-history-projection.js';
 import { AuditEventTypes, getEventAuditLog } from '../domains/cats/services/orchestration/EventAuditLog.js';
 import type { TranscriptWriter } from '../domains/cats/services/session/TranscriptWriter.js';
+import { gateForDurableSlot } from '../domains/cats/services/stores/cursor-activation.js';
 import type { IBacklogStore } from '../domains/cats/services/stores/ports/BacklogStore.js';
 import type { DeliveryCursorStore } from '../domains/cats/services/stores/ports/DeliveryCursorStore.js';
 import type { IDraftStore } from '../domains/cats/services/stores/ports/DraftStore.js';
@@ -37,6 +43,7 @@ import type {
 } from '../domains/cats/services/stores/ports/ThreadStore.js';
 import { SYSTEM_USER_IDS } from '../domains/cats/services/stores/visibility.js';
 import { createModuleLogger } from '../infrastructure/logger.js';
+import type { SocketManager } from '../infrastructure/websocket/index.js';
 import { CHATGPT_CHAT_URL_REGEX } from '../utils/chatgpt-chat-url.js';
 import { migrateStoredProjectPath, resolvePersistentProjectPathDetailed } from '../utils/persistent-project-path.js';
 import { resolveStrictUserId, resolveUserId } from '../utils/request-identity.js';
@@ -44,6 +51,63 @@ import { getMultiMentionOrchestrator } from './callback-multi-mention-routes.js'
 
 const log = createModuleLogger('routes/threads');
 const WRITE_OPS = new Set(['edit', 'create', 'delete']);
+
+/**
+ * #1200: Pre-reconcile stored read cursor before CAS ack.
+ * Converts stored v1 → v2 atomically so ACK_CAS_LUA can compare same-format.
+ * Without this, the CAS correctly fails-closed on cross-format but the ack
+ * silently no-ops. Pre-reconcile makes the ack succeed when it should.
+ *
+ * Best-effort: canonicalization or CAS failure is silent — the Lua script
+ * enforces fail-closed at the store boundary, preventing read-state regression.
+ */
+async function preReconcileReadCursor(
+  readStateStore: IThreadReadStateStore,
+  messageStore: IMessageStore | null | undefined,
+  userId: string,
+  threadId: string,
+  incomingCursor: string,
+): Promise<void> {
+  if (!incomingCursor.startsWith('v2:')) return;
+  if (!messageStore?.canonicalizeCursor) return;
+  if (!readStateStore.reconcileReadCursor) return;
+
+  const stored = await readStateStore.get(userId, threadId);
+  if (!stored || stored.lastReadMessageId.startsWith('v2:')) return;
+
+  try {
+    const storedV2 = await messageStore.canonicalizeCursor(stored.lastReadMessageId, threadId);
+    if (storedV2 !== stored.lastReadMessageId) {
+      await readStateStore.reconcileReadCursor(userId, threadId, stored.lastReadMessageId, storedV2);
+    }
+  } catch {
+    // Silent: ACK_CAS_LUA will fail-closed on cross-format, preventing regression.
+  }
+}
+
+/**
+ * #1269: Gated read-state ack — applies durable-slot gate before CAS.
+ * Reads existing read-state to decide format, then conditionally
+ * pre-reconciles and acks with the gated cursor value.
+ */
+async function gatedReadStateAck(
+  readStateStore: IThreadReadStateStore,
+  messageStore: IMessageStore | null | undefined,
+  userId: string,
+  threadId: string,
+  incomingCursor: string,
+): Promise<boolean> {
+  const existing = await readStateStore.get(userId, threadId);
+  const existingCursor = existing?.lastReadMessageId ?? null;
+  const gated = gateForDurableSlot(incomingCursor, existingCursor);
+
+  // Pre-reconcile only when writing v2 — stored may be v1, need same-format for ACK_CAS_LUA
+  if (gated.startsWith('v2:')) {
+    await preReconcileReadCursor(readStateStore, messageStore, userId, threadId, gated);
+  }
+
+  return readStateStore.ack(userId, threadId, gated);
+}
 
 interface ThreadIndexBuilder {
   markThreadDirty(threadId: string): void;
@@ -60,6 +124,12 @@ export interface ThreadsRoutesOptions {
   memoryStore?: IMemoryStore;
   /** Optional: cascade delete delivery cursors when thread is deleted */
   deliveryCursorStore?: DeliveryCursorStore;
+  /** F254 Phase E: cascade persistent catch responsibility with thread deletion. */
+  freshnessClosureStore?: import('../domains/cats/services/freshness/FreshnessClosureStore.js').FreshnessClosureStore;
+  /** F254 Phase E: explicit blocked-closure retry uses the unified queue. */
+  invocationQueue?: InvocationQueue;
+  queueProcessor?: QueueProcessor;
+  socketManager?: SocketManager;
   /** Optional: protect active invocations from thread deletion (#35) */
   invocationTracker?: InvocationTracker;
   /** #80: cascade delete streaming drafts */
@@ -172,6 +242,8 @@ const createThreadSchema = z
   .strict();
 
 const listThreadsSchema = z.object({
+  /** Lightweight list projection used by the Sidebar. */
+  view: z.enum(['sidebar']).optional(),
   projectPath: z.string().min(1).max(500).optional(),
   q: z.string().trim().min(1).max(200).optional(),
   backlogItemIds: z.string().trim().min(1).max(4000).optional(),
@@ -248,6 +320,12 @@ export function sanitizeThreadForResponse(thread: Thread, _userId: string): Thre
   return sanitized as Thread;
 }
 
+function projectThreadForListView(thread: Thread, view: 'sidebar' | undefined): Thread | Omit<Thread, 'threadMemory'> {
+  if (view !== 'sidebar') return thread;
+  const { threadMemory: _threadMemory, ...summary } = thread;
+  return summary;
+}
+
 async function migrateRuntimeProjectPath(thread: Thread, threadStore: IThreadStore): Promise<Thread> {
   if (!thread.projectPath || thread.projectPath === 'default' || thread.projectPath.startsWith('games/')) {
     return thread;
@@ -320,7 +398,7 @@ const updateThreadSchema = z
     bubbleCli: z.enum(['global', 'expanded', 'collapsed']).optional(),
     /** F168: Preferred workspace mode for auto-switch on thread open. null clears. */
     preferredWorkspaceMode: z
-      .enum(['dev', 'recall', 'schedule', 'tasks', 'community', 'artifacts', 'approval', 'trajectory'])
+      .enum(['dev', 'recall', 'schedule', 'tasks', 'community', 'artifacts', 'approval', 'trajectory', 'eval'])
       .nullable()
       .optional(),
     /** F187: Thread label IDs. */
@@ -414,7 +492,7 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     }
 
     reply.status(201);
-    return sanitizeThreadForResponse(await migrateRuntimeProjectPath(thread, threadStore), userId);
+    return sanitizeThreadForResponse(thread, userId);
   });
 
   // GET /api/threads - 列出用户的对话
@@ -425,6 +503,7 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     }
 
     const {
+      view,
       projectPath,
       q,
       backlogItemIds,
@@ -453,7 +532,7 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
       if (!includeConcierge) {
         deletedThreads = deletedThreads.filter((t) => !isConciergeThread(t));
       }
-      return { threads: deletedThreads };
+      return { threads: deletedThreads.map((thread) => projectThreadForListView(thread, view)) };
     }
 
     const migratedProjectPath = projectPath ? await migrateStoredProjectPath(projectPath) : undefined;
@@ -567,15 +646,13 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
         messageStore,
       );
       const summaryMap = new Map(summaries.map((s) => [s.threadId, s]));
-      return {
-        threads: threads.map((t) => {
-          const s = summaryMap.get(t.id);
-          return { ...t, unreadCount: s?.unreadCount ?? 0, hasUserMention: s?.hasUserMention ?? false };
-        }),
-      };
+      threads = threads.map((t) => {
+        const s = summaryMap.get(t.id);
+        return { ...t, unreadCount: s?.unreadCount ?? 0, hasUserMention: s?.hasUserMention ?? false };
+      });
     }
 
-    return { threads };
+    return { threads: threads.map((thread) => projectThreadForListView(thread, view)) };
   });
 
   // GET /api/threads/:id - 获取对话详情
@@ -588,6 +665,91 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     }
     const userId = resolveUserId(request, { defaultUserId: 'default-user' }) ?? 'default-user';
     return sanitizeThreadForResponse(await migrateRuntimeProjectPath(thread, threadStore), userId);
+  });
+
+  // F254 Phase E: rebuildable Hub projection for F5/reconnect recovery.
+  app.get('/api/threads/:id/freshness-closures', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const thread = await threadStore.get(id);
+    if (!thread || thread.deletedAt) {
+      reply.status(404);
+      return { error: 'Thread not found' };
+    }
+    const userId = resolveUserId(request, { defaultUserId: 'default-user' }) ?? 'default-user';
+    const closures = ((await opts.freshnessClosureStore?.listActiveByThread(id)) ?? []).filter(
+      (closure) => closure.userId === userId,
+    );
+    const supplements = ((await opts.freshnessClosureStore?.listSupplementsByThread(id)) ?? []).filter(
+      (supplement) => supplement.userId === userId,
+    );
+    return {
+      closures: closures.map((closure) => projectFreshnessClosure(closure)),
+      supplements: await Promise.all(
+        supplements.map((supplement) => projectFreshnessSupplementForHistory(supplement, opts.messageStore)),
+      ),
+    };
+  });
+
+  app.post('/api/threads/:id/freshness-closures/:closureId/retry', async (request, reply) => {
+    const { id, closureId } = request.params as { id: string; closureId: string };
+    const userId = resolveStrictUserId(request);
+    if (!userId) {
+      reply.status(401);
+      return { error: 'Authentication required' };
+    }
+    const closure = await opts.freshnessClosureStore?.get(closureId);
+    if (!closure || closure.threadId !== id || closure.userId !== userId) {
+      reply.status(404);
+      return { error: 'Freshness closure not found' };
+    }
+    if (closure.status !== 'blocked') {
+      reply.status(409);
+      return { error: 'Freshness closure is not blocked', status: closure.status };
+    }
+    if (!opts.invocationQueue || !opts.queueProcessor || !opts.freshnessClosureStore) {
+      reply.status(503);
+      return { error: 'Freshness retry unavailable' };
+    }
+    const nextEpoch = closure.retryEpoch + 1;
+    const enqueue = opts.invocationQueue.enqueue({
+      threadId: id,
+      userId,
+      ownerAuthProvenance: 'strict',
+      content: `[Freshness Catch Closure ${closure.id}] 显式重试；正文由执行前 closure truth 注入。`,
+      source: 'agent',
+      sourceCategory: 'freshness',
+      targetCats: [closure.catId],
+      callerCatId: closure.catId,
+      autoExecute: true,
+      priority: 'normal',
+      intent: 'execute',
+      idempotencyKey: `freshness-closure:${closure.id}:retry:${nextEpoch}`,
+      freshnessClosureId: closure.id,
+      freshnessRequiredFrontierMessageId: closure.requiredFrontierMessageId,
+    });
+    if (enqueue.outcome === 'full') {
+      reply.status(409);
+      return { error: 'Invocation queue is full' };
+    }
+    const retried = await opts.freshnessClosureStore.retry(closure.id, {
+      actorId: userId,
+      evidenceRef: `api:retry:${Date.now()}`,
+      now: Date.now(),
+    });
+    recordFreshnessClosureTransition('retried');
+    const projection = projectFreshnessClosure(retried);
+    opts.socketManager?.broadcastAgentMessage(
+      {
+        type: 'system_info',
+        catId: retried.catId as CatId,
+        content: JSON.stringify(projection),
+        timestamp: projection.updatedAt,
+      },
+      id,
+    );
+    void opts.queueProcessor.tryAutoExecute(id);
+    reply.status(202);
+    return { closure: projection };
   });
 
   // PATCH /api/threads/:id - 更新标题/置顶/收藏
@@ -829,6 +991,7 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
 
       // B-4: Cascade delete guide session to prevent stale sessions on deleted threads
       void opts.guideSessionStore?.delete(id).catch(() => {});
+      await opts.freshnessClosureStore?.deleteByThread(id);
 
       // I-2: Audit thread deletion for traceability (best-effort, don't block response)
       const userId = resolveUserId(request, {});
@@ -1051,10 +1214,13 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     let advancedCount = 0;
 
     for (const thread of threads) {
-      const messages = await messageStore.getByThread(thread.id);
-      if (messages.length === 0) continue;
-      const latestId = messages[messages.length - 1]?.id;
-      const advanced = await opts.readStateStore.ack(userId, thread.id, latestId);
+      // #1200/#1269: Use visibility-domain latest — single authority.
+      // Timeline-published queued cat speech now has visibilitySeq at append,
+      // so getLatestVisibleCursor covers all visible items without fallback.
+      const latest = await messageStore.getLatestVisibleCursor(thread.id);
+      if (!latest) continue;
+      // #1269: Gated ack — applies durable-slot gate + conditional pre-reconcile
+      const advanced = await gatedReadStateAck(opts.readStateStore!, messageStore, userId, thread.id, latest.cursor);
       if (advanced) advancedCount++;
     }
 
@@ -1092,15 +1258,23 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
     }
 
     // P1-3: Validate upToMessageId belongs to this thread
+    // #1200: Also canonicalize raw v1 ID → v2 cursor for correct CAS lex comparison.
+    // Without canonicalization, a raw v1 ID permanently loses to any v2 cursor
+    // in SET_IF_GREATER because 'v' (0x76) > any digit — the ack silently no-ops.
+    let cursorToken = parseResult.data.upToMessageId;
     if (messageStore) {
       const msg = await messageStore.getById(parseResult.data.upToMessageId);
       if (!msg || msg.threadId !== id) {
         reply.status(400);
         return { error: 'upToMessageId does not belong to this thread' };
       }
+      if (messageStore.canonicalizeCursor) {
+        cursorToken = await messageStore.canonicalizeCursor(parseResult.data.upToMessageId, id);
+      }
     }
 
-    const advanced = await opts.readStateStore.ack(userId, id, parseResult.data.upToMessageId);
+    // #1269: Gated ack — applies durable-slot gate + conditional pre-reconcile
+    const advanced = await gatedReadStateAck(opts.readStateStore, messageStore, userId, id, cursorToken);
     return { advanced };
   });
 
@@ -1131,13 +1305,17 @@ export const threadsRoutes: FastifyPluginAsync<ThreadsRoutesOptions> = async (ap
       return { error: 'Thread not found' };
     }
 
-    const messages = await messageStore.getByThread(id, 1);
-    if (messages.length === 0) {
+    // #1200/#1269: Use visibility-domain latest — single authority.
+    // Timeline-published queued cat speech now has visibilitySeq at append,
+    // so getLatestVisibleCursor covers all visible items without fallback.
+    const latest = await messageStore.getLatestVisibleCursor(id);
+    if (!latest) {
       return { advanced: false, reason: 'no messages' };
     }
 
-    const latestId = messages[messages.length - 1]?.id;
-    const advanced = await opts.readStateStore.ack(userId, id, latestId);
-    return { advanced, messageId: latestId };
+    // #1269: Gated ack — applies durable-slot gate + conditional pre-reconcile
+    const advanced = await gatedReadStateAck(opts.readStateStore, messageStore, userId, id, latest.cursor);
+    // #1200 RED #23b: return both raw messageId and canonical v2 cursor
+    return { advanced, messageId: latest.messageId, cursor: latest.cursor };
   });
 };

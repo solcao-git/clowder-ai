@@ -1,6 +1,8 @@
 'use client';
 
+import type { MessageWorkDisposition } from '@cat-cafe/shared';
 import { useCallback, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useAgentMessages } from '@/hooks/useAgentMessages';
 import { useChatCommands } from '@/hooks/useChatCommands';
 import type { DeliveryMode } from '@/stores/chat-types';
@@ -23,14 +25,24 @@ export function useSendMessage(activeThreadId?: string) {
   const {
     addMessage,
     addMessageToThread,
-    removeMessage,
     removeThreadMessage,
     replaceThreadMessageId,
     setLoading,
     setHasActiveInvocation,
     setThreadLoading,
     setThreadHasActiveInvocation,
-  } = useChatStore();
+  } = useChatStore(
+    useShallow((s) => ({
+      addMessage: s.addMessage,
+      addMessageToThread: s.addMessageToThread,
+      removeThreadMessage: s.removeThreadMessage,
+      replaceThreadMessageId: s.replaceThreadMessageId,
+      setLoading: s.setLoading,
+      setHasActiveInvocation: s.setHasActiveInvocation,
+      setThreadLoading: s.setThreadLoading,
+      setThreadHasActiveInvocation: s.setThreadHasActiveInvocation,
+    })),
+  );
   const { resetRefs } = useAgentMessages();
   const { processCommand } = useChatCommands();
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>('idle');
@@ -61,6 +73,7 @@ export function useSendMessage(activeThreadId?: string) {
       whisper?: WhisperOptions,
       deliveryMode?: DeliveryMode,
       replyToId?: string,
+      messageDisposition?: MessageWorkDisposition,
     ) => {
       const activeThread = activeThreadId ?? useChatStore.getState().currentThreadId;
       const threadId = overrideThreadId ?? activeThread;
@@ -77,7 +90,7 @@ export function useSendMessage(activeThreadId?: string) {
       const capturedReplyTarget = replyToId ? useChatStore.getState().replyToMessage : undefined;
 
       const wasCommand = await processCommand(content, threadId);
-      if (wasCommand) return;
+      if (wasCommand) return false;
 
       const clientMessageId = createClientId();
       const optimisticMessageId = `user-${clientMessageId}`;
@@ -113,8 +126,8 @@ export function useSendMessage(activeThreadId?: string) {
           })),
         ];
       }
-      // F117: Queue sends skip optimistic insert — bubble appears only on messages_delivered
-      // (prevents queued message from showing in chat timeline before delivery)
+      // Explicit queue sends wait for the durable server id before publication;
+      // normal sends remain optimistic even when the server smart-queues them.
       if (!isQueueSend) {
         if (threadId !== activeThread) {
           addMessageToThread(threadId, userMsg);
@@ -135,7 +148,7 @@ export function useSendMessage(activeThreadId?: string) {
         }
       }
 
-      const reconcileQueuedResponse = (
+      const reconcileSuccessfulResponse = (
         body: { status?: string; userMessageId?: string; gameThreadId?: string } | null,
       ) => {
         // Game started in independent thread — remove optimistic message from source
@@ -148,15 +161,19 @@ export function useSendMessage(activeThreadId?: string) {
           removeThreadMessage(threadId, optimisticMessageId);
           setThreadLoading(threadId, false);
           setThreadHasActiveInvocation(threadId, false);
-          return true;
+          return;
         }
-        if (body?.status !== 'queued' || isQueueSend) return false;
-        if (threadId !== activeThread) {
-          removeThreadMessage(threadId, optimisticMessageId);
+        if (!body?.userMessageId) return;
+        if (isQueueSend) {
+          const durableUserMessage = { ...userMsg, id: body.userMessageId };
+          if (threadId !== activeThread) {
+            addMessageToThread(threadId, durableUserMessage);
+          } else {
+            addMessage(durableUserMessage);
+          }
         } else {
-          removeMessage(optimisticMessageId);
+          replaceThreadMessageId(threadId, optimisticMessageId, body.userMessageId);
         }
-        return true;
       };
 
       try {
@@ -168,6 +185,7 @@ export function useSendMessage(activeThreadId?: string) {
           formData.append('threadId', threadId);
           formData.append('idempotencyKey', clientMessageId);
           if (deliveryMode) formData.append('deliveryMode', deliveryMode);
+          if (messageDisposition) formData.append('messageDisposition', messageDisposition);
           if (whisper) {
             formData.append('visibility', whisper.visibility);
             for (const catId of whisper.whisperTo) {
@@ -187,9 +205,7 @@ export function useSendMessage(activeThreadId?: string) {
             throw new Error(body?.detail ?? `Server error: ${res.status}`);
           }
           const body = await res.json().catch(() => null);
-          if (!reconcileQueuedResponse(body) && body?.userMessageId) {
-            replaceThreadMessageId(threadId, optimisticMessageId, body.userMessageId);
-          }
+          reconcileSuccessfulResponse(body);
         } else {
           const res = await apiFetch('/api/messages', {
             method: 'POST',
@@ -201,6 +217,7 @@ export function useSendMessage(activeThreadId?: string) {
               ...(whisper ? { visibility: whisper.visibility, whisperTo: whisper.whisperTo } : {}),
               ...deliveryModePayload,
               ...(replyToId ? { replyTo: replyToId } : {}),
+              ...(messageDisposition ? { messageDisposition } : {}),
             }),
           });
           if (!res.ok) {
@@ -208,14 +225,13 @@ export function useSendMessage(activeThreadId?: string) {
             throw new Error(body?.detail ?? `Server error: ${res.status}`);
           }
           const body = await res.json().catch(() => null);
-          if (!reconcileQueuedResponse(body) && body?.userMessageId) {
-            replaceThreadMessageId(threadId, optimisticMessageId, body.userMessageId);
-          }
+          reconcileSuccessfulResponse(body);
         }
         setUploadStatus('idle');
         setUploadError(null);
         // Guide engine: signal that message was sent (advance confirm steps on chat.input)
         window.dispatchEvent(new CustomEvent('guide:confirm', { detail: { target: 'chat.input' } }));
+        return true;
       } catch (err) {
         // F39: Only clear invocation flags for normal (non-queue, non-force) sends.
         // Queue sends never set them. Force sends target a thread where a cat is
@@ -245,6 +261,7 @@ export function useSendMessage(activeThreadId?: string) {
         } else {
           addMessage(errorMessagePayload);
         }
+        return false;
       }
     },
     [
@@ -252,7 +269,6 @@ export function useSendMessage(activeThreadId?: string) {
       processCommand,
       addMessage,
       addMessageToThread,
-      removeMessage,
       removeThreadMessage,
       replaceThreadMessageId,
       setLoading,
