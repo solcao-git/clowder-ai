@@ -202,7 +202,6 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
   }
 
   async *invoke(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
-    const readOnly = options?.toolExecutionPolicy?.mode === 'read_only';
     // P1-2: runtime model override takes precedence over constructor model
     const effectiveModel = options?.callbackEnv?.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE ?? this.model;
 
