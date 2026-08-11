@@ -37,6 +37,13 @@ export const CONTEXT_WINDOW_SIZES: Record<string, number> = {
   'glm-5.2': 1_000_000,
   'glm-5.2[1m]': 1_000_000,
   'glm-5.1': 128_000,
+  // DeepSeek — context length 1M per DeepSeek API docs (deepseek-v4-pro & -flash).
+  // clowder#zhongli-seal: without this entry, opencode (no contextWindowSize
+  // report) fell back to OPENCODE_DEFAULT_CONTEXT_WINDOW (128k), inflating
+  // fillRatio ~8x and triggering premature session seals at ~89% (actually
+  // only ~114k / 1M used). Real window is 1M, max output 384K.
+  'deepseek-v4-pro': 1_000_000,
+  'deepseek-v4-flash': 1_000_000,
   // Qwen (通义千问)
   'qwen3.7-max': 1_000_000,
   'qwen3.7-plus': 1_000_000,
