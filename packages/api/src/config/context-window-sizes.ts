@@ -124,8 +124,19 @@ export function getContextWindowFallback(model: string): number | undefined {
  * - `max()` semantics: never shrinks a CLI report. Once the CLI catches
  *   up (2.1.204+ presumably reports 1M), the floor becomes a no-op.
  */
+// nahida (glm-5.2/glm-5.3 via claude CLI): CLI mis-reports these as 200K
+// (same stale-CLI class as claude-fable-5 above). The CONTEXT_WINDOW_SIZES
+// fallback table (tier 2) is SKIPPED because claude CLI DOES report
+// contextWindowSize, so tier 1 (reported) always wins with the wrong 200K.
+// Only the known-min floor — max(reported, floor) — can correct it.
+// Without this, nahida sealed/handed-off at 180K (0.9 of 200K) while the
+// real 1M window was 90% unused. Proven: session chain showed
+// windowTokens=200000, source=exact, continuationReason=threshold_seal.
 const KNOWN_MIN_CONTEXT_WINDOWS: Record<string, number> = {
   'claude-fable-5': 1_000_000,
+  'glm-5.2': 1_000_000,
+  'glm-5.3': 1_000_000,
+  'glm-5.3-t': 1_000_000,
 };
 
 export function getKnownMinContextWindow(model: string): number | undefined {
