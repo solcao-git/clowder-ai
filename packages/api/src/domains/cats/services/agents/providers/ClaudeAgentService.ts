@@ -244,7 +244,18 @@ export function buildClaudeEnvOverrides(callbackEnv?: Record<string, string>): R
   if (mode === 'api_key') {
     const apiKey = callbackEnv?.[ANTHROPIC_PROFILE_API_KEY]?.trim();
     const baseUrl = callbackEnv?.[ANTHROPIC_PROFILE_BASE_URL]?.trim();
-    if (apiKey) env.ANTHROPIC_API_KEY = apiKey;
+    if (apiKey) {
+      // 火山网关 (apigateway/volceapi) requires Bearer auth (ANTHROPIC_AUTH_TOKEN);
+      // direct providers like BigModel use x-api-key (ANTHROPIC_API_KEY).
+      // nahida 切网关 glm-5.3-t: 网关 /compatible 端点拒绝 x-api-key, 只认 Bearer.
+      const isGatewayBearer = /apigateway|volceapi/i.test(baseUrl ?? '');
+      if (isGatewayBearer) {
+        env.ANTHROPIC_AUTH_TOKEN = apiKey;
+        env.ANTHROPIC_API_KEY = null;
+      } else {
+        env.ANTHROPIC_API_KEY = apiKey;
+      }
+    }
     if (baseUrl) {
       // Claude CLI internally appends /v1 to the base URL.
       // If the user configured it with /v1 already, strip it to prevent
