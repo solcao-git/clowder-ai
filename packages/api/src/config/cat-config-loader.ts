@@ -15,18 +15,11 @@ import type {
   CatId,
   CatVariant,
   CoCreatorConfig,
-  ContextBudget,
   MissionHubSelfClaimScope,
   ReviewPolicy,
   Roster,
 } from '@cat-cafe/shared';
-import {
-  type ClientId,
-  catRegistry,
-  createCatId,
-  normalizeCliEffortForProvider,
-  normalizeModelSlug,
-} from '@cat-cafe/shared';
+import { type ClientId, catRegistry, createCatId, normalizeCliEffortForProvider } from '@cat-cafe/shared';
 import { z } from 'zod';
 import { createModuleLogger } from '../infrastructure/logger.js';
 import { bootstrapCatCatalog, readCatCatalogRaw } from './cat-catalog-store.js';
@@ -56,47 +49,23 @@ export function deriveAutoCompactTokenLimit(contextWindow: number): number {
   return Math.floor(contextWindow * DEFAULT_AUTO_COMPACT_RATIO);
 }
 
-export function assertValidCliContextWindowTuple(
-  contextWindow: number | undefined,
-  autoCompactTokenLimit: number | undefined,
-): void {
-  if (autoCompactTokenLimit === undefined) return;
-  if (contextWindow === undefined) {
-    throw new Error('cli.autoCompactTokenLimit requires cli.contextWindow');
-  }
-  if (autoCompactTokenLimit > contextWindow) {
-    throw new Error('cli.autoCompactTokenLimit cannot exceed cli.contextWindow');
-  }
-}
+const legacyPositiveContextWindowSchema = z.preprocess(
+  (value) => (typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined),
+  z.number().positive().int().optional(),
+);
 
-const cliConfigSchema = z
-  .object({
-    command: z.string().min(1),
-    outputFormat: z.string().min(1),
-    defaultArgs: z.array(z.string()).optional(),
-    effort: z.string().trim().min(1).optional(),
-    contextWindow: z.number().positive().int().optional(),
-    autoCompactTokenLimit: z.number().positive().int().optional(),
-    /** F254 D2: Codex carrier override (openai only). Absent = follow CAT_CAFE_CODEX_CARRIER env. */
-    carrier: z.enum(['exec_json', 'app_server']).optional(),
-  })
-  .superRefine((cli, ctx) => {
-    try {
-      assertValidCliContextWindowTuple(cli.contextWindow, cli.autoCompactTokenLimit);
-    } catch (error) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['autoCompactTokenLimit'],
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
-
-const contextBudgetSchema = z.object({
-  maxPromptTokens: z.number().positive(),
-  maxContextTokens: z.number().positive(),
-  maxMessages: z.number().positive().int(),
-  maxContentLengthPerMsg: z.number().positive(),
+const cliConfigSchema = z.object({
+  command: z.string().min(1),
+  outputFormat: z.string().min(1),
+  defaultArgs: z.array(z.string()).optional(),
+  effort: z.string().trim().min(1).optional(),
+  /** F291: Codex OAuth requested service tier. Absent = inherit Codex user config. */
+  serviceTier: z.enum(['standard', 'fast']).optional(),
+  /** Read-only migration input. Invalid legacy values are inert, not catalog-fatal. */
+  contextWindow: legacyPositiveContextWindowSchema,
+  // Legacy autoCompactTokenLimit is intentionally absent: Zod strips it as inert input.
+  /** F254 D2: Codex carrier override (openai only). Absent = follow CAT_CAFE_CODEX_CARRIER env. */
+  carrier: z.enum(['exec_json', 'app_server']).optional(),
 });
 
 const agyProfileSchema = z
@@ -134,42 +103,45 @@ const catVariantSchema = z
     accountRef: z.string().min(1).optional(), // F127: concrete account binding
     clientId: z.string().min(1), // #252: accept unknown providers to avoid full config crash
 
-  defaultModel: z.string(), // OAuth/subscription CLIs have built-in defaults; api_key validated at route level
-  mcpSupport: z.boolean(),
-  cli: cliConfigSchema.optional(),
-  agyProfile: agyProfileSchema,
-  commandArgs: z.array(z.string().min(1)).optional(), // F127: explicit bridge args (e.g. Antigravity)
-  cliConfigArgs: z.array(z.string().min(1)).optional(), // F127: extra CLI args per member
-  /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
-  provider: z
-    .string()
-    .trim()
-    .min(1, 'provider must not be blank')
-    .refine((v) => !v.includes('/'), 'provider must not contain "/"')
-    .optional(),
-  roleDescription: z.string().min(1).optional(), // F127 review fix: allow variant-scoped roleDescription override
-  sessionChain: z.boolean().optional(), // F127 review fix: allow variant-scoped sessionChain override
-  personality: z.string().optional(),
-  strengths: z.array(z.string()).optional(),
-  avatar: z.string().min(1).optional(), // F32-b P4c: override breed avatar
-  color: colorSchema.optional(), // F32-b P4c: override breed color
-  contextBudget: contextBudgetSchema.optional(),
-  voiceConfig: z // F103: per-cat TTS voice configuration
-    .object({
-      voice: z.string().min(1),
-      langCode: z.string().min(1),
-      speed: z.number().positive().optional(),
-      refAudio: z.string().min(1).optional(),
-      refText: z.string().min(1).optional(),
-      instruct: z.string().min(1).optional(),
-      temperature: z.number().min(0).max(2).optional(),
-      // CosyVoice (Dashscope) pre-registered voice_id — takes priority over `voice`
-      cosyvoiceVoice: z.string().min(1).optional(),
-    })
-    .optional(),
-  teamStrengths: z.string().optional(), // F-Ground-3: human-readable strengths
-  caution: z.string().nullable().optional(), // F-Ground-3: null = explicit no-caution (R1 fix)
-  restrictions: z.array(z.string().min(1)).optional(), // F167 Phase E: hard task bans
+    defaultModel: z.string(), // OAuth/subscription CLIs have built-in defaults; api_key validated at route level
+    mcpSupport: z.boolean(),
+    cli: cliConfigSchema.optional(),
+    agyProfile: agyProfileSchema,
+    commandArgs: z.array(z.string().min(1)).optional(), // F127: explicit bridge args (e.g. Antigravity)
+    cliConfigArgs: z.array(z.string().min(1)).optional(), // F127: extra CLI args per member
+    /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
+    provider: z
+      .string()
+      .trim()
+      .min(1, 'provider must not be blank')
+      .refine((v) => !v.includes('/'), 'provider must not contain "/"')
+      .optional(),
+    roleDescription: z.string().min(1).optional(), // F127 review fix: allow variant-scoped roleDescription override
+    sessionChain: z.boolean().optional(), // F127 review fix: allow variant-scoped sessionChain override
+    // #1329: explicit member intent outranks breed policy and the legacy byte.
+    sessionStrategy: z.lazy(() => sessionStrategySchema),
+    personality: z.string().optional(),
+    strengths: z.array(z.string()).optional(),
+    avatar: z.string().min(1).optional(), // F32-b P4c: override breed avatar
+    color: colorSchema.optional(), // F32-b P4c: override breed color
+    /** clowder-ai#1208: explicit context window cap. undefined=Auto, positive int=Manual. */
+    contextWindow: z.number().int().positive().optional(),
+    voiceConfig: z // F103: per-cat TTS voice configuration
+      .object({
+        voice: z.string().min(1),
+        langCode: z.string().min(1),
+        speed: z.number().positive().optional(),
+        refAudio: z.string().min(1).optional(),
+        refText: z.string().min(1).optional(),
+        instruct: z.string().min(1).optional(),
+        temperature: z.number().min(0).max(2).optional(),
+        // CosyVoice (Dashscope) pre-registered voice_id — takes priority over `voice`
+        cosyvoiceVoice: z.string().min(1).optional(),
+      })
+      .optional(),
+    teamStrengths: z.string().optional(), // F-Ground-3: human-readable strengths
+    caution: z.string().nullable().optional(), // F-Ground-3: null = explicit no-caution (R1 fix)
+    restrictions: z.array(z.string().min(1)).optional(), // F167 Phase E: hard task bans
   })
   .superRefine((variant, ctx) => {
     // F254 D2: cli.carrier is a Codex-only override. The cats API rejects it for
@@ -330,7 +302,7 @@ function readTemplate(templatePath: string): string {
  * across provider switches (e.g. template cli.defaultArgs surviving into a
  * catalog variant that switched to a different client).
  */
-const ATOMIC_OBJECT_KEYS = new Set(['cli', 'agyProfile', 'color', 'contextBudget', 'voiceConfig', 'acp']);
+const ATOMIC_OBJECT_KEYS = new Set(['cli', 'agyProfile', 'color', 'voiceConfig', 'acp']);
 
 /**
  * Deep merge two plain objects. `overlay` fields override `base` fields.
@@ -616,12 +588,7 @@ export function getDefaultVariant(breed: CatBreed): CatVariant {
  * @throws Error on duplicate catId (fail-fast at startup)
  */
 export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig> {
-  const result: Record<
-    string,
-    CatConfig & {
-      contextBudget?: ContextBudget;
-    }
-  > = {};
+  const result: Record<string, CatConfig> = {};
   for (const breed of config.breeds) {
     // F32-b P4c: resolve default variant personality for non-default fallback
     const defaultVariant = breed.variants.find((v) => v.id === breed.defaultVariantId);
@@ -686,7 +653,7 @@ export function toAllCatConfigs(config: CatCafeConfig): Record<string, CatConfig
           : {}),
         ...(variant.cli != null ? { cli: variant.cli } : {}),
         ...(variant.provider != null ? { provider: variant.provider } : {}),
-        ...(variant.contextBudget != null ? { contextBudget: variant.contextBudget } : {}),
+        ...(variant.contextWindow != null ? { contextWindow: variant.contextWindow } : {}),
         ...(variant.voiceConfig != null ? { voiceConfig: variant.voiceConfig } : {}),
         roleDescription: variant.roleDescription ?? breed.roleDescription,
         personality: variant.personality ?? defaultVariant?.personality ?? '',
@@ -840,7 +807,7 @@ export function isSessionChainEnabled(catId: CatId | string, config?: CatCafeCon
  * Get session strategy config from the resolved cat config for a cat.
  * Returns undefined if not configured (caller falls back to code defaults).
  *
- * F33 Phase 2: Same lookup pattern as isSessionChainEnabled — catId → breed → features.
+ * #1329 precedence within file config: explicit variant → breed features.
  */
 export function getConfigSessionStrategy(
   catId: string,
@@ -857,8 +824,10 @@ export function getConfigSessionStrategy(
   const breed = _catIdToBreed.get(catId);
   if (!breed) return undefined;
 
-  // features.sessionStrategy is Zod-validated at load time
-  return breed.features?.sessionStrategy;
+  const variant = breed.variants.find((candidate) => (candidate.catId ?? breed.catId) === catId);
+  // Both values are Zod-validated at load time. The explicit member value must
+  // win even when the retained legacy sessionChain byte says false.
+  return variant?.sessionStrategy ?? breed.features?.sessionStrategy;
 }
 
 /**
@@ -963,8 +932,8 @@ export function hasRuntimeDefaultCatOverride(): boolean {
 }
 
 /** Unified owner userId: configured env or single-user fallback. */
-export function getOwnerUserId(): string {
-  return process.env.DEFAULT_OWNER_USER_ID?.trim() || 'default-user';
+export function getOwnerUserId(env: NodeJS.ProcessEnv = process.env): string {
+  return env.DEFAULT_OWNER_USER_ID?.trim() || 'default-user';
 }
 
 // ── Variant CLI effort accessor ──────────────────────────────────────
@@ -1037,13 +1006,14 @@ export interface CatContextWindowConfig {
 }
 
 /**
- * Return persisted context overrides only when they belong to the model that
- * will actually run. A per-invocation model override must fall back to the
- * Codex model catalog instead of inheriting another model's window limits.
+ * clowder-ai#1208: Return the member's explicit manual context cap, if any.
+ * This is a compatibility shim for callers that have not yet switched to
+ * `resolveContextCapacity`; the effective window should always be resolved
+ * through the capacity resolver.
  */
 export function getCatContextWindowConfig(
   catId: string,
-  effectiveModel?: string | null,
+  _effectiveModel?: string | null,
 ): CatContextWindowConfig | undefined {
   const cfg = getCachedConfig();
   if (!cfg) return undefined;
@@ -1054,13 +1024,13 @@ export function getCatContextWindowConfig(
   }
 
   const variant = _catIdToVariant.get(catId);
-  if (!variant?.cli?.contextWindow) return undefined;
-  if (effectiveModel && normalizeModelSlug(effectiveModel) !== normalizeModelSlug(variant.defaultModel)) {
-    return undefined;
-  }
+  // Top-level contextWindow is canonical; compat-read legacy cli.contextWindow.
+  const legacyCli = variant?.cli as { contextWindow?: number } | undefined;
+  const capTokens = variant?.contextWindow ?? (legacyCli?.contextWindow || undefined);
+  if (!capTokens) return undefined;
   return {
-    contextWindow: variant.cli.contextWindow,
-    autoCompactTokenLimit: variant.cli.autoCompactTokenLimit ?? deriveAutoCompactTokenLimit(variant.cli.contextWindow),
+    contextWindow: capTokens,
+    autoCompactTokenLimit: deriveAutoCompactTokenLimit(capTokens),
   };
 }
 

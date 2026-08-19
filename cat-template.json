@@ -75,9 +75,9 @@
         "primary": "#C8A951",
         "secondary": "#F5EDDA"
       },
-      "roleDescription": "全栈编码主力，代码能力全队最强，擅长复杂功能实现和大规模重构",
-      "personality": "代码高手，什么功能都能写，什么 bug 都能修，写代码速度快质量高",
-      "teamStrengths": "代码编写全队最强、复杂功能实现、大规模重构、多步推理编码"
+      "roleDescription": "开源多模型编码 agent，自带多专家编排 + LSP + 主题生态",
+      "personality": "沉稳可靠，什么 provider 都能接，什么任务都能扛",
+      "teamStrengths": "多专家内部编排、LSP 集成、开源生态、provider-agnostic"
     }
   ],
   "clientDefaults": {
@@ -105,6 +105,7 @@
       "models": [
         "Gemini 3.1 Pro (High)",
         "Gemini 3.1 Pro (Low)",
+        "Gemini 3.6 Flash (High)",
         "Gemini 3.5 Flash (High)",
         "Claude Opus 4.6 (Thinking)"
       ]
@@ -147,7 +148,11 @@
     },
     "codex-sol": {
       "family": "maine-coon",
-      "roles": ["coding", "reasoning", "peer-reviewer"],
+      "roles": [
+        "coding",
+        "reasoning",
+        "peer-reviewer"
+      ],
       "lead": false,
       "available": true,
       "evaluation": "小太阳型攻坚猫，擅长复杂系统分析与实现"
@@ -173,7 +178,11 @@
     },
     "glm52": {
       "family": "dragon-li",
-      "roles": ["chat", "memory-spike", "reasoning"],
+      "roles": [
+        "chat",
+        "memory-spike",
+        "reasoning"
+      ],
       "lead": true,
       "available": true,
       "evaluation": "GLM-5.2 新猫"
@@ -238,6 +247,16 @@
       "available": true,
       "evaluation": "claude-fable-5 新布偶猫，Opus x2 猫粮，能力画像待校准"
     },
+    "tighnari": {
+      "family": "trae-cli-acp",
+      "roles": [
+        "coding",
+        "precision"
+      ],
+      "lead": false,
+      "available": true,
+      "evaluation": "须弥巡林官，Trae CLI ACP 接入，严谨务实，细节敏感"
+    },
     "clorinde": {
       "family": "codebuddy-acp",
       "roles": [
@@ -249,16 +268,6 @@
       "lead": true,
       "available": true,
       "evaluation": "代码质量终审Agent，CodeBuddy CLI ACP 接入，专注静态审计与规范校验"
-    },
-    "tighnari": {
-      "family": "trae-cli-acp",
-      "roles": [
-        "coding",
-        "precision"
-      ],
-      "lead": false,
-      "available": true,
-      "evaluation": "须弥巡林官，Trae CLI ACP 接入，严谨务实，细节敏感"
     }
   },
   "reviewPolicy": {
@@ -311,12 +320,6 @@
             "backend",
             "mcp"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -362,12 +365,6 @@
           ],
           "teamStrengths": "快速灵活，适合日常对话和轻量任务",
           "caution": null,
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -414,12 +411,6 @@
           ],
           "teamStrengths": "架构设计、创意写作最优秀",
           "caution": "写代码不如 4.6",
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -471,12 +462,6 @@
           ],
           "teamStrengths": "深度推理、架构判断、长文共创（新猫，待校准）",
           "caution": "新猫，能力画像待校准",
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -536,12 +521,6 @@
             "security",
             "testing"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 240000,
-            "maxContextTokens": 216000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -595,12 +574,6 @@
           ],
           "teamStrengths": "架构思考、Review、bug 定位专家",
           "caution": null,
-          "contextBudget": {
-            "maxPromptTokens": 240000,
-            "maxContextTokens": 216000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -648,12 +621,6 @@
           ],
           "teamStrengths": "快速编码、精确点改",
           "caution": "128k context, 不会自动跑测试",
-          "contextBudget": {
-            "maxPromptTokens": 64000,
-            "maxContextTokens": 40000,
-            "maxMessages": 100,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -674,7 +641,12 @@
           "cli": {
             "command": "codex",
             "outputFormat": "json",
-            "defaultArgs": ["exec", "--json", "-m", "gpt-5.6-sol"],
+            "defaultArgs": [
+              "exec",
+              "--json",
+              "-m",
+              "gpt-5.6-sol"
+            ],
             "effort": "xhigh"
           }
         }
@@ -767,12 +739,6 @@
             "ui-ux",
             "creativity"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 350000,
-            "maxContextTokens": 300000,
-            "maxMessages": 300,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -815,12 +781,6 @@
             "creativity",
             "multimodal"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 350000,
-            "maxContextTokens": 300000,
-            "maxMessages": 300,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -837,7 +797,7 @@
       "id": "gemini35",
       "relationshipKey": "siamese",
       "catId": "gemini35",
-      "name": "暹罗猫 Gemini 3.5 Flash",
+      "name": "暹罗猫 Gemini 3.6 Flash",
       "displayName": "暹罗猫",
       "nickname": "烁烁",
       "avatar": "/avatars/gemini25.png",
@@ -849,11 +809,15 @@
         "@gemini35",
         "@gemini-35",
         "@gemini3.5",
+        "@gemini36",
+        "@gemini-36",
+        "@gemini3.6",
         "@flash",
         "@暹罗flash",
-        "@暹罗gemini35"
+        "@暹罗gemini35",
+        "@暹罗gemini36"
       ],
-      "roleDescription": "暹罗猫 Gemini 3.5 Flash，视觉设计和创意顾问",
+      "roleDescription": "暹罗猫 Gemini 3.6 Flash，视觉设计和创意顾问",
       "teamStrengths": "审美、前端设计风格、打破常规",
       "caution": "新猫加入还在测评；开发任务需要强 reviewer 守门",
       "defaultVariantId": "gemini35-default",
@@ -864,8 +828,8 @@
         {
           "id": "gemini35-default",
           "clientId": "google",
-          "variantLabel": "Gemini 3.5 Flash",
-          "defaultModel": "Gemini 3.5 Flash (High)",
+          "variantLabel": "Gemini 3.6 Flash",
+          "defaultModel": "Gemini 3.6 Flash (High)",
           "mcpSupport": true,
           "cli": {
             "command": "agy",
@@ -878,12 +842,6 @@
             "creativity",
             "multimodal"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 350000,
-            "maxContextTokens": 300000,
-            "maxMessages": 300,
-            "maxContentLengthPerMsg": 15000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -907,7 +865,14 @@
         "primary": "#D4A76A",
         "secondary": "#F5EBD7"
       },
-      "mentionPatterns": ["@glm52", "@glm5.2", "@glm-5.2", "@狸花glm52", "@小狸花", "@狸花猫"],
+      "mentionPatterns": [
+        "@glm52",
+        "@glm5.2",
+        "@glm-5.2",
+        "@狸花glm52",
+        "@小狸花",
+        "@狸花猫"
+      ],
       "roleDescription": "GLM-5.2 新猫；中文实证",
       "teamStrengths": "实证",
       "caution": "新猫",
@@ -923,7 +888,13 @@
           "displayName": "狸花猫",
           "nickname": "小狸花",
           "variantLabel": "GLM-5.2",
-          "mentionPatterns": ["@glm52", "@glm5.2", "@glm-5.2", "@狸花glm52", "@小狸花"],
+          "mentionPatterns": [
+            "@glm52",
+            "@glm5.2",
+            "@glm-5.2",
+            "@狸花glm52",
+            "@小狸花"
+          ],
           "avatar": "/avatars/glm52.png",
           "color": {
             "primary": "#D4A76A",
@@ -936,18 +907,20 @@
           "cli": {
             "command": "opencode",
             "outputFormat": "ndjson",
-            "defaultArgs": ["run", "--format", "json"]
+            "defaultArgs": [
+              "run",
+              "--format",
+              "json"
+            ]
           },
           "roleDescription": "GLM-5.2 新猫；中文实证",
           "personality": "先证后答，不硬塞记忆",
           "teamStrengths": "实证",
-          "strengths": ["memory-judgment", "chinese-context", "conservative-reasoning"],
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          }
+          "strengths": [
+            "memory-judgment",
+            "chinese-context",
+            "conservative-reasoning"
+          ]
         }
       ]
     },
@@ -990,12 +963,6 @@
             "visual-evidence",
             "multi-model"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 350000,
-            "maxContextTokens": 300000,
-            "maxMessages": 300,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -1031,12 +998,6 @@
             "deep-reasoning",
             "coding"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -1081,12 +1042,6 @@
             "multi-model",
             "architecture-review"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -1145,12 +1100,6 @@
             "lsp",
             "open-source"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -1204,13 +1153,7 @@
             "long-context",
             "chinese-writing",
             "summarization"
-          ],
-          "contextBudget": {
-            "maxPromptTokens": 240000,
-            "maxContextTokens": 216000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          }
+          ]
         }
       ]
     },
@@ -1261,12 +1204,6 @@
             "reasoning",
             "coding"
           ],
-          "contextBudget": {
-            "maxPromptTokens": 180000,
-            "maxContextTokens": 160000,
-            "maxMessages": 200,
-            "maxContentLengthPerMsg": 100000
-          },
           "voiceConfig": {
             "voice": "zm_yunjian",
             "langCode": "zh",
@@ -1277,68 +1214,6 @@
             "temperature": 0.3
           },
           "accountRef": "claude"
-        }
-      ]
-    },
-    {
-      "id": "codebuddy-acp",
-      "catId": "clorinde",
-      "name": "克洛琳德",
-      "displayName": "克洛琳德",
-      "nickname": "Clorinde",
-      "avatar": "/avatars/codebuddy.png",
-      "color": {
-        "primary": "#2B4B8C",
-        "secondary": "#D6E4F0"
-      },
-      "mentionPatterns": [
-        "@clorinde",
-        "@Clorinde",
-        "@克洛琳德",
-        "@codebuddy"
-      ],
-      "roleDescription": "代码质量终审Agent，专注静态审计、规范校验、边界漏洞排查、代码洁癖重构",
-      "teamStrengths": "编码规范校验、静态代码审查、边界异常捕获、隐性逻辑漏洞定位、批量代码重构、代码风格统一、工程质量收口",
-      "caution": null,
-      "defaultVariantId": "clorinde-default",
-      "features": {
-        "sessionChain": true
-      },
-      "variants": [
-        {
-          "id": "clorinde-default",
-          "clientId": "codebuddy",
-          "defaultModel": "MiniMax-M3",
-          "mcpSupport": true,
-          "cli": {
-            "command": "codebuddy",
-            "outputFormat": "stream-json",
-            "contextWindow": 1000000,
-            "autoCompactTokenLimit": 850000
-          },
-          "accountRef": "xiyu-openai",
-          "personality": "冷静克制，逻辑严谨，输出简洁无冗余；对不规范代码、隐藏缺陷、冗余逻辑敏感度极高",
-          "strengths": [
-            "code-audit",
-            "code-refactor",
-            "error-inspect",
-            "rule-check"
-          ],
-          "contextBudget": {
-            "maxPromptTokens": 900000,
-            "maxContextTokens": 900000,
-            "maxMessages": 300,
-            "maxContentLengthPerMsg": 100000
-          },
-          "voiceConfig": {
-            "voice": "zm_yunjian",
-            "langCode": "zh",
-            "speed": 0.9,
-            "refAudio": "genshin/克洛琳德/vo_clorinde_dialog_greetingMorning.wav",
-            "refText": "不必多言，我只为结果负责。既然接了委托，就不会有半分差池。",
-            "instruct": "用冷静克制、干脆利落的女性语气说话，像决斗裁判官一样严谨果断",
-            "temperature": 0.2
-          }
         }
       ]
     },
@@ -1389,6 +1264,62 @@
             "temperature": 0.3
           },
           "sessionChain": false
+        }
+      ]
+    },
+    {
+      "id": "codebuddy-acp",
+      "catId": "clorinde",
+      "name": "克洛琳德",
+      "displayName": "克洛琳德",
+      "nickname": "Clorinde",
+      "avatar": "/avatars/codebuddy.png",
+      "color": {
+        "primary": "#2B4B8C",
+        "secondary": "#D6E4F0"
+      },
+      "mentionPatterns": [
+        "@clorinde",
+        "@Clorinde",
+        "@克洛琳德",
+        "@codebuddy"
+      ],
+      "roleDescription": "代码质量终审Agent，专注静态审计、规范校验、边界漏洞排查、代码洁癖重构",
+      "teamStrengths": "编码规范校验、静态代码审查、边界异常捕获、隐性逻辑漏洞定位、批量代码重构、代码风格统一、工程质量收口",
+      "caution": null,
+      "defaultVariantId": "clorinde-default",
+      "features": {
+        "sessionChain": true
+      },
+      "variants": [
+        {
+          "id": "clorinde-default",
+          "clientId": "codebuddy",
+          "defaultModel": "MiniMax-M3",
+          "mcpSupport": true,
+          "cli": {
+            "command": "codebuddy",
+            "outputFormat": "stream-json",
+            "contextWindow": 1000000,
+            "autoCompactTokenLimit": 850000
+          },
+          "accountRef": "xiyu-openai",
+          "personality": "冷静克制，逻辑严谨，输出简洁无冗余；对不规范代码、隐藏缺陷、冗余逻辑敏感度极高",
+          "strengths": [
+            "code-audit",
+            "code-refactor",
+            "error-inspect",
+            "rule-check"
+          ],
+          "voiceConfig": {
+            "voice": "zm_yunjian",
+            "langCode": "zh",
+            "speed": 0.9,
+            "refAudio": "genshin/克洛琳德/vo_clorinde_dialog_greetingMorning.wav",
+            "refText": "不必多言，我只为结果负责。既然接了委托，就不会有半分差池。",
+            "instruct": "用冷静克制、干脆利落的女性语气说话，像决斗裁判官一样严谨果断",
+            "temperature": 0.2
+          }
         }
       ]
     }
