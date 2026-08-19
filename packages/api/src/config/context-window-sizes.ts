@@ -49,6 +49,7 @@ export const CONTEXT_WINDOW_SIZES: Record<string, number> = {
   // Qwen (通义千问)
   'qwen3.7-max': 1_000_000,
   'qwen3.7-plus': 1_000_000,
+  'qwen3.8-max': 1_000_000,
 };
 
 /**
