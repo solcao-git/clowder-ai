@@ -240,9 +240,15 @@ export class CodeBuddyAgentService implements AgentService {
       args.push(...catCafeMcpArgs);
     }
 
-    // Print mode prompt (must be last positional arg)
-    // When --system-prompt is used, the prompt is just the user message (no L0 prepend needed)
-    args.push('-p', systemPrompt ? prompt : effectivePrompt);
+    // Print mode flag only — the prompt is streamed via stdin, NOT argv.
+    // Windows CreateProcess caps the command line at 32K chars; wakeup
+    // prompts with injected thread context regularly exceed it → `spawn
+    // ENAMETOOLONG` (same incident class as QoderAgentService 2026-08-20).
+    // `codebuddy -p` reads the initial prompt from stdin when no positional
+    // query is given (verified: `echo "..." | codebuddy -p`).
+    // When --system-prompt is used, stdin is just the user message (no L0
+    // prepend needed); otherwise the full effectivePrompt.
+    args.push('-p');
 
     // User-defined CLI args
     const userParts: string[] = [];
@@ -262,6 +268,9 @@ export class CodeBuddyAgentService implements AgentService {
       const cliOpts = {
         command: codebuddyCommand,
         args,
+        // Prompt via stdin (see the args.push('-p') comment above) — argv
+        // stays under the Windows 32K command-line cap regardless of size.
+        stdinInput: systemPrompt ? prompt : effectivePrompt,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         ...(options?.callbackEnv || options?.accountEnv
           ? { env: { ...(options?.callbackEnv ?? {}), ...(options?.accountEnv ?? {}) } }

@@ -254,8 +254,15 @@ export class QoderAgentService implements AgentService {
     // Permission mode: bypass all checks (our route layer handles safety)
     args.push('--dangerously-skip-permissions');
 
-    // Print mode + prompt (must be last)
-    args.push('-p', effectivePrompt);
+    // Print mode flag only — the prompt is streamed via stdin, NOT argv.
+    // Windows CreateProcess caps the command line at 32K chars; wakeup
+    // prompts with injected thread context regularly exceed it → `spawn
+    // ENAMETOOLONG` (incident 2026-08-20: Mavuika's queue stuck — every
+    // retry failed for ~16 min until diagnosed). qodercli reads the initial
+    // prompt from stdin when no positional query is given (verified:
+    // `echo "..." | qodercli -p`). Mirrors ClaudeAgentService #840 R2 and
+    // CodexAgentService stdinInput.
+    args.push('-p');
 
     // User-defined CLI args from the member editor (#567).
     const userParts: string[] = [];
@@ -280,6 +287,9 @@ export class QoderAgentService implements AgentService {
       const cliOpts = {
         command: qoderCommand,
         args,
+        // Prompt via stdin (see the args.push('-p') comment above) — argv
+        // stays under the Windows 32K command-line cap regardless of size.
+        stdinInput: effectivePrompt,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         ...(options?.callbackEnv || options?.accountEnv
           ? { env: { ...(options?.callbackEnv ?? {}), ...(options?.accountEnv ?? {}) } }
