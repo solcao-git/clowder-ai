@@ -58,15 +58,19 @@ const TRAE_WIN_PATHS = [
  * We use ~28K chars as the safe threshold (leaving room for the command itself,
  * flags like --output-format, -c model.name=..., -y, etc.).
  *
- * Plan C: trae-cli v0.120.40 doesn't support stdin prompt (`-p -` treats `-`
- * as a literal string, not stdin). It also has no prompt-file option. So when
- * the effective prompt exceeds this threshold, we truncate the L0/system prompt
+ * Plan C: trae-cli doesn't support stdin prompt (`-p -` treats `-` as a
+ * literal string, not stdin; bare `-p` with no positional exits 1 silently).
+ * It also has no prompt-file option. Re-verified on v0.120.52 (build
+ * 2026-08-12) on 2026-08-20: behavior unchanged — model reasoning literally
+ * said "The user only provided a single dash '-'" while stdin content was
+ * ignored, and --help still shows no stdin/prompt-file flag. So when the
+ * effective prompt exceeds this threshold, we truncate the L0/system prompt
  * portion while preserving the user message intact. The L0 is advisory context
  * (the model still has its base training), but the user message is the actual
  * task that must not be lost.
  *
  * Future: if trae-cli adds `-p @file` or proper stdin support, switch to
- * stdinInput like ClaudeAgentService does.
+ * stdinInput like ClaudeAgentService / QoderAgentService / CodeBuddyAgentService do.
  */
 const PROMPT_ARGV_SAFE_LENGTH = 28_000;
 
