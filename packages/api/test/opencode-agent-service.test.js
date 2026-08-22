@@ -309,7 +309,7 @@ describe('OpenCodeAgentService', () => {
     assert.strictEqual(args[mIdx + 1], 'claude-sonnet-4-6');
   });
 
-  test('terminates option parsing before a dash-prefixed prompt', async () => {
+  test('streams a dash-prefixed prompt via stdin, never argv (ENAMETOOLONG guard)', async () => {
     const prompt = '- [navigation]\nTreat this entire value as the user prompt.';
     const proc = createMockProcess();
     const spawnFn = mock.fn(() => proc);
@@ -318,9 +318,14 @@ describe('OpenCodeAgentService', () => {
     emitOpenCodeEvents(proc, [STEP_START, TEXT_RESPONSE, STEP_FINISH]);
     await promise;
 
-    const args = spawnFn.mock.calls[0].arguments[1];
-    assert.deepEqual(args.slice(-2), ['--', prompt], `expected option terminator immediately before prompt: ${args}`);
-    assert.ok(args.indexOf('--title') < args.indexOf('--'), 'user-defined CLI flags must remain before the terminator');
+    const call = spawnFn.mock.calls[0];
+    const args = call.arguments[1];
+    assert.ok(!args.includes(prompt), `prompt must not travel in argv (ENAMETOOLONG): ${args}`);
+    assert.ok(!args.includes('--'), `stale option terminator without a positional: ${args}`);
+    assert.ok(args.includes('--title'), 'user-defined CLI flags must survive');
+    // stdin channel: spawnCli opens a pipe only when stdinInput is set
+    const spawnOpts = call.arguments[2];
+    assert.equal(spawnOpts.stdio[0], 'pipe', 'stdin must be piped for the prompt stream');
   });
 
   test('no-tool finalizer overwrites inherited permissions and scopes its agent config', () => {
@@ -347,14 +352,14 @@ describe('OpenCodeAgentService', () => {
     );
   });
 
-  test('no-tool finalizer terminates option parsing before a dash-prefixed prompt', () => {
-    const prompt = '- [navigation]\nTreat this entire value as the finalizer prompt.';
+  test('no-tool finalizer keeps the prompt out of argv (ENAMETOOLONG guard)', () => {
     const finalizerAgent = 'cat-cafe-no-tool-finalizer-test-nonce';
     const service = new OpenCodeAgentService({ catId: 'opencode', model: 'claude-sonnet-4-6' });
-    const args = service.buildNoToolFinalizerArgs(prompt, 'ses_test123', 'claude-sonnet-4-6', finalizerAgent);
+    const args = service.buildNoToolFinalizerArgs('ses_test123', 'claude-sonnet-4-6', finalizerAgent);
 
     assert.equal(args[args.indexOf('--agent') + 1], finalizerAgent);
-    assert.deepEqual(args.slice(-2), ['--', prompt], `expected option terminator immediately before prompt: ${args}`);
+    assert.ok(!args.includes('--'), `stale option terminator without a positional: ${args}`);
+    assert.ok(args.every((a) => a.length < 200), `finalizer args must stay flag-only (prompt goes via stdin): ${args}`);
   });
 
   test('API key is passed via ANTHROPIC_API_KEY env, not CLI args', async () => {

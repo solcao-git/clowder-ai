@@ -256,6 +256,11 @@ describe('System prompt — opencode context injection', () => {
 function createMockProcess(exitCode = 0) {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  // stdin capture: spawnCli writes the prompt (stdinInput) to child.stdin —
+  // tests assert on the captured bytes (ENAMETOOLONG guard: prompt never argv)
+  const stdinChunks = [];
+  const stdin = new PassThrough();
+  stdin.on('data', (chunk) => stdinChunks.push(chunk));
   const emitter = new EventEmitter();
   const originalEmit = emitter.emit.bind(emitter);
   emitter.emit = (event, ...args) => {
@@ -268,6 +273,8 @@ function createMockProcess(exitCode = 0) {
   const proc = {
     stdout,
     stderr,
+    stdin,
+    _stdinChunks: stdinChunks,
     pid: 99999,
     kill: mock.fn(() => {
       process.nextTick(() => {
@@ -405,7 +412,7 @@ describe('OpenCodeAgentService — routed prompt with system context', () => {
     );
   });
 
-  it('spawnFn receives route-serial-assembled prompt as CLI arg', async () => {
+  it('spawnFn receives route-serial-assembled prompt via stdin (ENAMETOOLONG guard)', async () => {
     const proc = createMockProcess();
     const spawnFn = mock.fn(() => proc);
     const service = new OpenCodeAgentService({
@@ -431,13 +438,18 @@ describe('OpenCodeAgentService — routed prompt with system context', () => {
     emitMinimalResponse(proc);
     await promise;
 
-    // Verify spawnFn received the correctly assembled prompt
+    // Verify spawnFn received the correctly assembled prompt via stdin
+    // (prompt must never travel in argv — Windows CreateProcess 32K limit)
     assert.equal(spawnFn.mock.calls.length, 1, 'spawnFn called once');
-    const args = spawnFn.mock.calls[0].arguments[1];
-    const lastArg = args[args.length - 1];
-    assert.ok(lastArg.includes('金渐层'), 'CLI arg includes opencode identity');
-    assert.ok(lastArg.includes('Direct message from'), 'CLI arg includes DM context');
-    assert.ok(lastArg.includes(userMessage), 'CLI arg includes user message');
+    const call = spawnFn.mock.calls[0];
+    const args = call.arguments[1];
+    const spawnOpts = call.arguments[2];
+    assert.ok(!args.some((a) => typeof a === 'string' && a.includes('金渐层')), 'prompt must not travel in argv');
+    assert.equal(spawnOpts.stdio[0], 'pipe', 'stdin piped for prompt stream');
+    const deliveredPrompt = Buffer.concat(proc._stdinChunks).toString('utf8');
+    assert.ok(deliveredPrompt.includes('金渐层'), 'stdin prompt includes opencode identity');
+    assert.ok(deliveredPrompt.includes('Direct message from'), 'stdin prompt includes DM context');
+    assert.ok(deliveredPrompt.includes(userMessage), 'stdin prompt includes user message');
   });
 
   it('E2E: mention → route-serial assembly → service invoke (full chain)', async () => {
@@ -481,9 +493,14 @@ describe('OpenCodeAgentService — routed prompt with system context', () => {
     assert.ok(textMsg, 'got text response');
     assert.equal(textMsg.content, '好的，我来看看代码');
 
-    // Verify prompt was delivered matching route-serial assembly
-    const cliArgs = spawnFn.mock.calls[0].arguments[1];
-    const deliveredPrompt = cliArgs[cliArgs.length - 1];
+    // Verify prompt was delivered matching route-serial assembly (via stdin —
+    // prompt never travels in argv, ENAMETOOLONG guard)
+    const call = spawnFn.mock.calls[0];
+    const cliArgs = call.arguments[1];
+    const spawnOpts = call.arguments[2];
+    assert.ok(!cliArgs.some((a) => typeof a === 'string' && a.includes('金渐层')), 'prompt must not travel in argv');
+    assert.equal(spawnOpts.stdio[0], 'pipe', 'stdin piped for prompt stream');
+    const deliveredPrompt = Buffer.concat(proc._stdinChunks).toString('utf8');
     assert.ok(deliveredPrompt.includes('金渐层'), 'opencode identity injected');
     assert.ok(deliveredPrompt.includes('Direct message from'), 'DM context injected');
     assert.ok(deliveredPrompt.includes(userText), 'original user message preserved');

@@ -3,8 +3,10 @@
  * 通过 opencode CLI 子进程调用 opencode agent（headless JSON 模式）
  *
  * CLI 调用方式:
- *   opencode run "prompt" --format json -m providerId/MODEL
+ *   opencode run --format json -m providerId/MODEL   (prompt via stdin, not argv)
  *   (API key passed via child process env, not CLI args)
+ *   (prompt streamed via child stdin — argv would blow past the Windows
+ *    CreateProcess 32K limit on long invocation prompts; see buildArgs)
  *
  * NDJSON 事件格式 (opencode run --format json):
  *   step_start  → session_init
@@ -320,7 +322,6 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
     const imageArgs = imagePaths.flatMap((path: string) => ['--file', path]);
     // Also append path hints as textual fallback (useful if --file doesn't work for the provider)
     const effectivePrompt = appendLocalImagePathHints(prompt, imagePaths);
-    const args = this.buildArgs(effectivePrompt, sessionId, effectiveModel, options?.cliConfigArgs, undefined, imageArgs);
     const cwd = options?.workingDirectory;
     const childEnv = this.buildEnv(options?.callbackEnv);
     // F171: Account env vars applied LAST — user overrides provider-injected values
@@ -365,7 +366,6 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
         ? undefined
         : await this.resolveDefaultAutoApproveFlag(opencodeCommand, cwd, childEnv, options?.cliConfigArgs);
       const args = this.buildArgs(
-        prompt,
         options?.sessionId,
         effectiveModel,
         readOnly ? undefined : options?.cliConfigArgs,
@@ -397,6 +397,9 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
       const cliOpts = {
         command: opencodeCommand,
         args,
+        // ENAMETOOLONG fix: prompt streamed via stdin (spawnCli writes it to the
+        // child's stdin pipe), never argv — see buildArgs docblock.
+        stdinInput: effectivePrompt,
         ...(cwd ? { cwd } : {}),
         env: childEnv,
         onSuccessfulExitStderr,
@@ -803,7 +806,6 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
     const finalizerPrompt = buildOpenCodePostToolFinalizerPrompt(params.trace);
     const finalizerAgent = `${OPENCODE_NO_TOOL_FINALIZER_AGENT}-${randomUUID()}`;
     const finalizerArgs = this.buildNoToolFinalizerArgs(
-      finalizerPrompt,
       params.sessionId,
       params.effectiveModel,
       finalizerAgent,
@@ -812,6 +814,9 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
     const cliOpts = {
       command: params.command,
       args: finalizerArgs,
+      // ENAMETOOLONG fix: finalizer prompt via stdin, not argv — see buildArgs
+      // docblock in OpenCodeAgentService.
+      stdinInput: finalizerPrompt,
       ...(params.cwd ? { cwd: params.cwd } : {}),
       env: finalizerEnv,
       ...(params.options?.signal ? { signal: params.options.signal } : {}),
@@ -967,15 +972,16 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
   }
 
   private buildNoToolFinalizerArgs(
-    prompt: string,
     sessionId: string | undefined,
     model: string,
     finalizerAgent = OPENCODE_NO_TOOL_FINALIZER_AGENT,
   ): string[] {
+    // Prompt travels via cliOpts.stdinInput, not argv (ENAMETOOLONG fix —
+    // see buildArgs docblock).
     const args = ['run', '--pure', '--agent', finalizerAgent];
     if (sessionId) args.push('--session', sessionId);
     if (model) args.push('-m', model);
-    args.push('--format', 'json', '--', prompt);
+    args.push('--format', 'json');
     return args;
   }
 
@@ -998,7 +1004,6 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
   }
 
   private buildArgs(
-    prompt: string,
     sessionId?: string,
     model?: string,
     cliConfigArgs?: readonly string[],
@@ -1006,6 +1011,12 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
     imageArgs?: string[],
     readOnly = false,
   ): string[] {
+    // ENAMETOOLONG incident 2026-08-21 (same class as Qoder/CodeBuddy fix
+    // a0837b16f): the prompt must NOT travel in argv — invocation prompts carry
+    // system injection + thread memory + history and blow past the Windows
+    // CreateProcess 32K limit. The prompt is streamed via cliOpts.stdinInput
+    // (spawnCli feeds it to the child's stdin); OpenCode reads it when invoked
+    // without a positional message (verified against opencode 1.18.18).
     const args = ['run'];
 
     if (readOnly) args.push('--pure', '--agent', OPENCODE_READ_ONLY_AGENT);
@@ -1050,10 +1061,10 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
       }
       deduped.push(args[i]);
     }
-    // Keep user-defined flags parseable, then terminate option parsing before
-    // the prompt positional. Without `--`, a dash-prefixed prompt is treated as
-    // an unknown OpenCode flag and the CLI exits after printing help.
-    deduped.push(...userParts, '--', prompt);
+    // Keep user-defined flags parseable. The prompt positional and its `--`
+    // terminator are gone (stdin channel, see buildArgs docblock above) — with
+    // no positional left, there is nothing for a dash-prefix to corrupt.
+    deduped.push(...userParts);
 
     return deduped;
   }
