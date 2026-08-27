@@ -39,6 +39,7 @@ export const CONTEXT_WINDOW_SIZES: Record<string, number> = {
   // GLM (智谱)
   'glm-5.3': 1_000_000,
   'glm-5.3-t': 1_000_000,
+  'glm-5.3-flash': 1_000_000,
   'glm-5.2': 1_000_000,
   'glm-5.2[1m]': 1_000_000,
   'glm-5.1': 128_000,
@@ -121,6 +122,7 @@ const KNOWN_MIN_CONTEXT_WINDOWS: Record<string, number> = {
   'glm-5.2': 1_000_000,
   'glm-5.3': 1_000_000,
   'glm-5.3-t': 1_000_000,
+  'glm-5.3-flash': 1_000_000,
 };
 
 export function getKnownMinContextWindow(model: string): number | undefined {
