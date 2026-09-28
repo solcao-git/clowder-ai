@@ -58,6 +58,29 @@ import { compileL0ViaSubprocess } from './l0-compiler.js';
 const log = createModuleLogger('claude-agent');
 
 const PERMISSION_MODE = 'bypassPermissions';
+
+// WebFetch domain-preflight fix (operator-approved 2026-08-22): Claude Code
+// calls api.anthropic.com/api/web/domain_info before WebFetch; that endpoint
+// returns 403 on the family's restricted network, so every fetch was rejected
+// ("Unable to verify if domain ... is safe to fetch"). skipWebFetchPreflight
+// (official enterprise-network escape hatch) bypasses the check. Injected via a
+// managed --settings file because api_key mode excludes user-level settings.
+// Written once per process to a temp file (CLI treats inline JSON as a file
+// path on Windows).
+let webFetchPreflightSettingsPath: string | null | undefined;
+function resolveWebFetchPreflightSettingsPath(): string | null | undefined {
+  if (webFetchPreflightSettingsPath !== undefined) return webFetchPreflightSettingsPath;
+  try {
+    const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-claude-settings-'));
+    const file = join(dir, 'settings.json');
+    writeFileSync(file, JSON.stringify({ skipWebFetchPreflight: true }), 'utf8');
+    webFetchPreflightSettingsPath = file;
+  } catch (err) {
+    log.warn({ err }, 'Failed to write claude runtime settings; skipWebFetchPreflight not applied');
+    webFetchPreflightSettingsPath = null;
+  }
+  return webFetchPreflightSettingsPath;
+}
 const RESERVED_SYSTEM_PROMPT_FLAGS = new Set([
   '--system-prompt-file',
   '--system-prompt',
@@ -424,6 +447,10 @@ export class ClaudeAgentService implements AgentService {
       options?.reasoningEffortOverride,
     );
 
+    // Scoped to api_key mode (the family's gateway runtime): subscription mode
+    // talks to real api.anthropic.com and doesn't need the preflight bypass.
+    const runtimeSettingsPath = isApiKeyMode ? resolveWebFetchPreflightSettingsPath() : undefined;
+
     const args: string[] = [
       '-p',
       '--output-format',
@@ -439,6 +466,7 @@ export class ClaudeAgentService implements AgentService {
       // subscription mode: include user-level so CLI reads auth from ~/.claude/settings.json.
       '--setting-sources',
       isApiKeyMode ? 'project,local' : 'project,local,user',
+      ...(runtimeSettingsPath ? ['--settings', runtimeSettingsPath] : []),
       // Enable Chrome MCP integration (built-in, requires Chrome + extension running)
       ...(readOnly ? [] : ['--chrome']),
     ];

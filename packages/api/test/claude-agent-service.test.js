@@ -12,7 +12,7 @@ import { PassThrough } from 'node:stream';
 import { mock, test } from 'node:test';
 import { ensureFakeCliOnPath } from './helpers/fake-cli-path.js';
 
-const { ClaudeAgentService, pickGitBashPathFromWhere, resolveDefaultClaudeMcpServerPath } = await import(
+const { ClaudeAgentService, pickGitBashPathFromWhere, resolveDefaultClaudeMcpServerPath, ANTHROPIC_PROFILE_MODE_KEY } = await import(
   '../dist/domains/cats/services/agents/providers/ClaudeAgentService.js'
 );
 const { getCatEffort } = await import('../dist/config/cat-config-loader.js');
@@ -1916,4 +1916,79 @@ test('AC-G4 cloud P2: Claude result is_error:true surfaces tool_call_parse_faile
     !messages.some((m) => m.type === 'system_info' && m.metadata?.cliDiagnostics?.reasonCode === 'silent_completion'),
     'silent_completion MUST NOT fire when Claude result carries is_error:true',
   );
+});
+
+
+// --- WebSearch 1210 fix: skipWebFetchPreflight --settings injection ---
+
+test('WebSearch 1210: api_key mode injects --settings file with skipWebFetchPreflight', async () => {
+  const proc = createMockProcess();
+  let capturedSettingsPath;
+  let capturedSettingsContent;
+  const spawnFn = mock.fn((_cmd, args) => {
+    const idx = args.indexOf('--settings');
+    if (idx >= 0) {
+      capturedSettingsPath = args[idx + 1];
+      try {
+        capturedSettingsContent = readFileSync(capturedSettingsPath, 'utf8');
+      } catch {
+        capturedSettingsContent = undefined;
+      }
+    }
+    return proc;
+  });
+  const service = createClaudeAgentService({ catId: 'opus', spawnFn, model: 'claude-test-model' });
+
+  const promise = collect(
+    service.invoke('hello', {
+      callbackEnv: {
+        CAT_CAFE_API_URL: 'http://localhost:3004',
+        CAT_CAFE_INVOCATION_ID: 'inv-wf1210',
+        CAT_CAFE_CALLBACK_TOKEN: 'token-wf1210',
+        [ANTHROPIC_PROFILE_MODE_KEY]: 'api_key',
+        CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE: 'glm-5',
+      },
+    }),
+  );
+  emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
+  await promise;
+
+  const args = spawnFn.mock.calls[0].arguments[1];
+  const settingsIdx = args.indexOf('--settings');
+  assert.ok(settingsIdx >= 0, `--settings must be injected in api_key mode, argv: ${args.join(' ')}`);
+  assert.equal(args[settingsIdx + 1], capturedSettingsPath, '--settings must reference the managed temp file');
+
+  const settingSourcesIdx = args.indexOf('--setting-sources');
+  assert.ok(settingSourcesIdx >= 0, '--setting-sources must be present');
+  assert.equal(args[settingSourcesIdx + 1], 'project,local', 'api_key mode must exclude user-level settings');
+
+  assert.ok(typeof capturedSettingsPath === 'string' && capturedSettingsPath.length > 0, 'settings path captured at spawn');
+  assert.equal(existsSync(capturedSettingsPath), true, 'managed settings file must exist on disk');
+  assert.equal(JSON.parse(capturedSettingsContent).skipWebFetchPreflight, true, 'settings file must enable skipWebFetchPreflight');
+});
+
+test('WebSearch 1210: subscription mode does not inject --settings', async () => {
+  const proc = createMockProcess();
+  const spawnFn = createMockSpawnFn(proc);
+  const service = createClaudeAgentService({ catId: 'opus', spawnFn, model: 'claude-test-model' });
+
+  const promise = collect(
+    service.invoke('hello', {
+      callbackEnv: {
+        CAT_CAFE_API_URL: 'http://localhost:3004',
+        CAT_CAFE_INVOCATION_ID: 'inv-wf1210-sub',
+        CAT_CAFE_CALLBACK_TOKEN: 'token-wf1210-sub',
+        [ANTHROPIC_PROFILE_MODE_KEY]: 'subscription',
+      },
+    }),
+  );
+  emitClaudeEvents(proc, [{ type: 'result', subtype: 'success' }]);
+  await promise;
+
+  const args = spawnFn.mock.calls[0].arguments[1];
+  assert.ok(!args.includes('--settings'), 'subscription mode must not inject --settings');
+
+  const settingSourcesIdx = args.indexOf('--setting-sources');
+  assert.ok(settingSourcesIdx >= 0, '--setting-sources must be present');
+  assert.equal(args[settingSourcesIdx + 1], 'project,local,user', 'subscription mode must keep user-level settings');
 });
