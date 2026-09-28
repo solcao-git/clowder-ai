@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { chmod, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import {
+  PersonalChromeConversationAuthorizationError,
+  readPersonalChromeConversationAuthorizations,
+  writePersonalChromeConversationAuthorizationsAtomic,
+} from '../src/plugins/cloud-cat-personal-host/native-host/conversation-binding.mjs';
 import {
   buildNativeHostInstallPlan,
   installNativeHost,
@@ -16,8 +22,9 @@ import {
   encodeNativeMessage,
   NativeMessageDecoder,
 } from '../src/plugins/cloud-cat-personal-host/native-host/native-framing.mjs';
-import { createNativeHostBridge } from '../src/plugins/cloud-cat-personal-host/native-host/native-host.mjs';
+import { createNativeHostBridge as createNativeHostBridgeImpl } from '../src/plugins/cloud-cat-personal-host/native-host/native-host.mjs';
 import {
+  hasCapacityForEntry,
   LEDGER_ENTRY_LIMIT,
   LEDGER_FILE_LIMIT,
   loadLedger,
@@ -29,20 +36,55 @@ const bridges = [];
 const ledgerArtifacts = new Set();
 const apiRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const nativeHostEntrypoint = join(apiRoot, 'src/plugins/cloud-cat-personal-host/native-host/native-host.mjs');
+const helperArtifactRevision = `sha512:${'0'.repeat(128)}`;
+
+async function createNativeHostBridge(options) {
+  const bridge = await createNativeHostBridgeImpl({ helperArtifactRevision, ...options });
+  return {
+    ...bridge,
+    acceptNativeMessage(message) {
+      const normalized =
+        message?.kind === 'append_result' && message.observedRevisions === undefined
+          ? {
+              ...message,
+              observedRevisions: {
+                helper: helperArtifactRevision,
+                extension: '0.2.11',
+                pageAdapter: '2026-09-02.1',
+              },
+            }
+          : message;
+      return bridge.acceptNativeMessage(normalized);
+    },
+  };
+}
 
 afterEach(async () => {
   await Promise.all(bridges.splice(0).map((bridge) => bridge.stop()));
-  await Promise.all([...ledgerArtifacts].map((path) => unlink(path).catch(() => undefined)));
+  await Promise.all([...ledgerArtifacts].map((path) => rm(path, { recursive: true, force: true })));
   ledgerArtifacts.clear();
 });
 
 function testPaths(label) {
-  const suffix = `${process.pid}-${Math.random().toString(16).slice(2)}`;
+  const root = mkdtempSync(join(tmpdir(), `f247-${label}-`));
   const paths = {
-    socketPath: join(tmpdir(), `f247-${label}-${suffix}.sock`),
-    ledgerPath: join(tmpdir(), `f247-${label}-${suffix}.json`),
+    socketPath: join(root, 'host.sock'),
+    ledgerPath: join(root, 'ledger.json'),
+    conversationBindingPath: join(root, 'conversation-binding.json'),
   };
-  ledgerArtifacts.add(paths.ledgerPath);
+  ledgerArtifacts.add(root);
+  writeFileSync(
+    paths.conversationBindingPath,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      provider: 'chatgpt',
+      conversationId: 'conversation-7',
+      chatUrl: 'https://chatgpt.com/c/conversation-7',
+      boundAt: '2026-08-21T07:00:00.000Z',
+      updatedAt: '2026-08-21T07:00:00.000Z',
+    })}\n`,
+    { mode: 0o600 },
+  );
   return paths;
 }
 
@@ -65,12 +107,17 @@ function localAppend(socketPath, pairingSecret, request) {
 
 function appendRequest(overrides = {}) {
   return {
-    v: 1,
+    v: 2,
     kind: 'append_message',
     requestId: 'request-1',
     conversationId: 'conversation-7',
     text: 'hello cloud cat',
     idempotencyKey: 'source-message-9',
+    expectedRevisions: {
+      helper: helperArtifactRevision,
+      extension: '0.2.11',
+      pageAdapter: '2026-09-02.1',
+    },
     ...overrides,
   };
 }
@@ -190,6 +237,396 @@ describe('Native Messaging framing', () => {
 });
 
 describe('personal Chrome native host bridge', () => {
+  it('rejects a legacy v1 append before Chrome dispatch', async () => {
+    const paths = testPaths('legacy-v1-append');
+    const forwarded = [];
+    let bridge;
+    bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: async (message) => {
+        forwarded.push(message);
+        await bridge.acceptNativeMessage({
+          v: 2,
+          kind: 'append_result',
+          requestId: message.requestId,
+          idempotencyKey: message.idempotencyKey,
+          status: 'host_observed',
+          hostMessageId: 'must-not-be-observed',
+        });
+      },
+    });
+    bridges.push(bridge);
+
+    const result = await localAppend(paths.socketPath, 'a'.repeat(64), appendRequest({ v: 1 }));
+
+    assert.equal(result.errorCode, 'INVALID_REQUEST');
+    assert.deepEqual(forwarded, []);
+    assert.equal((await loadLedger(paths.ledgerPath)).size, 0);
+  });
+
+  it('maps a legacy extension response to stale_adapter without waiting for timeout', async () => {
+    const paths = testPaths('legacy-extension-health');
+    const forwarded = [];
+    let bridge;
+    bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: async (message) => {
+        forwarded.push(message);
+        await bridge.acceptNativeMessage({
+          v: 1,
+          kind: 'append_result',
+          requestId: message.requestId,
+          idempotencyKey: 'invalid-key',
+          status: 'failed',
+          errorCode: 'INVALID_REQUEST',
+        });
+      },
+    });
+    bridges.push(bridge);
+
+    const result = await localAppend(paths.socketPath, 'a'.repeat(64), {
+      v: 2,
+      kind: 'health_check',
+      requestId: 'health-legacy-extension',
+      conversationId: 'conversation-7',
+      expectedRevisions: {
+        helper: helperArtifactRevision,
+        extension: '0.2.11',
+        pageAdapter: '2026-09-02.1',
+      },
+    });
+
+    assert.equal(result.status, 'stale_adapter');
+    assert.equal(result.errorCode, 'STALE_EXTENSION_PROTOCOL');
+    assert.deepEqual(result.observedRevisions, {
+      helper: helperArtifactRevision,
+      extension: '0.0.0',
+      pageAdapter: 'unobserved',
+    });
+    assert.deepEqual(
+      forwarded.map((message) => message.kind),
+      ['health_check'],
+    );
+  });
+
+  it('returns typed needs-binding before ledger admission or Chrome dispatch', async () => {
+    const paths = testPaths('needs-binding');
+    await unlink(paths.conversationBindingPath);
+    const forwarded = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => forwarded.push(message),
+    });
+    bridges.push(bridge);
+
+    const result = await localAppend(paths.socketPath, 'a'.repeat(64), appendRequest());
+
+    assert.equal(result.errorCode, 'NEEDS_BINDING');
+    assert.deepEqual(forwarded, []);
+    assert.equal((await loadLedger(paths.ledgerPath)).size, 0);
+  });
+
+  it('appends an explicit extension authorization before returning its receipt', async () => {
+    const paths = testPaths('explicit-binding');
+    await unlink(paths.conversationBindingPath);
+    const outbound = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => outbound.push(message),
+      now: () => new Date('2026-08-21T07:30:00.000Z'),
+    });
+    bridges.push(bridge);
+
+    await bridge.acceptNativeMessage({
+      v: 1,
+      kind: 'bind_conversation',
+      requestId: 'binding-request-1',
+      conversationId: 'conversation-8',
+      chatUrl: 'https://chatgpt.com/c/conversation-8',
+    });
+
+    assert.deepEqual(await readPersonalChromeConversationAuthorizations(paths.conversationBindingPath), {
+      schemaVersion: 2,
+      provider: 'chatgpt',
+      conversations: [
+        {
+          conversationId: 'conversation-8',
+          chatUrl: 'https://chatgpt.com/c/conversation-8',
+          authorizedAt: '2026-08-21T07:30:00.000Z',
+          updatedAt: '2026-08-21T07:30:00.000Z',
+        },
+      ],
+      updatedAt: '2026-08-21T07:30:00.000Z',
+    });
+    assert.deepEqual(outbound, [
+      {
+        v: 1,
+        kind: 'binding_result',
+        requestId: 'binding-request-1',
+        status: 'bound',
+        conversationId: 'conversation-8',
+        boundAt: '2026-08-21T07:30:00.000Z',
+      },
+    ]);
+  });
+
+  it('reports the durable binding to a restarted extension without rewriting it', async () => {
+    const paths = testPaths('binding-status');
+    await readPersonalChromeConversationAuthorizations(paths.conversationBindingPath);
+    const before = await readFile(paths.conversationBindingPath, 'utf8');
+    const outbound = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => outbound.push(message),
+    });
+    bridges.push(bridge);
+
+    await bridge.acceptNativeMessage({
+      v: 1,
+      kind: 'query_binding',
+      requestId: 'binding-status-1',
+    });
+
+    assert.deepEqual(outbound, [
+      {
+        v: 1,
+        kind: 'binding_status',
+        requestId: 'binding-status-1',
+        status: 'bound',
+        conversationId: 'conversation-7',
+        boundAt: '2026-08-21T07:00:00.000Z',
+      },
+    ]);
+    assert.equal(await readFile(paths.conversationBindingPath, 'utf8'), before);
+  });
+
+  it(
+    'refuses to erase an invalid prior collection during a new authorization',
+    { skip: process.platform === 'win32' },
+    async () => {
+      const paths = testPaths('explicit-rebind-recovery');
+      await chmod(paths.conversationBindingPath, 0o644);
+      const outbound = [];
+      const bridge = await createNativeHostBridge({
+        ...paths,
+        pairingSecret: 'a'.repeat(64),
+        sendNative: (message) => outbound.push(message),
+        now: () => new Date('2026-08-21T07:31:00.000Z'),
+      });
+      bridges.push(bridge);
+
+      await bridge.acceptNativeMessage({
+        v: 1,
+        kind: 'bind_conversation',
+        requestId: 'binding-recovery-1',
+        conversationId: 'conversation-8',
+        chatUrl: 'https://chatgpt.com/c/conversation-8',
+      });
+
+      assert.equal((await stat(paths.conversationBindingPath)).mode & 0o777, 0o644);
+      assert.deepEqual(outbound, [
+        {
+          v: 1,
+          kind: 'binding_result',
+          requestId: 'binding-recovery-1',
+          status: 'failed',
+          errorCode: 'BINDING_WRITE_FAILED',
+        },
+      ]);
+    },
+  );
+
+  it('returns a typed binding failure when atomic persistence fails', async () => {
+    const paths = testPaths('explicit-binding-write-failure');
+    const before = await readFile(paths.conversationBindingPath, 'utf8');
+    const outbound = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => outbound.push(message),
+      authorizeConversation: async () => {
+        const error = new Error('disk full');
+        error.code = 'ENOSPC';
+        throw error;
+      },
+    });
+    bridges.push(bridge);
+
+    await bridge.acceptNativeMessage({
+      v: 1,
+      kind: 'bind_conversation',
+      requestId: 'binding-write-failure-1',
+      conversationId: 'conversation-8',
+      chatUrl: 'https://chatgpt.com/c/conversation-8',
+    });
+
+    assert.deepEqual(outbound, [
+      {
+        v: 1,
+        kind: 'binding_result',
+        requestId: 'binding-write-failure-1',
+        status: 'failed',
+        errorCode: 'BINDING_WRITE_FAILED',
+      },
+    ]);
+    assert.equal(await readFile(paths.conversationBindingPath, 'utf8'), before);
+  });
+
+  it('exposes authorization contention as a bounded cause without leaking persisted binding data', async () => {
+    const paths = testPaths('explicit-binding-busy');
+    const before = await readFile(paths.conversationBindingPath, 'utf8');
+    const outbound = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => outbound.push(message),
+      authorizeConversation: async () => {
+        throw new PersonalChromeConversationAuthorizationError(
+          'AUTHORIZATION_BUSY',
+          'conversation authorization mutation remained busy',
+        );
+      },
+    });
+    bridges.push(bridge);
+
+    await bridge.acceptNativeMessage({
+      v: 1,
+      kind: 'bind_conversation',
+      requestId: 'binding-busy-1',
+      conversationId: 'conversation-8',
+      chatUrl: 'https://chatgpt.com/c/conversation-8',
+    });
+
+    assert.deepEqual(outbound, [
+      {
+        v: 1,
+        kind: 'binding_result',
+        requestId: 'binding-busy-1',
+        status: 'failed',
+        errorCode: 'AUTHORIZATION_BUSY',
+      },
+    ]);
+    assert.equal(await readFile(paths.conversationBindingPath, 'utf8'), before);
+    assert.equal(JSON.stringify(outbound).includes('conversation-7'), false);
+  });
+
+  it(
+    'returns typed binding-record-invalid before ledger admission or Chrome dispatch',
+    { skip: process.platform === 'win32' },
+    async () => {
+      const paths = testPaths('invalid-binding');
+      await chmod(paths.conversationBindingPath, 0o644);
+      const forwarded = [];
+      const bridge = await createNativeHostBridge({
+        ...paths,
+        pairingSecret: 'a'.repeat(64),
+        sendNative: (message) => forwarded.push(message),
+      });
+      bridges.push(bridge);
+
+      const result = await localAppend(paths.socketPath, 'a'.repeat(64), appendRequest());
+
+      assert.equal(result.errorCode, 'BINDING_RECORD_INVALID');
+      assert.deepEqual(forwarded, []);
+      assert.equal((await loadLedger(paths.ledgerPath)).size, 0);
+    },
+  );
+
+  it('rejects a routed conversation that does not match the explicit Host authorization', async () => {
+    const paths = testPaths('binding-mismatch');
+    const forwarded = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => forwarded.push(message),
+    });
+    bridges.push(bridge);
+
+    const result = await localAppend(
+      paths.socketPath,
+      'a'.repeat(64),
+      appendRequest({ conversationId: 'conversation-8' }),
+    );
+
+    assert.equal(result.errorCode, 'BOUND_CONVERSATION_MISMATCH');
+    assert.deepEqual(forwarded, []);
+    assert.equal((await loadLedger(paths.ledgerPath)).size, 0);
+  });
+
+  it('keeps two conversations authorized and dispatches each retry-idempotently', async () => {
+    const paths = testPaths('two-authorized-conversations');
+    const outbound = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => outbound.push(message),
+      now: (() => {
+        const timestamps = [new Date('2026-08-21T07:30:00.000Z'), new Date('2026-08-21T07:31:00.000Z')];
+        return () => timestamps.shift() ?? new Date('2026-08-21T07:31:00.000Z');
+      })(),
+    });
+    bridges.push(bridge);
+
+    await bridge.acceptNativeMessage({
+      v: 1,
+      kind: 'bind_conversation',
+      requestId: 'authorize-conversation-8',
+      conversationId: 'conversation-8',
+      chatUrl: 'https://chatgpt.com/c/conversation-8',
+    });
+    const authorizations = await readPersonalChromeConversationAuthorizations(paths.conversationBindingPath);
+    assert.deepEqual(
+      authorizations.conversations.map((entry) => entry.conversationId),
+      ['conversation-7', 'conversation-8'],
+    );
+    outbound.length = 0;
+
+    const first = localAppend(
+      paths.socketPath,
+      'a'.repeat(64),
+      appendRequest({ requestId: 'request-conversation-7', idempotencyKey: 'source-thread-a' }),
+    );
+    const second = localAppend(
+      paths.socketPath,
+      'a'.repeat(64),
+      appendRequest({
+        requestId: 'request-conversation-8',
+        conversationId: 'conversation-8',
+        idempotencyKey: 'source-thread-b',
+      }),
+    );
+    await bridge.waitForDispatchCount(2);
+    for (const request of outbound.filter((message) => message.kind === 'append_message')) {
+      await bridge.acceptNativeMessage({
+        v: 2,
+        kind: 'append_result',
+        requestId: request.requestId,
+        idempotencyKey: request.idempotencyKey,
+        status: 'host_observed',
+        hostMessageId: `host-${request.conversationId}`,
+      });
+    }
+
+    assert.equal((await first).hostMessageId, 'host-conversation-7');
+    assert.equal((await second).hostMessageId, 'host-conversation-8');
+    const retry = await localAppend(
+      paths.socketPath,
+      'a'.repeat(64),
+      appendRequest({
+        requestId: 'retry-conversation-8',
+        conversationId: 'conversation-8',
+        idempotencyKey: 'source-thread-b',
+      }),
+    );
+    assert.equal(retry.hostMessageId, 'host-conversation-8');
+    assert.equal(outbound.filter((message) => message.kind === 'append_message').length, 2);
+  });
+
   it('probes and refuses to replace a live socket without an owner lease', async () => {
     const paths = testPaths('legacy-live-owner');
     const liveOwner = createServer((socket) => socket.end());
@@ -315,19 +752,276 @@ describe('personal Chrome native host bridge', () => {
     await bridge.waitForDispatchCount(1);
     assert.equal(forwarded.length, 1);
     assert.equal('pairingSecret' in forwarded[0], false);
+    assert.ok(['request-1', 'request-2'].includes(forwarded[0].requestId));
 
     await bridge.acceptNativeMessage({
-      v: 1,
+      v: 2,
       kind: 'append_result',
-      requestId: 'request-1',
+      // Concurrent Unix socket connects have no arrival-order guarantee. Reply to
+      // whichever retry became the canonical dispatch; both callers must share it.
+      requestId: forwarded[0].requestId,
       idempotencyKey: 'source-message-9',
       status: 'host_observed',
       hostMessageId: 'chatgpt-user-message-42',
     });
 
-    assert.equal((await first).hostMessageId, 'chatgpt-user-message-42');
-    assert.equal((await retry).hostMessageId, 'chatgpt-user-message-42');
+    const receipts = [await first, await retry];
+    assert.deepEqual(
+      receipts.map((receipt) => receipt.hostMessageId),
+      ['chatgpt-user-message-42', 'chatgpt-user-message-42'],
+    );
+    assert.deepEqual(
+      receipts.map((receipt) => receipt.idempotentReplay).sort(),
+      [false, true],
+      'one canonical delivery and one coalesced retry must be distinguishable',
+    );
     assert.equal(forwarded.length, 1);
+
+    const terminalRetry = await localAppend(
+      paths.socketPath,
+      'a'.repeat(64),
+      appendRequest({ requestId: 'request-3' }),
+    );
+    assert.equal(terminalRetry.hostMessageId, 'chatgpt-user-message-42');
+    assert.equal(terminalRetry.idempotentReplay, true);
+  });
+
+  it('durably exposes one source-bound assistant final until the API acknowledges it', async () => {
+    const paths = testPaths('assistant-return-inbox');
+    const forwarded = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => forwarded.push(message),
+    });
+    bridges.push(bridge);
+
+    const append = localAppend(paths.socketPath, 'a'.repeat(64), appendRequest());
+    await bridge.waitForDispatchCount(1);
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'append_progress',
+      requestId: forwarded[0].requestId,
+      idempotencyKey: 'source-message-9',
+      status: 'submitted',
+    });
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'append_result',
+      requestId: forwarded[0].requestId,
+      idempotencyKey: 'source-message-9',
+      status: 'host_observed',
+      hostMessageId: 'conversation-turn-41',
+    });
+    await append;
+
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'assistant_final_observed',
+      requestId: forwarded[0].requestId,
+      conversationId: 'conversation-7',
+      idempotencyKey: 'source-message-9',
+      hostMessageId: 'conversation-turn-41',
+      assistantMessageId: 'conversation-turn-42',
+      content: 'ordinary assistant final captured from the exact next turn',
+      observedRevisions: appendRequest().expectedRevisions,
+    });
+    assert.deepEqual(forwarded.at(-1), {
+      v: 2,
+      kind: 'assistant_final_result',
+      requestId: forwarded[0].requestId,
+      status: 'accepted',
+    });
+
+    const listed = await localAppend(paths.socketPath, 'a'.repeat(64), {
+      v: 2,
+      kind: 'list_assistant_returns',
+      requestId: 'list-assistant-returns-1',
+    });
+    assert.deepEqual(listed, {
+      v: 2,
+      kind: 'assistant_returns',
+      requestId: 'list-assistant-returns-1',
+      returns: [
+        {
+          conversationId: 'conversation-7',
+          sourceMessageId: 'source-message-9',
+          assistantMessageId: 'conversation-turn-42',
+          content: 'ordinary assistant final captured from the exact next turn',
+        },
+      ],
+    });
+
+    const acknowledged = await localAppend(paths.socketPath, 'a'.repeat(64), {
+      v: 2,
+      kind: 'ack_assistant_return',
+      requestId: 'ack-assistant-return-1',
+      conversationId: 'conversation-7',
+      sourceMessageId: 'source-message-9',
+      assistantMessageId: 'conversation-turn-42',
+    });
+    assert.deepEqual(acknowledged, {
+      v: 2,
+      kind: 'assistant_return_ack',
+      requestId: 'ack-assistant-return-1',
+      status: 'acknowledged',
+    });
+
+    const empty = await localAppend(paths.socketPath, 'a'.repeat(64), {
+      v: 2,
+      kind: 'list_assistant_returns',
+      requestId: 'list-assistant-returns-2',
+    });
+    assert.deepEqual(empty.returns, []);
+    const persisted = await loadLedger(paths.ledgerPath);
+    assert.equal(persisted.get('conversation-7\u0000source-message-9').assistantReturn, undefined);
+  });
+
+  it('durably records why the source-bound assistant observer failed after a valid Host receipt', async () => {
+    const paths = testPaths('assistant-observation-failure');
+    const forwarded = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => forwarded.push(message),
+    });
+    bridges.push(bridge);
+
+    const append = localAppend(paths.socketPath, 'a'.repeat(64), appendRequest());
+    await bridge.waitForDispatchCount(1);
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'append_progress',
+      requestId: forwarded[0].requestId,
+      idempotencyKey: 'source-message-9',
+      status: 'submitted',
+    });
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'append_result',
+      requestId: forwarded[0].requestId,
+      idempotencyKey: 'source-message-9',
+      status: 'host_observed',
+      hostMessageId: 'conversation-turn-41',
+    });
+    await append;
+
+    const diagnostic = {
+      v: 1,
+      userTurnConnected: false,
+      anchorTurnFound: false,
+      followingTurnCount: 0,
+      assistantCandidateCount: 0,
+      laterUserTurnPresent: false,
+      assistantHostIdStatus: 'not_observed',
+      assistantContentStatus: 'not_observed',
+      streamingControlPresent: false,
+    };
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'assistant_observation_failed',
+      requestId: forwarded[0].requestId,
+      conversationId: 'conversation-7',
+      idempotencyKey: 'source-message-9',
+      hostMessageId: 'conversation-turn-41',
+      errorCode: 'ASSISTANT_FINAL_NOT_OBSERVED',
+      diagnostic,
+      observedRevisions: appendRequest().expectedRevisions,
+    });
+    assert.deepEqual(forwarded.at(-1), {
+      v: 2,
+      kind: 'assistant_observation_failure_result',
+      requestId: forwarded[0].requestId,
+      status: 'accepted',
+    });
+    const persisted = await loadLedger(paths.ledgerPath);
+    assert.deepEqual(persisted.get('conversation-7\u0000source-message-9').assistantObservationFailure, {
+      state: 'failed',
+      errorCode: 'ASSISTANT_FINAL_NOT_OBSERVED',
+      diagnostic,
+      observedAt: persisted.get('conversation-7\u0000source-message-9').assistantObservationFailure.observedAt,
+    });
+  });
+
+  it('rejects an assistant final that is not bound to an admitted submitted append', async () => {
+    const paths = testPaths('assistant-return-forgery');
+    const forwarded = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => forwarded.push(message),
+    });
+    bridges.push(bridge);
+
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'assistant_final_observed',
+      requestId: 'forged-request',
+      conversationId: 'conversation-7',
+      idempotencyKey: 'source-message-forged',
+      hostMessageId: 'conversation-turn-1',
+      assistantMessageId: 'conversation-turn-2',
+      content: 'must not escape the browser boundary',
+      observedRevisions: appendRequest().expectedRevisions,
+    });
+    assert.deepEqual(forwarded, [
+      { v: 2, kind: 'assistant_final_result', requestId: 'forged-request', status: 'rejected' },
+    ]);
+
+    const listed = await localAppend(paths.socketPath, 'a'.repeat(64), {
+      v: 2,
+      kind: 'list_assistant_returns',
+      requestId: 'list-forged-assistant-returns',
+    });
+    assert.deepEqual(listed.returns, []);
+  });
+
+  it('asks the extension to retry when the assistant final cannot be durably persisted', async () => {
+    const paths = testPaths('assistant-return-persist-retry');
+    const forwarded = [];
+    const bridge = await createNativeHostBridge({
+      ...paths,
+      pairingSecret: 'a'.repeat(64),
+      sendNative: (message) => forwarded.push(message),
+      writeLedger: async (path, entries) => {
+        if ([...entries.values()].some((entry) => entry.assistantReturn)) {
+          throw new Error('simulated assistant-return persistence failure');
+        }
+        await writeAtomicLedger(path, entries);
+      },
+    });
+    bridges.push(bridge);
+    const append = localAppend(paths.socketPath, 'a'.repeat(64), appendRequest());
+    await bridge.waitForDispatchCount(1);
+    const requestId = forwarded[0].requestId;
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'append_progress',
+      requestId,
+      idempotencyKey: 'source-message-9',
+      status: 'submitted',
+    });
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'append_result',
+      requestId,
+      idempotencyKey: 'source-message-9',
+      status: 'host_observed',
+      hostMessageId: 'conversation-turn-41',
+    });
+    await append;
+    await bridge.acceptNativeMessage({
+      v: 2,
+      kind: 'assistant_final_observed',
+      requestId,
+      conversationId: 'conversation-7',
+      idempotencyKey: 'source-message-9',
+      hostMessageId: 'conversation-turn-41',
+      assistantMessageId: 'conversation-turn-42',
+      content: 'retry me after durable storage recovers',
+      observedRevisions: appendRequest().expectedRevisions,
+    });
+    assert.deepEqual(forwarded.at(-1), { v: 2, kind: 'assistant_final_result', requestId, status: 'retryable' });
   });
 
   it('does not expose a terminal receipt to retries before the terminal ledger write commits', async () => {
@@ -359,7 +1053,7 @@ describe('personal Chrome native host bridge', () => {
     const first = localAppend(paths.socketPath, 'a'.repeat(64), appendRequest({ requestId: 'request-1' }));
     await bridge.waitForDispatchCount(1);
     const terminalAcceptance = bridge.acceptNativeMessage({
-      v: 1,
+      v: 2,
       kind: 'append_result',
       requestId: 'request-1',
       idempotencyKey: 'source-message-9',
@@ -412,6 +1106,96 @@ describe('personal Chrome native host bridge', () => {
     assert.equal((await loadLedger(paths.ledgerPath)).size, LEDGER_ENTRY_LIMIT);
   });
 
+  it('reserves the JSON-expanded durable footprint of one maximum-size assistant final', async () => {
+    const entries = new Map([
+      [
+        'conversation-existing\u0000source-existing',
+        {
+          conversationId: 'conversation-existing',
+          idempotencyKey: 'source-existing',
+          textDigest: 'x'.repeat(LEDGER_FILE_LIMIT - 190 * 1024),
+          state: 'failed',
+          errorCode: 'TEST_TERMINAL',
+        },
+      ],
+    ]);
+    assert.equal(
+      hasCapacityForEntry(entries, {
+        conversationId: 'conversation-new',
+        idempotencyKey: 'source-new',
+        state: 'accepted',
+      }),
+      false,
+    );
+  });
+
+  it('reserves a maximum-size assistant final for every outstanding dispatch', async () => {
+    const entries = new Map([
+      [
+        'conversation-filler\u0000source-filler',
+        {
+          conversationId: 'conversation-filler',
+          idempotencyKey: 'source-filler',
+          textDigest: 'x'.repeat(LEDGER_FILE_LIMIT - 400 * 1024),
+          state: 'failed',
+          errorCode: 'TEST_TERMINAL',
+        },
+      ],
+      [
+        'conversation-outstanding\u0000source-outstanding',
+        {
+          conversationId: 'conversation-outstanding',
+          idempotencyKey: 'source-outstanding',
+          state: 'host_observed',
+          hostMessageId: 'host-outstanding',
+        },
+      ],
+    ]);
+
+    assert.equal(
+      hasCapacityForEntry(entries, {
+        conversationId: 'conversation-new',
+        idempotencyKey: 'source-new',
+        state: 'accepted',
+      }),
+      false,
+    );
+  });
+
+  it('releases the per-dispatch reservation after assistant return acknowledgment', async () => {
+    const entries = new Map([
+      [
+        'conversation-filler\u0000source-filler',
+        {
+          conversationId: 'conversation-filler',
+          idempotencyKey: 'source-filler',
+          textDigest: 'x'.repeat(LEDGER_FILE_LIMIT - 400 * 1024),
+          state: 'failed',
+          errorCode: 'TEST_TERMINAL',
+        },
+      ],
+      [
+        'conversation-acknowledged\u0000source-acknowledged',
+        {
+          conversationId: 'conversation-acknowledged',
+          idempotencyKey: 'source-acknowledged',
+          state: 'host_observed',
+          hostMessageId: 'host-acknowledged',
+          assistantReturnAckedAt: '2026-08-31T06:00:00.000Z',
+        },
+      ],
+    ]);
+
+    assert.equal(
+      hasCapacityForEntry(entries, {
+        conversationId: 'conversation-new',
+        idempotencyKey: 'source-new',
+        state: 'accepted',
+      }),
+      true,
+    );
+  });
+
   it('refuses an oversized serialized ledger before replacing the last valid file', async () => {
     const paths = testPaths('ledger-byte-limit');
     const valid = new Map([
@@ -456,7 +1240,7 @@ describe('personal Chrome native host bridge', () => {
     const first = localAppend(paths.socketPath, 'a'.repeat(64), appendRequest());
     await bridge.waitForDispatchCount(1);
     await bridge.acceptNativeMessage({
-      v: 1,
+      v: 2,
       kind: 'append_result',
       requestId: 'request-1',
       idempotencyKey: 'source-message-9',
@@ -501,6 +1285,7 @@ describe('personal Chrome native host bridge', () => {
     const stopped = await pending;
     assert.equal(stopped.errorCode, 'HOST_STOPPED');
     assert.equal(stopped.idempotencyKey, 'source-message-9');
+    assert.equal(stopped.idempotentReplay, false);
 
     const replayed = [];
     const restarted = await createNativeHostBridge({
@@ -516,6 +1301,7 @@ describe('personal Chrome native host bridge', () => {
     );
     assert.equal(retry.status, 'failed');
     assert.equal(retry.errorCode, 'AMBIGUOUS_EFFECT');
+    assert.equal(retry.idempotentReplay, true);
     assert.deepEqual(replayed, []);
   });
 
@@ -536,7 +1322,7 @@ describe('personal Chrome native host bridge', () => {
     );
     assert.equal(conflict.errorCode, 'IDEMPOTENCY_CONFLICT');
     await bridge.acceptNativeMessage({
-      v: 1,
+      v: 2,
       kind: 'append_result',
       requestId: 'request-1',
       idempotencyKey: 'source-message-9',
@@ -558,7 +1344,7 @@ describe('personal Chrome native host bridge', () => {
     await bridge.waitForDispatchCount(1);
 
     await bridge.acceptNativeMessage({
-      v: 1,
+      v: 2,
       kind: 'append_result',
       requestId: 'request-1',
       idempotencyKey: 'source-message-9',
@@ -638,6 +1424,7 @@ describe('native host install plan', () => {
           CAT_CAFE_PERSONAL_CHROME_SOCKET: socketPath,
           CAT_CAFE_PERSONAL_CHROME_LEDGER: join(testRoot, 'r.json'),
           CAT_CAFE_PERSONAL_CHROME_PAIRING_SECRET: 'p'.repeat(64),
+          CAT_CAFE_PERSONAL_CHROME_HELPER_ARTIFACT_REVISION: helperArtifactRevision,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -690,15 +1477,29 @@ describe('native host install plan', () => {
         generatePairingSecret: () => pairingSecret,
         now: () => new Date('2026-08-12T23:15:00.000Z'),
       });
+      await writePersonalChromeConversationAuthorizationsAtomic(plan.conversationBindingPath, {
+        schemaVersion: 2,
+        provider: 'chatgpt',
+        conversations: [
+          {
+            conversationId: 'conversation-7',
+            chatUrl: 'https://chatgpt.com/c/conversation-7',
+            authorizedAt: '2026-08-21T07:00:00.000Z',
+            updatedAt: '2026-08-21T07:00:00.000Z',
+          },
+        ],
+        updatedAt: '2026-08-21T07:00:00.000Z',
+      });
       const mode = (await stat(plan.launcherPath)).mode & 0o777;
       assert.notEqual(mode & 0o111, 0, 'the POSIX manifest target must be executable');
 
       let spawnError;
       let stderr = '';
       const child = spawn(plan.launcherPath, [], {
-        env: Object.fromEntries(
-          Object.entries(process.env).filter(([key]) => !key.startsWith('CAT_CAFE_PERSONAL_CHROME_')),
-        ),
+        env: {
+          HOME: testRoot,
+          PATH: join(testRoot, 'path-without-node'),
+        },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       child.once('error', (error) => {
@@ -718,19 +1519,25 @@ describe('native host install plan', () => {
             (child.exitCode !== null ? new Error(stderr || `native host exited ${child.exitCode}`) : undefined),
           10_000,
         );
+        const expectedRevisions = {
+          helper: plan.artifactDigest,
+          extension: '0.2.11',
+          pageAdapter: '2026-09-02.1',
+        };
         const outboundPromise = readOneNativeMessage(child.stdout);
-        const localResultPromise = localAppend(plan.socketPath, pairingSecret, appendRequest());
+        const localResultPromise = localAppend(plan.socketPath, pairingSecret, appendRequest({ expectedRevisions }));
         const outbound = await outboundPromise;
-        assert.deepEqual(outbound, appendRequest());
+        assert.deepEqual(outbound, appendRequest({ expectedRevisions }));
 
         child.stdin.write(
           encodeNativeMessage({
-            v: 1,
+            v: 2,
             kind: 'append_result',
             requestId: outbound.requestId,
             idempotencyKey: outbound.idempotencyKey,
             status: 'host_observed',
             hostMessageId: 'chatgpt-user-message-launched-host-1',
+            observedRevisions: expectedRevisions,
           }),
         );
         assert.equal((await localResultPromise).hostMessageId, 'chatgpt-user-message-launched-host-1');

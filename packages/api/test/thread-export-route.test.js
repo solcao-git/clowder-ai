@@ -14,6 +14,12 @@ const { resolveFrontendCorsOrigins } = await import('../src/config/frontend-orig
 const { ImageExporter, buildImageExportUrl, resolveExportCaptureHeight, stitchImageExportChunks } = await import(
   '../src/services/ImageExporter.ts'
 );
+const {
+  captureVerifiedImageExportCandidate,
+  HTML_WIDGET_EXPORT_OPERATION_MAX_WAIT_MS,
+  refreshHtmlWidgetExportLayoutProof,
+  resolveHtmlWidgetExportReadiness,
+} = await import('../src/services/html-widget-export-readiness.ts');
 
 const ORIGINAL_CAPTURE = ImageExporter.prototype.capture;
 const ORIGINAL_CLOSE = ImageExporter.prototype.close;
@@ -259,6 +265,248 @@ describe('buildImageExportUrl', () => {
     assert.equal(resolveExportCaptureHeight({ documentHeight: 4000, exportRootHeight: 214.2 }), 215);
     assert.equal(resolveExportCaptureHeight({ documentHeight: 5100, exportRootHeight: 5100 }), 5100);
     assert.equal(resolveExportCaptureHeight({ documentHeight: 900, exportRootHeight: null }), 900);
+  });
+
+  it('requires every html_widget to be measured and fully expanded before capture', () => {
+    assert.deepEqual(resolveHtmlWidgetExportReadiness([]), { status: 'ready', widgetIds: [] });
+    assert.deepEqual(
+      resolveHtmlWidgetExportReadiness([
+        { widgetId: 'short', layoutState: 'ready', expanded: true },
+        { widgetId: 'long', layoutState: 'pending', expanded: true },
+      ]),
+      { status: 'pending', widgetIds: ['long'] },
+    );
+    assert.deepEqual(resolveHtmlWidgetExportReadiness([{ widgetId: 'long', layoutState: 'ready', expanded: false }]), {
+      status: 'pending',
+      widgetIds: ['long'],
+    });
+    assert.deepEqual(
+      resolveHtmlWidgetExportReadiness([
+        { widgetId: 'short', layoutState: 'ready', expanded: true },
+        { widgetId: 'long', layoutState: 'ready', expanded: true },
+      ]),
+      { status: 'ready', widgetIds: ['short', 'long'] },
+    );
+  });
+
+  it('surfaces html_widget measurement failures instead of permitting a clipped PNG', () => {
+    assert.deepEqual(resolveHtmlWidgetExportReadiness([{ widgetId: 'broken', layoutState: 'error', expanded: true }]), {
+      status: 'error',
+      widgetIds: ['broken'],
+    });
+  });
+
+  it('requires every html_widget to acknowledge the current exporter proof request', () => {
+    const widgets = [
+      { widgetId: 'fresh', layoutState: 'ready', expanded: true, proofRequestId: 'proof-current' },
+      { widgetId: 'stale', layoutState: 'ready', expanded: true, proofRequestId: 'proof-previous' },
+    ];
+    assert.deepEqual(resolveHtmlWidgetExportReadiness(widgets, 'proof-current'), {
+      status: 'pending',
+      widgetIds: ['stale'],
+    });
+    assert.deepEqual(resolveHtmlWidgetExportReadiness([widgets[0]], 'proof-current'), {
+      status: 'ready',
+      widgetIds: ['fresh'],
+    });
+  });
+
+  it('reports the exact proof stage and timing when renderer dispatch exhausts the operation deadline', async () => {
+    const originalNow = Date.now;
+    let now = 1_000;
+    const page = {
+      async evaluate(_fn, ...args) {
+        if (args[0] !== 'catcafe:html-widget-export-proof-request') {
+          throw new Error(`Unexpected browser evaluation: ${String(args[0])}`);
+        }
+        now += HTML_WIDGET_EXPORT_OPERATION_MAX_WAIT_MS + 1;
+      },
+    };
+    Date.now = () => now;
+
+    try {
+      await assert.rejects(
+        () => refreshHtmlWidgetExportLayoutProof(page, 1_000 + HTML_WIDGET_EXPORT_OPERATION_MAX_WAIT_MS),
+        (error) => {
+          assert.match(error.message, /proofSequence=1/);
+          assert.match(error.message, /proofStage=after-dispatch/);
+          assert.match(error.message, /proofElapsedMs=12001/);
+          assert.match(error.message, /remainingMs=-1/);
+          return true;
+        },
+      );
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  it('commits a screenshot candidate only after fresh proof both before and after capture', async () => {
+    const events = [];
+    let proofCount = 0;
+    await assert.rejects(
+      () =>
+        captureVerifiedImageExportCandidate(
+          async () => {
+            events.push('proof');
+            proofCount += 1;
+            if (proofCount === 2) throw new Error('post-capture layout changed');
+          },
+          async () => {
+            events.push('screenshot');
+            return Buffer.from('candidate-png');
+          },
+        ),
+      /post-capture layout changed/,
+    );
+    assert.deepEqual(events, ['proof', 'screenshot', 'proof']);
+  });
+
+  it('rejects a fresh widget proof delivered after the parent deadline without leaking PNG or page', async () => {
+    const originalNow = Date.now;
+    let now = 1_000;
+    let proofRequestId = null;
+    let delayedFirstProof = true;
+    let screenshotCalls = 0;
+    let pageCloseCalls = 0;
+    const page = {
+      async setExtraHTTPHeaders() {},
+      async setViewport() {},
+      async goto() {},
+      async waitForSelector() {},
+      async addStyleTag() {},
+      async screenshot() {
+        screenshotCalls += 1;
+        return Buffer.from('candidate-png');
+      },
+      async close() {
+        pageCloseCalls += 1;
+      },
+      async evaluate(fn, ...args) {
+        if (args[0] === 'catcafe:html-widget-export-proof-request') {
+          proofRequestId = args[1];
+          if (delayedFirstProof) {
+            delayedFirstProof = false;
+            now += HTML_WIDGET_EXPORT_OPERATION_MAX_WAIT_MS + 1;
+          }
+          return undefined;
+        }
+        if (args[0] === 'data-html-widget-proof-request-id') {
+          return {
+            height: 100,
+            widgets: [
+              {
+                widgetId: 'late-proof-widget',
+                layoutState: 'ready',
+                expanded: true,
+                proofRequestId,
+              },
+            ],
+          };
+        }
+
+        const source = String(fn);
+        if (source.includes('[data-export-root]')) {
+          return { documentHeight: 100, exportRootHeight: 100 };
+        }
+        if (source.includes('[data-message-id]')) return 1;
+        if (source.includes('requestAnimationFrame')) return undefined;
+        throw new Error(`Unexpected browser evaluation: ${source}`);
+      },
+    };
+    const browserSession = {
+      browser: null,
+      async openPage() {
+        return page;
+      },
+      async close() {},
+    };
+    const exporter = new ImageExporter();
+    exporter.browserSession = browserSession;
+    Date.now = () => now;
+
+    try {
+      await assert.rejects(
+        () => exporter.capture('http://example.test/thread/thread-1', 'user-1'),
+        /deadline|timed out|did not become export-ready/i,
+      );
+      assert.equal(screenshotCalls, 0, 'an ACK after the parent deadline must never produce a PNG candidate');
+      assert.equal(pageCloseCalls, 1, 'the rejected capture must close its browser page');
+    } finally {
+      Date.now = originalNow;
+      await exporter.close();
+    }
+  });
+
+  it('shares one export deadline across widget readiness, height stability, and screenshot proof', async () => {
+    const originalNow = Date.now;
+    let now = 1_000;
+    let proofRequestId = null;
+    let screenshotCalls = 0;
+    let pageCloseCalls = 0;
+    const page = {
+      async setExtraHTTPHeaders() {},
+      async setViewport() {},
+      async goto() {},
+      async waitForSelector() {},
+      async addStyleTag() {},
+      async screenshot() {
+        screenshotCalls += 1;
+        return Buffer.from('candidate-png');
+      },
+      async close() {
+        pageCloseCalls += 1;
+      },
+      async evaluate(fn, ...args) {
+        if (args[0] === 'catcafe:html-widget-export-proof-request') {
+          proofRequestId = args[1];
+          now += 2_500;
+          return undefined;
+        }
+        if (args[0] === 'data-html-widget-proof-request-id') {
+          return {
+            height: 100,
+            widgets: [
+              {
+                widgetId: 'cumulative-deadline-widget',
+                layoutState: 'ready',
+                expanded: true,
+                proofRequestId,
+              },
+            ],
+          };
+        }
+
+        const source = String(fn);
+        if (source.includes('[data-export-root]')) {
+          return { documentHeight: 100, exportRootHeight: 100 };
+        }
+        if (source.includes('[data-message-id]')) return 1;
+        if (source.includes('requestAnimationFrame')) return undefined;
+        throw new Error(`Unexpected browser evaluation: ${source}`);
+      },
+    };
+    const browserSession = {
+      browser: null,
+      async openPage() {
+        return page;
+      },
+      async close() {},
+    };
+    const exporter = new ImageExporter();
+    exporter.browserSession = browserSession;
+    Date.now = () => now;
+
+    try {
+      await assert.rejects(
+        () => exporter.capture('http://example.test/thread/thread-1', 'user-1'),
+        /deadline|timed out|did not stabilize/i,
+      );
+      assert.equal(screenshotCalls, 0, 'later phases must not receive a fresh screenshot deadline');
+      assert.equal(pageCloseCalls, 1, 'the globally expired capture must close its browser page');
+    } finally {
+      Date.now = originalNow;
+      await exporter.close();
+    }
   });
 
   it('stitches exact chunk boundaries without repeating or dropping boundary content', async () => {

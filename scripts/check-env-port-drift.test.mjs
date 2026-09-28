@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, posix, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 const ROOT = resolve(process.cwd());
@@ -35,6 +35,9 @@ const ROOT = resolve(process.cwd());
 // Home repo has sync-to-opensource.sh; open-source repo does not.
 const isHomeRepo = existsSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'));
 const hasEnvExampleOpensource = existsSync(resolve(ROOT, '.env.example.opensource'));
+
+// Keep the source-only export regression in the canonical check:env-ports lane.
+if (isHomeRepo) await import('./sync-to-opensource-api-build.test.mjs');
 
 function readEnvFile(relPath) {
   const content = readFileSync(resolve(ROOT, relPath), 'utf-8');
@@ -160,14 +163,14 @@ function readJsonFile(relPath) {
   return JSON.parse(readFileSync(resolve(ROOT, relPath), 'utf-8'));
 }
 
-function extractScriptRefs(command) {
+function extractScriptRefs(command, packageRoot = '') {
   const refs = new Set();
   const matches = String(command).matchAll(
-    /(?:^|\s)(?:bash|node)\s+((?:\.\/)?scripts\/[^\s'"]+)|(?:^|\s)((?:\.\/)?scripts\/[^\s'"]+)/g,
+    /(?:^|\s)(?:bash|node)\s+['"]?((?:\.{1,2}\/|scripts\/)[^\s'"]+)|(?:^|\s)['"]?((?:\.{1,2}\/)*scripts\/[^\s'"]+)/g,
   );
   for (const match of matches) {
     const ref = match[1] ?? match[2];
-    if (ref) refs.add(ref.replace(/^\.\//, ''));
+    if (ref) refs.add(posix.join(packageRoot, ref));
   }
   return [...refs];
 }
@@ -186,7 +189,7 @@ function buildExportedRootScripts(sourceScripts) {
   scripts['dev:direct'] = 'node ./scripts/start-entry.mjs dev:direct --profile=opensource';
   scripts['check:start-profile-isolation'] = 'node --test scripts/start-dev-profile-isolation.test.mjs';
   scripts['check:pre-merge-gate'] =
-    'node --test scripts/pre-merge-check.test.mjs scripts/pre-merge-gate-guard.test.mjs scripts/lib/fseventsd-pressure.test.mjs scripts/lib/clowder-merge-check-evidence.test.mjs scripts/test-bash-runtime.test.mjs scripts/check-worktree-dirty-ledger.test.mjs scripts/classify-merge-outcome.test.mjs scripts/clowder-merge-execution.test.mjs';
+    'node --test scripts/pre-merge-check.test.mjs scripts/pre-merge-gate-guard.test.mjs scripts/gate-resource-health-monitor.test.mjs scripts/lib/fseventsd-pressure.test.mjs scripts/lib/clowder-merge-check-evidence.test.mjs scripts/lib/git-patch-id.test.mjs scripts/test-bash-runtime.test.mjs scripts/check-worktree-dirty-ledger.test.mjs scripts/classify-merge-outcome.test.mjs scripts/clowder-merge-execution.test.mjs';
   if (!scripts.check.includes('pnpm check:start-profile-isolation')) {
     scripts.check += ' && pnpm check:start-profile-isolation';
   }
@@ -195,6 +198,7 @@ function buildExportedRootScripts(sourceScripts) {
   delete scripts['test:architecture-ownership'];
 
   const internalScripts = [
+    'sync:train',
     'antigravity:smoke',
     'check:hmac-salt',
     'check:antigravity-smoke',
@@ -206,6 +210,14 @@ function buildExportedRootScripts(sourceScripts) {
     'check:source-hygiene',
     'check:f223-action-tracking',
     'check:docs-discovery',
+    // Shared-red ownership is backed by the home gate receipt/database control
+    // plane. The public repository cannot verify or resolve those identities.
+    'gate:shared-red',
+    // Memory Architecture Closure reads lane-owned manifests that are not part
+    // of the curated public source tree. Must mirror sync-to-opensource.sh.
+    'gen:memory-architecture-closure',
+    'check:memory-architecture-catalog',
+    'gate:memory-architecture-closure',
     // F267 measurement validity audits the complete home evidence archive, which
     // the curated public export intentionally does not contain.
     'check:measurement-bundles',
@@ -216,6 +228,9 @@ function buildExportedRootScripts(sourceScripts) {
     // (PR #2333). Must mirror sync-to-opensource.sh internalScripts list.
     'check:reverse-sanitizer',
     'check:boundary-roundtrip',
+    // Outbound boundary guards load scripts/_sanitize-rules.pl, which is internal by
+    // construction. Mirrors sync-to-opensource.sh internalScripts.
+    'check:outbound-sanitizer',
     // Privacy gate test — references F207 internal incident context; home-only.
     'check:export-privacy-gate',
     // F251 Task 4b — public delta gate test suite (classifier + cli + wire + replay).
@@ -252,6 +267,30 @@ function buildExportedRootScripts(sourceScripts) {
     if (key.startsWith('desktop:')) delete scripts[key];
   }
   return scripts;
+}
+
+function executePackageScriptsTransform(sourceScripts, marker = 'PACKAGE_JSON_TRANSFORM_EOF') {
+  const syncScript = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf8');
+  const startMarker = `<<'${marker}'\n`;
+  const start = syncScript.indexOf(startMarker);
+  assert.notEqual(start, -1, `public package transform ${marker} start marker must exist`);
+  const programStart = start + startMarker.length;
+  const end = syncScript.indexOf(`\n${marker}`, programStart);
+  assert.notEqual(end, -1, `public package transform ${marker} end marker must exist`);
+
+  const tempRoot = mkdtempSync(resolve(tmpdir(), 'cat-cafe-public-package-transform-'));
+  const packagePath = resolve(tempRoot, 'package.json');
+  writeFileSync(packagePath, `${JSON.stringify({ scripts: sourceScripts }, null, 2)}\n`);
+  try {
+    execFileSync('node', ['-', packagePath], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      input: syncScript.slice(programStart, end),
+    });
+    return JSON.parse(readFileSync(packagePath, 'utf8')).scripts;
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 }
 
 function loadWorkspacePackageRootsByName() {
@@ -313,6 +352,9 @@ function sanitizeFixture(relPath, content) {
     execFileSync('perl', ['-pi', resolve(ROOT, 'scripts/_sanitize-rules.pl'), fixturePath], {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Declared the way the sync script declares it, so path-anchored rules resolve against a
+      // real export root instead of an undeclared one.
+      env: { ...process.env, CAT_CAFE_SANITIZE_ROOT: tempRoot },
     });
     return readFileSync(fixturePath, 'utf-8');
   } finally {
@@ -331,6 +373,13 @@ function readClaudeHookTemplateCommands(template) {
 
 function readSyncScript() {
   return readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
+}
+
+// One declared list drives both the sanitizer pass and the Step 4 security scan.
+function readSanitizedTextExtensions() {
+  const match = readSyncScript().match(/^SANITIZED_TEXT_EXTENSIONS=\(([^)]*)\)/m);
+  assert.ok(match, 'sync-to-opensource.sh must declare SANITIZED_TEXT_EXTENSIONS');
+  return match[1].trim().split(/\s+/).filter(Boolean);
 }
 
 function readFunctionBody(content, functionName) {
@@ -660,6 +709,24 @@ describe(
   'Sync transform rules match convention',
   { skip: !isHomeRepo && 'sync infrastructure not present (open-source repo)' },
   () => {
+    it('exports the Git attribute that keeps the deterministic F247 bundle LF-only on Windows', () => {
+      const attributesPath = resolve(ROOT, '.gitattributes');
+      assert.ok(existsSync(attributesPath), '.gitattributes must define the generated bundle checkout contract');
+
+      const attributes = readFileSync(attributesPath, 'utf8');
+      assert.match(
+        attributes,
+        /^packages\/api\/src\/plugins\/cloud-cat-personal-host\/extension\/content-script\.js text eol=lf$/mu,
+        'the checked-in bundle must retain LF on Windows so the deterministic build comparison is byte-stable',
+      );
+
+      const managedFiles = readYamlTopLevelList('sync-manifest.yaml', 'managed_files');
+      assert.ok(
+        managedFiles.includes('.gitattributes'),
+        'sync-manifest must export .gitattributes so the public Windows checkout keeps the same bundle contract',
+      );
+    });
+
     it('_sanitize-rules.pl transforms 3002→3004 (API)', () => {
       const content = readFileSync(resolve(ROOT, 'scripts/_sanitize-rules.pl'), 'utf-8');
       assert.ok(
@@ -688,44 +755,44 @@ describe(
       );
     });
 
-    it('governance tests use sanitized frontend/API fallback ports after sync', () => {
-      const packTest = sanitizeFixture(
-        'packages/api/test/governance/governance-pack.test.js',
-        readFileSync(resolve(ROOT, 'packages/api/test/governance/governance-pack.test.js'), 'utf-8'),
+    it('portable workspace staging uses sanitized frontend/API fallback ports after sync', () => {
+      const stagingSource = sanitizeFixture(
+        'packages/api/src/domains/cats/services/context/StagingContent.ts',
+        readFileSync(resolve(ROOT, 'packages/api/src/domains/cats/services/context/StagingContent.ts'), 'utf-8'),
       );
-      const bootstrapTest = sanitizeFixture(
-        'packages/api/test/governance/governance-bootstrap.test.js',
-        readFileSync(resolve(ROOT, 'packages/api/test/governance/governance-bootstrap.test.js'), 'utf-8'),
+      const stagingTest = sanitizeFixture(
+        'packages/api/test/staging-content.test.js',
+        readFileSync(resolve(ROOT, 'packages/api/test/staging-content.test.js'), 'utf-8'),
       );
 
-      for (const content of [packTest, bootstrapTest]) {
-        assert.doesNotMatch(content, /frontend 3001 and API 3002/);
-        assert.match(content, /FRONTEND_PORT \?\? '3003'/);
-        assert.match(content, /API_SERVER_PORT \?\? '3004'/);
-      }
+      assert.doesNotMatch(stagingSource, /3001\/3002/);
+      assert.match(stagingSource, /FRONTEND_PORT \?\? '3003'/);
+      assert.match(stagingSource, /API_SERVER_PORT \?\? '3004'/);
+      assert.doesNotMatch(stagingTest, /3001\/3002/);
+      assert.match(stagingTest, /defaultOut\.includes\('3003\/3004'\)/);
     });
 
+    // The sanitizer pass and the Step 4 security scan are both generated from
+    // SANITIZED_TEXT_EXTENSIONS, so membership in that list is what these guards assert.
     it('sync-to-opensource.sh runs sanitizer over CommonJS test files', () => {
-      const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
       assert.ok(
-        content.includes('-name "*.cjs"'),
+        readSanitizedTextExtensions().includes('cjs'),
         'sync sanitizer should include .cjs files such as packages/web/test/next-config.test.cjs',
       );
     });
 
     it('sync-to-opensource.sh runs sanitizer over ES module utility files', () => {
-      const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
       assert.ok(
-        content.includes('-name "*.mjs"'),
+        readSanitizedTextExtensions().includes('mjs'),
         'sync sanitizer should include .mjs files such as scripts/lib/platform-status.mjs',
       );
     });
 
     it('sync-to-opensource.sh runs sanitizer over desktop installer and launcher text files', () => {
-      const content = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
+      const declared = readSanitizedTextExtensions();
       for (const ext of ['ps1', 'py', 'bat', 'iss', 'html']) {
         assert.ok(
-          content.includes(`-name "*.${ext}"`),
+          declared.includes(ext),
           `sync sanitizer should include .${ext} files so public desktop release surfaces are sanitized`,
         );
       }
@@ -1044,6 +1111,23 @@ excluded:
       }
     });
 
+    it('public check:pre-merge-gate references only scripts exported by sync-manifest', () => {
+      const sourcePkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8'));
+      const managedScripts = new Set(readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts'));
+      const publicMirror = buildExportedRootScripts(sourcePkg.scripts)['check:pre-merge-gate'];
+      const shTransform = readFileSync(resolve(ROOT, 'scripts/sync-to-opensource.sh'), 'utf-8');
+      const transformedCommand = shTransform.match(/pkg\.scripts\["check:pre-merge-gate"\]\s*=\s*"([^"]+)";/)?.[1];
+
+      assert.ok(transformedCommand, 'sync-to-opensource.sh should assign public check:pre-merge-gate');
+      for (const [surface, command] of [
+        ['buildExportedRootScripts mirror', publicMirror],
+        ['sync-to-opensource.sh transform', transformedCommand],
+      ]) {
+        const unexportedScripts = extractScriptRefs(command).filter((scriptPath) => !managedScripts.has(scriptPath));
+        assert.deepEqual(unexportedScripts, [], `${surface} must not reference unexported scripts`);
+      }
+    });
+
     it('sync-manifest does not protect managed service wrappers as target-owned', () => {
       const managedScripts = readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts');
       const targetOwnedFiles = readYamlTopLevelList('sync-manifest.yaml', 'target_owned_files');
@@ -1117,6 +1201,63 @@ excluded:
       );
     });
 
+    it('public package transform strips home-only memory architecture executables', () => {
+      const sourceScripts = readJsonFile('package.json').scripts;
+      const transformedScripts = executePackageScriptsTransform(sourceScripts);
+      const mirroredScripts = buildExportedRootScripts(sourceScripts);
+      const homeOnlyScripts = [
+        'gate:shared-red',
+        'gen:memory-architecture-closure',
+        'check:memory-architecture-catalog',
+        'gate:memory-architecture-closure',
+      ];
+
+      for (const scriptName of homeOnlyScripts) {
+        assert.equal(
+          transformedScripts[scriptName],
+          undefined,
+          `${scriptName} depends on unpublished lane manifests and must not be advertised publicly`,
+        );
+        assert.equal(mirroredScripts[scriptName], transformedScripts[scriptName], `${scriptName} mirror drift`);
+      }
+      assert.doesNotMatch(
+        transformedScripts.check,
+        /check:memory-architecture-catalog/,
+        'public pnpm check must not invoke a catalog checker whose lane manifests are intentionally not published',
+      );
+      assert.doesNotMatch(
+        mirroredScripts.check,
+        /check:memory-architecture-catalog/,
+        'public check-chain mirror drift',
+      );
+    });
+
+    it('normalizes parent-relative script references from their package root', () => {
+      assert.deepEqual(
+        extractScriptRefs(
+          'node ./scripts/local.mjs && node ../../scripts/root.mjs && bash "../../scripts/verify.sh"',
+          'packages/api',
+        ),
+        ['packages/api/scripts/local.mjs', 'scripts/root.mjs', 'scripts/verify.sh'],
+      );
+    });
+
+    it('blocks an unexported parent-relative API build helper until managed_scripts includes it', () => {
+      const managedRoots = new Set(readYamlTopLevelList('sync-manifest.yaml', 'managed_roots'));
+      const managedFiles = new Set(readYamlTopLevelList('sync-manifest.yaml', 'managed_files'));
+      const managedScripts = new Set(readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts'));
+      const probe = 'scripts/future-public-closure-probe.mjs';
+      const sourceScripts = readJsonFile('packages/api/package.json').scripts;
+      sourceScripts['build:actual'] += ` && node ../../${probe}`;
+      const exportedScripts = executePackageScriptsTransform(sourceScripts, 'API_PACKAGE_JSON_TRANSFORM_EOF');
+      const refs = extractScriptRefs(exportedScripts.build, 'packages/api');
+      const missing = () => refs.filter((ref) => !isManagedPath(ref, managedRoots, managedFiles, managedScripts));
+
+      assert.deepEqual(missing(), [probe], 'the parent-relative dependency must not disappear from the guard');
+      managedScripts.add(probe);
+      assert.deepEqual(missing(), [], 'explicit export ownership closes the same dependency');
+    });
+
     it('sync-manifest exports every scripts/* target referenced by exported package.json surfaces', () => {
       const managedRoots = new Set(readYamlTopLevelList('sync-manifest.yaml', 'managed_roots'));
       const managedFiles = new Set(readYamlTopLevelList('sync-manifest.yaml', 'managed_files'));
@@ -1133,13 +1274,18 @@ excluded:
       const missing = [];
       for (const packageJsonPath of packageJsonSurfaces) {
         const pkg = readJsonFile(packageJsonPath);
-        const scripts =
-          packageJsonPath === 'package.json' ? buildExportedRootScripts(pkg.scripts ?? {}) : (pkg.scripts ?? {});
+        const transformMarker = {
+          'package.json': 'PACKAGE_JSON_TRANSFORM_EOF',
+          'packages/api/package.json': 'API_PACKAGE_JSON_TRANSFORM_EOF',
+          'packages/shared/package.json': 'SHARED_PACKAGE_JSON_TRANSFORM_EOF',
+        }[packageJsonPath];
+        const scripts = transformMarker
+          ? executePackageScriptsTransform(pkg.scripts ?? {}, transformMarker)
+          : (pkg.scripts ?? {});
         const packageRoot = packageJsonPath === 'package.json' ? '' : packageJsonPath.slice(0, -'/package.json'.length);
 
         for (const [scriptName, command] of Object.entries(scripts)) {
-          for (const ref of extractScriptRefs(command)) {
-            const exportPath = packageRoot.length > 0 ? `${packageRoot}/${ref}` : ref;
+          for (const exportPath of extractScriptRefs(command, packageRoot)) {
             if (!isManagedPath(exportPath, managedRoots, managedFiles, managedScripts)) {
               missing.push(`${packageJsonPath}:${scriptName} -> ${exportPath}`);
             }
@@ -1151,6 +1297,17 @@ excluded:
         missing,
         [],
         `sync-manifest should export every scripts/* target referenced by exported package.json surfaces:\n${missing.join('\n')}`,
+      );
+    });
+
+    it('exports the portable signal adapter referenced outside the managed Web package root', () => {
+      const managedScripts = new Set(readYamlTopLevelList('sync-manifest.yaml', 'managed_scripts'));
+      const webBuild = readJsonFile('packages/web/package.json').scripts?.build;
+
+      assert.equal(webBuild, 'node ../../scripts/run-preserving-signal-exit.mjs next build');
+      assert.ok(
+        managedScripts.has('scripts/run-preserving-signal-exit.mjs'),
+        'the exported Web build must not reference an adapter omitted from the public sync closure',
       );
     });
 
@@ -1662,7 +1819,7 @@ excluded:
       );
       assert.match(
         content,
-        /if \[ "\$DRY_RUN" = false \] && \[ "\$VALIDATE" = false \]; then[\s\S]*After merge: \$PUBLISH_HANDOFF_CMD/,
+        /if \[ "\$PREFLIGHT" = false \] && \[ "\$DRY_RUN" = false \] && \[ "\$VALIDATE" = false \]; then[\s\S]*After merge: \$PUBLISH_HANDOFF_CMD/,
         'sync-to-opensource should only print the post-merge publish handoff for real sync runs',
       );
       assert.match(
@@ -1968,13 +2125,13 @@ describe(
       );
       assert.match(
         gate,
-        /PROJECT_ALLOWED_ROOTS_APPEND=true[\s\\]+PROJECT_ALLOWED_ROOTS="\$gate_target_real"[\s\\]+pnpm --filter @cat-cafe\/api run test:public/,
-        'test:public in the temp target should treat the validation checkout as an allowed project root',
+        /PROJECT_ALLOWED_ROOTS_APPEND=true[\s\\]+PROJECT_ALLOWED_ROOTS="\$gate_target_real"[\s\\]+pnpm --filter @cat-cafe\/api run test:public:prepared/,
+        'prepared public suite in the temp target should treat the validation checkout as an allowed project root',
       );
       assert.match(
         gate,
-        /PROJECT_ALLOWED_ROOTS_APPEND=true[\s\\]+PROJECT_ALLOWED_ROOTS="\$gate_target_real"[\s\\]+API_SERVER_PORT=\$accept_api_port MEMORY_STORE=1 NODE_ENV=test/,
-        'API startup acceptance should reuse the same temp-target allow-root so projectPath-based dispatch stays representative',
+        /PROJECT_ALLOWED_ROOTS_APPEND=true[\s\\]+PROJECT_ALLOWED_ROOTS="\$gate_target_real"[\s\\]+API_SERVER_PORT=\$accept_api_port MEMORY_STORE=1 CAT_CAFE_INVOCATION_REGISTRY=memory NODE_ENV=test/,
+        'API startup acceptance should reuse the same temp-target allow-root and explicitly select the degraded callback-auth backend used by this Redis-free local test',
       );
     });
 
@@ -2015,17 +2172,17 @@ describe(
       );
     });
 
-    it('temp target public gate preserves full test:public output before tailing', () => {
+    it('temp target public gate preserves full prepared-public-suite output before tailing', () => {
       const gate = readFunctionBody(readSyncScript(), 'run_target_public_gate');
       assert.match(
         gate,
         /test_public_log=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/cat-cafe-testpublic\.XXXXXX"\)/,
-        'run_target_public_gate should capture test:public output in a dedicated temp log',
+        'run_target_public_gate should capture prepared public suite output in a dedicated temp log',
       );
       assert.match(
         gate,
-        /pnpm --filter @cat-cafe\/api run test:public >"\$test_public_log" 2>&1/,
-        'test:public should write its full output to a log file before summary tailing',
+        /pnpm --filter @cat-cafe\/api run test:public:prepared >"\$test_public_log" 2>&1/,
+        'prepared public suite should write its full output to a log file before summary tailing',
       );
       assert.match(
         gate,
@@ -2034,8 +2191,8 @@ describe(
       );
       assert.doesNotMatch(
         gate,
-        /pnpm --filter @cat-cafe\/api run test:public 2>&1 \| tail -5/,
-        'test:public should not pipe directly into tail, or failures become opaque',
+        /pnpm --filter @cat-cafe\/api run test:public:prepared 2>&1 \| tail -5/,
+        'prepared public suite should not pipe directly into tail, or failures become opaque',
       );
     });
 
@@ -2053,13 +2210,13 @@ describe(
       );
       assert.match(
         content,
-        /if \[ "\$DRY_RUN" = false \] && \[ "\$VALIDATE" = false \]; then[\s\S]*if \[ "\$SYNC_MODULE" = "all" \]; then[\s\S]*prepare_source_sync_tree/m,
+        /if \[ "\$PREFLIGHT" = false \] && \[ "\$DRY_RUN" = false \] && \[ "\$VALIDATE" = false \]; then[\s\S]*if \[ "\$SYNC_MODULE" = "all" \]; then[\s\S]*prepare_source_sync_tree/m,
         'real full sync should always switch the source baseline to a detached checkout',
       );
       assert.match(
         content,
-        /if \{ \[ "\$DRY_RUN" = true \] \|\| \[ "\$VALIDATE" = true \]; \} && \[ -n "\$REQUESTED_SOURCE_SHA" \]; then[\s\S]*prepare_source_sync_tree/m,
-        'dry-run and validate should use the same detached checkout when an immutable source pin is supplied',
+        /if \{ \[ "\$PREFLIGHT" = true \] \|\| \[ "\$DRY_RUN" = true \] \|\| \[ "\$VALIDATE" = true \]; \} && \[ -n "\$REQUESTED_SOURCE_SHA" \]; then[\s\S]*prepare_source_sync_tree/m,
+        'preflight, dry-run, and validate should use the same detached checkout when an immutable source pin is supplied',
       );
       assert.match(
         content,
@@ -2068,7 +2225,7 @@ describe(
       );
       assert.match(
         content,
-        /git -C "\$SOURCE_SYNC_DIR" archive HEAD \| tar -x -C "\$STAGING_DIR"/,
+        /git -C "\$SOURCE_SYNC_DIR" archive 'HEAD\^\{tree\}' \| tar -x -C "\$STAGING_DIR"/,
         'step 1 export should archive the detached origin/main checkout for real full sync',
       );
       assert.match(
@@ -2083,6 +2240,16 @@ describe(
       );
       assert.match(
         content,
+        /exec bash "\$pinned_wrapper" "\$\{ORIGINAL_SYNC_ARGS\[@\]\}"/,
+        'the first process must re-exec the wrapper committed in the detached source checkout',
+      );
+      assert.match(
+        content,
+        /actual_wrapper=\$\(resolve_physical_path "\$0"\)[\s\S]*expected_wrapper=\$\(resolve_physical_path "\$SOURCE_SYNC_DIR\/scripts\/sync-to-opensource\.sh"\)[\s\S]*"\$actual_wrapper" != "\$expected_wrapper"/,
+        'the child must fail closed unless the executing wrapper itself comes from SOURCE_SYNC_DIR',
+      );
+      assert.match(
+        content,
         /node "\$SOURCE_SYNC_DIR\/scripts\/export-public-feature-docs\.mjs"/,
         'feature-doc exporter must run from SOURCE_SYNC_DIR, not SOURCE_DIR (P1: no mixed provenance)',
       );
@@ -2090,6 +2257,41 @@ describe(
         content,
         /SANITIZER="\$SOURCE_SYNC_DIR\/scripts\/_sanitize-rules\.pl"/,
         'sanitizer rules must load from SOURCE_SYNC_DIR, not SOURCE_DIR (P1: no mixed provenance)',
+      );
+      // The canonical public site keeps its deliberate "Clowder AI" origin story, but that exemption
+      // is scoped to the product name inside _sanitize-rules.pl. Pruning the whole tree here also
+      // disabled identity, home-path, and port scrubbing for the website, and the security scan
+      // did not cover .html/.mjs/.css either — so a /home/user path exported with a clean scan.
+      assert.doesNotMatch(
+        content,
+        /-path "\$FILTERED_DIR\/site" -prune/,
+        'the public site brand exemption belongs in _sanitize-rules.pl, not a whole-tree sanitizer bypass',
+      );
+      const sanitizerRules = readFileSync(resolve(ROOT, 'scripts/_sanitize-rules.pl'), 'utf8');
+      assert.match(
+        sanitizerRules,
+        /\$is_public_site = index\(\$ARGV, "\$sanitize_root\/site\/"\) == 0/,
+        'the site exemption must be anchored to the declared export root, not any nested site/ segment',
+      );
+      assert.match(
+        content,
+        /if \[ "\$phase_label" = "final" \] && is_transform_target "\$excl"; then/,
+        'final exclusions must preserve files generated by declared manifest transforms',
+      );
+      assert.match(
+        content,
+        /assert_export_exclusions_absent "final"/,
+        'the final-tree invariant must distinguish transform targets from private source files',
+      );
+      assert.match(
+        content,
+        /node "\$SOURCE_SYNC_DIR\/scripts\/check-sync-public-delta-reconciliation-cli\.mjs"/,
+        'reconciliation decisions must run from the frozen source checkout',
+      );
+      assert.match(
+        content,
+        /"\$SOURCE_SYNC_DIR\/scripts\/append-sync-provenance-telemetry\.mjs"/,
+        'provenance telemetry must run from the frozen source checkout',
       );
     });
   },
@@ -2101,6 +2303,7 @@ describe(
   () => {
     it('resolves TARGET_DIR through a physical-path helper before safety checks', () => {
       const content = readSyncScript();
+      const membershipGuard = readFunctionBody(content, 'source_worktree_realpath_registered');
       assert.match(
         content,
         /resolve_physical_path\(\) \{[\s\S]*os\.path\.realpath\(sys\.argv\[1\]\)/,
@@ -2113,8 +2316,18 @@ describe(
       );
       assert.match(
         content,
-        /list_source_worktree_realpaths \| grep -qFx "\$RESOLVED_TARGET"/,
+        /source_worktree_realpath_registered "\$RESOLVED_TARGET"/,
         'sync script should compare TARGET_DIR against source worktrees using resolved realpaths',
+      );
+      assert.match(
+        membershipGuard,
+        /while IFS= read -r candidate_path; do[\s\S]*found=true[\s\S]*done < <\(list_source_worktree_realpaths\)[\s\S]*\[ "\$found" = true \]/m,
+        'worktree membership must consume the complete realpath stream before returning match status',
+      );
+      assert.doesNotMatch(
+        content,
+        /list_source_worktree_realpaths\s*\|\s*grep\s+-q/,
+        'grep -q closes the realpath pipeline early and becomes a false negative under pipefail',
       );
     });
 
@@ -2132,7 +2345,7 @@ describe(
       );
       assert.match(
         content,
-        /if \[ "\$DRY_RUN" = false \] && \[ "\$VALIDATE" = false \] && target_git_repo_exists "\$TARGET_DIR"; then/m,
+        /if \[ "\$PREFLIGHT" = false \] && \[ "\$DRY_RUN" = false \] && \[ "\$VALIDATE" = false \] && target_git_repo_exists "\$TARGET_DIR"; then/m,
         'real sync target gates should treat linked worktrees as valid repos',
       );
       assert.match(

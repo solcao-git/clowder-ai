@@ -65,6 +65,9 @@ export async function createA2ADispositionHarness({
   sourceCatId = 'fable5',
   crossPostSourceThreadId,
   deliveryStatus,
+  registry,
+  sourceExtra,
+  log,
 } = {}) {
   const eventLog = new MemoryEventLog();
   const projectionStore = new MemoryProjectionStore();
@@ -80,13 +83,18 @@ export async function createA2ADispositionHarness({
     threadId: 'thread-1',
     origin: 'stream',
     ...(deliveryStatus ? { deliveryStatus } : {}),
-    ...(crossPostSourceThreadId
+    ...(crossPostSourceThreadId || sourceExtra
       ? {
           extra: {
-            crossPost: {
-              sourceThreadId: crossPostSourceThreadId,
-              sourceInvocationId: 'source-invocation',
-            },
+            ...(crossPostSourceThreadId
+              ? {
+                  crossPost: {
+                    sourceThreadId: crossPostSourceThreadId,
+                    sourceInvocationId: 'source-invocation',
+                  },
+                }
+              : {}),
+            ...sourceExtra,
           },
         }
       : {}),
@@ -113,11 +121,12 @@ export async function createA2ADispositionHarness({
       }
     : ingest;
   const service = new A2ADispatchDispositionService({
-    registry: { isLatest: async (invocationId) => latest && invocationId === 'inv-1' },
+    registry: registry ?? { isLatest: async (invocationId) => latest && invocationId === 'inv-1' },
     messageStore,
     ballCustodyEventLog: eventLog,
     ballCustodyProjectionStore: projectionStore,
     ballCustody: fencedIngest,
+    ...(log ? { log } : {}),
     repairProjection: (subjectKey) => projector.rebuild(subjectKey),
     now: () => 2_000,
   });

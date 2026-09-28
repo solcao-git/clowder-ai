@@ -93,6 +93,25 @@ export const personMemoryOutcome = lazy(() =>
   }),
 );
 
+export const routingPreflightEventTotal = lazy(() =>
+  meter().createCounter('cat_cafe.routing_context.preflight.event', {
+    description: 'F293 process-scoped routing preflight health events',
+  }),
+);
+
+export const routingPreflightDuration = lazy(() =>
+  meter().createHistogram('cat_cafe.routing_context.preflight.duration', {
+    description: 'F293 routing resolver attempt duration',
+    unit: 'ms',
+  }),
+);
+
+export const routingSignalObservationTotal = lazy(() =>
+  meter().createCounter('cat_cafe.routing_context.signal_observation', {
+    description: 'F293 bounded automatic routing signal observation outcomes',
+  }),
+);
+
 export const proactiveMemoryScanTotal = lazy(() =>
   meter().createCounter('cat_cafe.proactive_memory.scan', {
     description: 'F282 canonical owner-window scans without owner or subject attributes',
@@ -149,6 +168,40 @@ export const pawFeelReconciliationLag = lazy(() =>
 export const pawFeelReconciliationUnavailable = lazy(() =>
   meter().createCounter('cat_cafe.paw_feel.reconciliation.unavailable', {
     description: 'F278 reconciliation runs that could not prove source or ledger coverage',
+  }),
+);
+
+// --- F296 B4b: continuity / final projection / delivery runtime health ---
+export const contextProjectionTransitionTotal = lazy(() =>
+  meter().createCounter('cat_cafe.context_projection.transition_total', {
+    description: 'Bounded continuity transitions observed at a final provider generation',
+  }),
+);
+
+export const contextProjectionTierCount = lazy(() =>
+  meter().createHistogram('cat_cafe.context_projection.tier_count', {
+    description: 'Mapper-selected final-generation projection count by bounded source tier',
+    unit: '{projection}',
+  }),
+);
+
+export const contextProjectionTierBytes = lazy(() =>
+  meter().createHistogram('cat_cafe.context_projection.tier_bytes', {
+    description: 'UTF-8 bytes of mapper-selected final-generation projections by bounded source tier',
+    unit: 'By',
+  }),
+);
+
+export const contextProjectionDeliveryLatency = lazy(() =>
+  meter().createHistogram('cat_cafe.context_projection.delivery_latency', {
+    description: 'Latency from final-generation construction to the provider receipt',
+    unit: 'ms',
+  }),
+);
+
+export const contextProjectionLedgerOutcomeTotal = lazy(() =>
+  meter().createCounter('cat_cafe.context_projection.ledger_outcome_total', {
+    description: 'Bounded terminal outcome after provider receipt or generation release',
   }),
 );
 
@@ -653,7 +706,8 @@ export const a2aDispatchCount = lazy(() =>
 /**
  * Counter: callback auth failures by reason / tool / cat.
  * Attributes (allowlist-filtered):
- *   - callback.reason: expired | invalid_token | unknown_invocation | missing_creds | stale_invocation
+ *   - callback.reason: invalid_token | unknown_invocation | missing_creds | stale_invocation |
+ *     completed | failed | interrupted | replaced | revoked | canceled
  *   - callback.tool: refresh-token | post-message | register-pr-tracking | retain-memory | ...
  *   - agent.id: cat that experienced the failure (omitted when unknown)
  */
@@ -730,7 +784,7 @@ export const profileUpdateProposed = lazy(() =>
   }),
 );
 
-/** Counter: profile update approved (operator → primer written). */
+/** Counter: profile update approved (operator → profile layer written). */
 export const profileUpdateApproved = lazy(() =>
   meter().createCounter('cat_cafe.profile_update.approved', {
     description: 'Profile update proposals approved and written (F231 C3 eval)',
@@ -744,24 +798,24 @@ export const profileUpdateRejected = lazy(() =>
   }),
 );
 
-/** Counter: compiled L0 contained the logical current-persona profile pointer. */
+/** Counter: compiled L0 contained a profile pointer (primer or corpus). */
 export const profilePointerEmitted = lazy(() =>
   meter().createCounter('cat_cafe.profile.pointer_emitted', {
-    description: 'Compiled L0 payloads containing the current relationship profile URI',
+    description: 'Compiled L0 payloads containing a profile pointer (primer or corpus layer)',
   }),
 );
 
-/** Counter: authenticated current-persona pointer resolved to primer content. */
+/** Counter: authenticated profile pointer resolved successfully. */
 export const profilePointerResolved = lazy(() =>
   meter().createCounter('cat_cafe.profile.pointer_resolved', {
-    description: 'Authenticated current relationship profile reads resolved successfully',
+    description: 'Authenticated profile pointer reads resolved successfully',
   }),
 );
 
-/** Counter: authenticated pointer could not resolve current-persona content. */
+/** Counter: authenticated profile pointer could not resolve content. */
 export const profilePointerMissing = lazy(() =>
   meter().createCounter('cat_cafe.profile.pointer_missing', {
-    description: 'Authenticated current relationship profile reads with no resolvable persona content',
+    description: 'Authenticated profile pointer reads with no resolvable content',
   }),
 );
 
@@ -1310,4 +1364,7 @@ export function warmupCounters(): void {
   externalCaseNoisyWakeDuringCloudReview.add(0);
   externalCaseDuplicateReviewerWakePerHead.add(0);
   externalCaseUserNudgeRequired.add(0);
+  contextProjectionTransitionTotal.add(0);
+  contextProjectionLedgerOutcomeTotal.add(0);
+  routingSignalObservationTotal.add(0);
 }

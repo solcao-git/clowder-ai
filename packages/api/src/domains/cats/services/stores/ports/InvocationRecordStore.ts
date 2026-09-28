@@ -82,7 +82,7 @@ export interface InvocationRecord {
   intent: 'execute' | 'ideate';
   status: InvocationStatus;
   /** F254: cats with an exact successful terminal event for this invocation.
-   *  Persisted atomically with the running -> succeeded transition so restart
+   *  Persisted atomically with the terminal transition, including partial failure, so restart
    *  recovery never infers per-target success from the aggregate parent status. */
   successfulCatIds?: readonly CatId[];
   /** Idempotency key (client-provided or server-generated, always present) */
@@ -136,7 +136,7 @@ export interface CreateResult {
 /** Fields that can be updated on an InvocationRecord */
 export interface UpdateInvocationInput {
   status?: InvocationStatus;
-  /** Exact successful targets. Valid only on the transition to `succeeded`. */
+  /** Exact successful targets on a succeeded or partially failed terminal. Retries skip these targets. */
   successfulCatIds?: readonly CatId[];
   userMessageId?: string | null;
   error?: string;
@@ -203,6 +203,18 @@ export interface IInvocationRecordStore {
    * 漏报会让真实 working 的 thread 被终态回落误显示成 done/error。
    */
   listRunningThreadIds(userId: string): string[] | Promise<string[]>;
+
+  /**
+   * F297 terminal witness: latest terminal record for each requested thread.
+   *
+   * Only real InvocationRecord transitions may enter this projection. Historical messages,
+   * participant activity and session-open state are not terminal evidence. Implementations
+   * may omit pre-index records; absence must render idle rather than infer a terminal state.
+   */
+  listLatestTerminalByThreadIds(
+    threadIds: readonly string[],
+    userId: string,
+  ): Map<string, InvocationRecord> | Promise<Map<string, InvocationRecord>>;
 }
 
 /** Max records in memory store */
@@ -217,6 +229,8 @@ const IDEMPOTENCY_TTL_MS = 5 * 60 * 1000;
  */
 export class InvocationRecordStore implements IInvocationRecordStore {
   private records = new Map<string, InvocationRecord>();
+  /** Latest terminal transition per (threadId,userId), matching the Redis edge-maintained pointer. */
+  private latestTerminalByScope = new Map<string, string>();
   /** Map: compositeKey → { invocationId, expiresAt } */
   private idempotencyIndex = new Map<string, { invocationId: string; expiresAt: number }>();
   private readonly maxRecords: number;
@@ -227,6 +241,10 @@ export class InvocationRecordStore implements IInvocationRecordStore {
 
   private compositeKey(threadId: string, userId: string, key: string): string {
     return `${threadId}:${userId}:${key}`;
+  }
+
+  private terminalScopeKey(threadId: string, userId: string): string {
+    return `${threadId}:${userId}`;
   }
 
   create(input: CreateInvocationInput): CreateResult {
@@ -263,6 +281,9 @@ export class InvocationRecordStore implements IInvocationRecordStore {
     if (this.records.size > this.maxRecords) {
       const firstKey = this.records.keys().next().value as string;
       this.records.delete(firstKey);
+      for (const [scope, invocationId] of this.latestTerminalByScope) {
+        if (invocationId === firstKey) this.latestTerminalByScope.delete(scope);
+      }
     }
 
     return { outcome: 'created', invocationId: id };
@@ -324,6 +345,13 @@ export class InvocationRecordStore implements IInvocationRecordStore {
     }
     record.updatedAt = Date.now();
 
+    if (input.status === 'succeeded' || input.status === 'failed' || input.status === 'canceled') {
+      this.latestTerminalByScope.set(this.terminalScopeKey(record.threadId, record.userId), record.id);
+    } else if (input.status === 'running') {
+      const scope = this.terminalScopeKey(record.threadId, record.userId);
+      if (this.latestTerminalByScope.get(scope) === record.id) this.latestTerminalByScope.delete(scope);
+    }
+
     return record;
   }
 
@@ -351,6 +379,19 @@ export class InvocationRecordStore implements IInvocationRecordStore {
     return [...threadIds];
   }
 
+  listLatestTerminalByThreadIds(threadIds: readonly string[], userId: string): Map<string, InvocationRecord> {
+    const latest = new Map<string, InvocationRecord>();
+    for (const threadId of threadIds) {
+      const invocationId = this.latestTerminalByScope.get(this.terminalScopeKey(threadId, userId));
+      if (!invocationId) continue;
+      const record = this.records.get(invocationId);
+      if (!record || record.threadId !== threadId || record.userId !== userId) continue;
+      if (record.status !== 'succeeded' && record.status !== 'failed' && record.status !== 'canceled') continue;
+      latest.set(threadId, record);
+    }
+    return latest;
+  }
+
   /** Current record count (for testing) */
   get size(): number {
     return this.records.size;
@@ -366,8 +407,10 @@ export function normalizeSuccessfulCatIds(
   input: UpdateInvocationInput,
 ): CatId[] | undefined {
   if (input.successfulCatIds === undefined) return undefined;
-  if (input.status !== 'succeeded') {
-    throw new InvalidInvocationSuccessWitnessError('successfulCatIds may only be supplied with status succeeded');
+  if (input.status !== 'succeeded' && input.status !== 'failed') {
+    throw new InvalidInvocationSuccessWitnessError(
+      'successfulCatIds may only be supplied with status succeeded or failed',
+    );
   }
   if (targetCats.length > 0 && input.successfulCatIds.length === 0) {
     throw new InvalidInvocationSuccessWitnessError('successfulCatIds must be non-empty for a targeted invocation');

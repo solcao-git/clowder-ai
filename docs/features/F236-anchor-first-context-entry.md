@@ -4,8 +4,17 @@ related_features: [F148, F209, F192]
 topics: [context-engineering, token-budget, mcp, harness]
 doc_kind: spec
 created: 2026-06-15
-tips_exempt: harness-internal anchor telemetry + eval domain — no user-visible capability change
+updated: 2026-09-10
+tips_exempt: "2026-09-10: the oversized queued-anchor repair makes the existing full-drill promise truthful but adds no new tool, action, discovery timing, or user-operable capability"
 user_journey_exempt: "Harness/internal tool-return contract for cats and eval telemetry — no end-user journey surface"
+mcp_admission_status: accepted
+mcp_admission_ref: "file:docs/features/F236-anchor-first-context-entry.md"
+mcp_admission_claims:
+  - ref: "file:docs/features/F236-anchor-first-context-entry.md"
+    toolName: cat_cafe_get_workflow_sop
+    resourceFamily: task-workflow
+    boundaryKind: progressive-disclosure
+    decision: accepted
 ---
 
 # F236: Anchor-First Context 入口 — 返回侧 token 减负
@@ -17,7 +26,7 @@ user_journey_exempt: "Harness/internal tool-return contract for cats and eval te
 ## Completion Boundary (2026-06-29)
 
 F236 core close means: **Clowder AI-owned return-side token reduction is live, cat-controlled, drillable, and eval-visible**. That scope is complete:
-- MCP collaboration readers: preview/default anchor + bounded full drill (`get_thread_context`, `get_pending_mentions`, `list_tasks`, `get_message`) — PR #2381 / #2546 / #2641.
+- MCP collaboration readers: preview/default anchor + bounded full drill (`get_thread_context`, `get_pending_mentions`, `list_tasks`, `get_message`) — PR #2381 / #2546 / #2641. The 2026-08-25 post-close repair additionally makes `get_thread_context` full collection reads aggregate-bounded and cursor-continuable without changing canonical message storage, and adds the owner-scoped `get_workflow_sop` progressive drill for oversized SOP anchors.
 - cc-native Read/Grep/Glob: `cat_cafe_set_read_mode()` controls session mode; PostToolUse hook handles Read/Grep/Glob; bounded Read is the escape hatch — PR #2552 / #2559 / #2565.
 - Eval loop: chars/volume, open-rate, adoption lens, stale flag, cc preview+drill bridge, live verdict rendering — PR #2411 / #2490 / #2507 / #2559 / #2565 / #2585 / #2641.
 - Safety boundaries: locator-not-synopsis, fail-open full mode, stale warning, Bash/WebFetch no-anchor decision — PR #2552 / #2585 + KD-7.
@@ -33,6 +42,38 @@ Close result: F236 core is done. Do not keep reopening F236 for future runtime f
 Architecture cell: harness-eval
 Map delta: none
 Why: F236 extends the existing anchor-first eval telemetry contract and callback emit sites; it does not introduce a new Store/Queue/Router/Adapter/Dispatcher/Binding.
+
+### 2026-08-25 post-close regression ownership
+
+Architecture cell: mcp-surface-governance
+Related existing cell: `dispatch`（queued/freshness custody semantics）
+Map delta: none
+Why: the repair promotes the existing tool's changed schema/description through the canonical MCP surface and preserves Dispatch's existing Queue/seen ownership; it introduces no new Store/Queue/Router/Adapter/Dispatcher/Binding.
+
+### 2026-09-10 oversized queued drill repair
+
+Architecture cell: `thread-chat-surface` + `ball-custody`
+Map delta: none
+Why: `get_message(mode=full)` becomes a consumer of the existing exact Queue exposure writer only when it
+resolves a live oversized queued anchor. `InvocationQueue`, `QueueProcessor`, and MessageStore custody CAS retain
+their existing ownership; the in-process turn-custody registry reserves its route owner across exposure commit.
+No store, queue, authority, or user-visible lifecycle is added.
+
+Canonical source: `packages/api/src/domains/cats/services/agents/invocation/QueueProcessor.ts#markPromptMessagesSeen`
+
+Consumer evidence: `rg -n "cat_cafe_get_message|handleGetMessage|/api/callbacks/get-message" packages/mcp-server/src packages/api/src`
+finds the MCP definition/handler, callback route, and anchor producer. The fresh F242 MCP graph currently returns
+zero targets for this registered legacy `defineTool`, so that extractor result is recorded as a gap rather than
+used as absence evidence.
+
+Claim guard: "an oversized persisted queued anchor is fully drillable only by its exact current invocation scope;
+every fallible custody adoption dependency is prepared before exposure, then published synchronously after the
+append-only witness commits" → callback tests `F236 regression: an oversized persisted queued anchor drills the
+exact body and binds the current child` plus `F236 queued drill rejects wrong turn scope, foreign cats, foreign
+threads, and unbound queued rows` → RED was a 404 for the advertised drill, a 200 for a hidden managed-hold exact
+read, a durable witness left by failed adoption, and missing rich blocks on live Queue reads; GREEN requires the
+complete primary + merged text/content blocks/image hints, no witness on adoption-preparation failure, a teardown-
+safe reservation, idempotent current-child exposure/adoption, and the existing owner/hidden/scope denials.
 
 ## Why
 

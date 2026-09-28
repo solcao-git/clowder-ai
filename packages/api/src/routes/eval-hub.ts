@@ -296,6 +296,9 @@ export const evalHubRoutes: FastifyPluginAsync<EvalHubRoutesOptions> = async (ap
     if (body.sourceRefs !== undefined && (typeof body.sourceRefs !== 'object' || body.sourceRefs === null)) {
       return reply.status(400).send({ error: 'sourceRefs must be an object if provided' });
     }
+    if (body.analysisFindings !== undefined && !Array.isArray(body.analysisFindings)) {
+      return reply.status(400).send({ error: 'analysisFindings must be an array if provided' });
+    }
 
     // 砚砚 R4 P1 #2 + cloud R4 P1: inject real generator (handler's default throws).
     const generator = opts.verdictGenerators?.[domainId];
@@ -316,10 +319,15 @@ export const evalHubRoutes: FastifyPluginAsync<EvalHubRoutesOptions> = async (ap
         domain: domainId,
         catId: principal.catId,
         ownerUserId: principal.userId,
+        // Invocation-authenticated sourceThreadId for provenance traceability.
+        // Only invocation principals carry threadId; agent_key principals don't.
+        // Server-side only — never read from body (prevents client forgery).
+        ...(principal.kind === 'invocation' && principal.threadId ? { sourceThreadId: principal.threadId } : {}),
         // PR-2 (砚砚 R1 Q3): sourceRefs is a discriminated union (a2a vs capability-wakeup-trial-window);
         // adapter discriminates by `kind` field. Cast through unknown — handler/adapter validate shape.
         sourceRefs: (body.sourceRefs ??
           {}) as unknown as import('../infrastructure/harness-eval/publish-verdict/types.js').VerdictSourceRefs,
+        ...(body.analysisFindings !== undefined ? { analysisFindings: body.analysisFindings } : {}),
       },
     );
 

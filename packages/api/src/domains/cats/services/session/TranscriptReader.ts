@@ -12,7 +12,7 @@ import { createReadStream } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-
+import { normalizeTranscriptEvent } from './TranscriptEventEnvelope.js';
 import { formatEventsHandoff, type HandoffInvocationSummary } from './TranscriptFormatter.js';
 
 export interface TranscriptEvent {
@@ -44,6 +44,11 @@ export interface ReadEventsHandoffResult {
   invocations: HandoffInvocationSummary[];
   nextCursor?: { eventNo: number };
   total: number;
+}
+
+export interface ScanEventsResult {
+  present: boolean;
+  eventCount: number;
 }
 
 export interface SearchHit {
@@ -113,7 +118,8 @@ export class TranscriptReader {
       if (line.trim().length === 0) continue;
       if (lineNo >= startEventNo && events.length < limit) {
         try {
-          events.push(JSON.parse(line) as TranscriptEvent);
+          const event = normalizeTranscriptEvent(JSON.parse(line));
+          if (event) events.push(event);
         } catch {
           /* skip malformed lines */
         }
@@ -313,7 +319,8 @@ export class TranscriptReader {
               if (hits.length >= limit) break;
               if (line.toLowerCase().includes(needle)) {
                 try {
-                  const evt = JSON.parse(line) as TranscriptEvent;
+                  const evt = normalizeTranscriptEvent(JSON.parse(line));
+                  if (!evt) continue;
                   hits.push({
                     score: 0.8,
                     sessionId,
@@ -367,7 +374,8 @@ export class TranscriptReader {
     for await (const line of rl) {
       if (line.trim().length === 0) continue;
       try {
-        const evt = JSON.parse(line) as TranscriptEvent;
+        const evt = normalizeTranscriptEvent(JSON.parse(line));
+        if (!evt) continue;
         if (evt.invocationId === invocationId) {
           events.push(evt);
         }
@@ -377,6 +385,48 @@ export class TranscriptReader {
     }
 
     return events.length > 0 ? events : null;
+  }
+
+  /**
+   * Visit a transcript incrementally without retaining the full JSONL payload.
+   * Consumers that aggregate across many sessions must prefer this boundary to
+   * readAllEvents(), whose returned array scales with the entire transcript.
+   */
+  async scanEvents(
+    sessionId: string,
+    threadId: string,
+    catId: string,
+    visitor: (event: TranscriptEvent) => void | Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<ScanEventsResult> {
+    signal?.throwIfAborted();
+    const jsonlPath = join(this.sessionDir(threadId, catId, sessionId), 'events.jsonl');
+
+    try {
+      await stat(jsonlPath);
+    } catch {
+      return { present: false, eventCount: 0 };
+    }
+
+    let eventCount = 0;
+    const rl = createInterface({
+      input: createReadStream(jsonlPath, { encoding: 'utf-8', signal }),
+      crlfDelay: Infinity,
+    });
+    for await (const line of rl) {
+      signal?.throwIfAborted();
+      if (line.trim().length === 0) continue;
+      let event: TranscriptEvent | undefined;
+      try {
+        event = normalizeTranscriptEvent(JSON.parse(line));
+      } catch {
+        /* skip malformed lines */
+      }
+      if (!event) continue;
+      eventCount += 1;
+      await visitor(event);
+    }
+    return { present: true, eventCount };
   }
 
   /**
@@ -422,7 +472,8 @@ export class TranscriptReader {
       signal?.throwIfAborted();
       if (line.trim().length === 0) continue;
       try {
-        events.push(JSON.parse(line) as TranscriptEvent);
+        const event = normalizeTranscriptEvent(JSON.parse(line));
+        if (event) events.push(event);
       } catch {
         /* skip malformed */
       }

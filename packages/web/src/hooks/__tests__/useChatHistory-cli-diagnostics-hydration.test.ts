@@ -9,6 +9,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ThreadChatHistoryAdmissionProvider } from '@/components/thread-chat/ThreadChatRuntimeProvider';
 import { useChatStore } from '@/stores/chatStore';
 import { apiFetch } from '@/utils/api-client';
 import { useChatHistory } from '../useChatHistory';
@@ -19,12 +20,16 @@ vi.mock('@/utils/api-client', () => ({
 
 let capturedHook: ReturnType<typeof useChatHistory> | null = null;
 
-function HookHost({ threadId }: { threadId: string }) {
+function HookProbe({ threadId }: { threadId: string }) {
   capturedHook = useChatHistory(threadId);
   return React.createElement('div', {
     ref: capturedHook.scrollContainerRef,
     style: { height: '100px', overflow: 'auto' },
   });
+}
+
+function HookHost({ threadId }: { threadId: string }) {
+  return React.createElement(ThreadChatHistoryAdmissionProvider, null, React.createElement(HookProbe, { threadId }));
 }
 
 const STORED_DIAGNOSTICS = {
@@ -104,6 +109,42 @@ describe('F212 Phase B — cold hydration restores cliDiagnostics (云端 codex 
     const messages = useChatStore.getState().messages;
     expect(messages).toHaveLength(1);
     expect(messages[0].extra?.cliDiagnostics).toEqual(STORED_DIAGNOSTICS);
+  });
+
+  it('F293 restores the exact durable routing receipt and retry source on cold history hydration', async () => {
+    const systemInfo = {
+      v: 1,
+      fallbackCatId: 'codex-astra',
+      payload: {
+        type: 'routing_preflight',
+        v: 1,
+        ownerId: 'owner',
+        observedAt: 100,
+        resolverState: 'fresh',
+        snapshotRef: 'snapshot:1',
+        sourceMessageId: 'original-1',
+        retryInvocationId: 'parent-1',
+        target: { targetCatId: 'codex-astra', disposition: 'rejected', reasons: [], alternatives: [] },
+      },
+    };
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        messages: [
+          {
+            id: 'receipt-1',
+            type: 'system',
+            content: JSON.stringify(systemInfo.payload),
+            extra: { systemInfo },
+            timestamp: 100,
+          },
+        ],
+        tasks: [],
+        hasMore: false,
+      }),
+    } as Response);
+    await act(async () => root.render(React.createElement(HookHost, { threadId: 'thread-cli-diag' })));
+    expect(useChatStore.getState().messages[0]).toMatchObject({ id: 'receipt-1', extra: { systemInfo } });
   });
 
   it('prefers extra.cliDiagnostics when both extra and metadata carry diagnostics', async () => {

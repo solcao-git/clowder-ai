@@ -1,4 +1,5 @@
-import type { CatId } from '@cat-cafe/shared';
+import { type CatId, isProviderSemanticEvent, normalizeThreadGoalObjective } from '@cat-cafe/shared';
+import { isCodexSessionReplacementProvenance } from '../../runtime-session/CodexSessionReplacementProvenance.js';
 import type { AgentMessage } from '../../types.js';
 
 export interface CodexReconnectNotice {
@@ -239,6 +240,35 @@ export function transformCodexEvent(
   if (typeof event !== 'object' || event === null) return null;
   const e = event as Record<string, unknown>;
 
+  if (e.type === 'app_server.subexecution') {
+    const semanticEvent = {
+      v: 1,
+      id: e.event_id,
+      kind: 'subexecution',
+      occurredAt: e.occurred_at,
+      stage: e.stage,
+      subexecutionId: e.subexecution_id,
+      rootExecutionId: e.root_execution_id,
+      parentExecutionId: e.parent_execution_id,
+      rootTurnId: e.root_turn_id,
+      parentTurnId: e.parent_turn_id,
+      ...(typeof e.turn_id === 'string' ? { turnId: e.turn_id } : {}),
+      agentPath: e.agent_path,
+      ...(typeof e.nickname === 'string' ? { nickname: e.nickname } : {}),
+      depth: e.depth,
+      ...(typeof e.content === 'string' ? { content: e.content } : {}),
+      ...(typeof e.message_phase === 'string' ? { messagePhase: e.message_phase } : {}),
+      provenance: { provider: 'codex', carrier: 'app_server', nativeType: 'subAgentActivity' },
+    };
+    if (!isProviderSemanticEvent(semanticEvent) || semanticEvent.kind !== 'subexecution') return null;
+    return {
+      type: 'provider_signal',
+      catId,
+      semanticEvent,
+      timestamp: semanticEvent.occurredAt,
+    };
+  }
+
   if (state) {
     if (e.type === 'turn.completed') {
       state.lastTurnTerminal = e.status === undefined || e.status === 'completed' ? 'successful' : 'non_success';
@@ -257,11 +287,95 @@ export function transformCodexEvent(
   if (e.type === 'thread.started') {
     const threadId = e.thread_id;
     if (typeof threadId !== 'string') return null;
+    const sessionReplacement = isCodexSessionReplacementProvenance(e.session_replacement)
+      ? e.session_replacement
+      : undefined;
     return {
       type: 'session_init',
       catId,
       sessionId: threadId,
+      ...(sessionReplacement ? { sessionReplacement } : {}),
       timestamp: Date.now(),
+    };
+  }
+
+  if (e.type === 'thread.goal.updated') {
+    const goal = typeof e.goal === 'object' && e.goal !== null ? (e.goal as Record<string, unknown>) : null;
+    const objective = normalizeThreadGoalObjective(goal?.objective);
+    if (
+      typeof e.thread_id !== 'string' ||
+      !goal ||
+      !objective ||
+      !isCodexGoalStatus(goal.status) ||
+      typeof goal.updatedAt !== 'number' ||
+      !Number.isFinite(goal.updatedAt)
+    ) {
+      return null;
+    }
+    return {
+      type: 'provider_signal',
+      catId,
+      nativeGoalObservation: {
+        state: 'updated',
+        runtimeSessionId: e.thread_id,
+        objective,
+        status: goal.status,
+        tokenBudget:
+          typeof goal.tokenBudget === 'number' && Number.isFinite(goal.tokenBudget) ? goal.tokenBudget : null,
+        providerUpdatedAt: goal.updatedAt,
+        source: 'codex_app_server',
+      },
+      timestamp: Date.now(),
+    };
+  }
+
+  if (e.type === 'thread.goal.cleared') {
+    if (typeof e.thread_id !== 'string') return null;
+    return {
+      type: 'provider_signal',
+      catId,
+      nativeGoalObservation: {
+        state: 'cleared',
+        runtimeSessionId: e.thread_id,
+        source: 'codex_app_server',
+      },
+      timestamp: Date.now(),
+    };
+  }
+
+  if (e.type === 'turn.plan.updated') {
+    const occurredAt = Date.now();
+    const rawPlan = Array.isArray(e.plan) ? e.plan : [];
+    const planItems = rawPlan
+      .map((entry) => {
+        if (typeof entry === 'string') return entry;
+        if (typeof entry !== 'object' || entry === null) return '';
+        const record = entry as Record<string, unknown>;
+        return typeof record.step === 'string'
+          ? record.step
+          : typeof record.text === 'string'
+            ? record.text
+            : typeof record.description === 'string'
+              ? record.description
+              : '';
+      })
+      .filter(Boolean);
+    const explanation = typeof e.explanation === 'string' ? e.explanation.trim() : '';
+    const text = explanation || planItems.join(' · ') || '计划已更新';
+    return {
+      type: 'provider_signal',
+      catId,
+      semanticEvent: {
+        v: 1,
+        id: `plan:codex:${catId}:${occurredAt}`,
+        kind: 'plan',
+        occurredAt,
+        stage: 'updated',
+        text,
+        totalItems: rawPlan.length,
+        provenance: { provider: 'codex', carrier: 'app_server', nativeType: 'turn/plan/updated' },
+      },
+      timestamp: occurredAt,
     };
   }
 
@@ -317,6 +431,8 @@ export function transformCodexEvent(
         type: 'tool_use',
         catId,
         toolName: `mcp:${server}/${tool}`,
+        toolSource: 'mcp',
+        toolChannel: 'unknown',
         toolInput: args,
         timestamp: Date.now(),
       };
@@ -331,7 +447,10 @@ export function transformCodexEvent(
       type: 'tool_use',
       catId,
       toolName: 'command_execution',
+      toolSource: 'host_cli',
+      toolChannel: 'unknown',
       toolInput: { command },
+      ...(typeof item.id === 'string' ? { toolUseId: item.id } : {}),
       timestamp: Date.now(),
     };
   }
@@ -368,6 +487,33 @@ export function transformCodexEvent(
 
   const item = e.item as Record<string, unknown> | undefined;
 
+  if (item?.type === 'reasoning') {
+    const occurredAt = Date.now();
+    const rawSummary = Array.isArray(item.summary)
+      ? item.summary
+          .map((part) =>
+            typeof part === 'string'
+              ? part
+              : typeof part === 'object' && part !== null && typeof (part as Record<string, unknown>).text === 'string'
+                ? ((part as Record<string, unknown>).text as string)
+                : '',
+          )
+          .filter(Boolean)
+          .join('\n')
+      : typeof item.text === 'string'
+        ? item.text
+        : typeof item.content === 'string'
+          ? item.content
+          : '';
+    if (!rawSummary.trim()) return null;
+    return {
+      type: 'system_info',
+      catId,
+      content: JSON.stringify({ type: 'thinking', catId, text: rawSummary.trim() }),
+      timestamp: occurredAt,
+    };
+  }
+
   if (item?.type === 'agent_message' && typeof item.text === 'string' && item.text.trim().length > 0) {
     const stripped = stripOwnTrailingTurnSignature(item.text, state?.signatureIdentity, state?.canonicalSignature);
     if (state && stripped.signature) state.observedSignature = stripped.signature;
@@ -387,6 +533,16 @@ export function transformCodexEvent(
     const status = typeof item.status === 'string' ? item.status : 'completed';
     const exitCode = typeof item.exit_code === 'number' ? item.exit_code : null;
     const output = typeof item.aggregated_output === 'string' ? item.aggregated_output : '';
+    const toolResultStatus: 'ok' | 'error' | 'unknown' =
+      exitCode !== null
+        ? exitCode === 0
+          ? 'ok'
+          : 'error'
+        : status === 'failed' || status === 'error'
+          ? 'error'
+          : status === 'completed'
+            ? 'ok'
+            : 'unknown';
 
     const sections: string[] = [];
     if (command) sections.push(`command: ${command}`);
@@ -398,7 +554,12 @@ export function transformCodexEvent(
     return {
       type: 'tool_result',
       catId,
+      toolName: 'command_execution',
+      toolSource: 'host_cli',
+      toolChannel: 'unknown',
+      toolResultStatus,
       content: sections.join('\n'),
+      ...(typeof item.id === 'string' ? { toolUseId: item.id } : {}),
       timestamp: Date.now(),
     };
   }
@@ -406,12 +567,24 @@ export function transformCodexEvent(
   if (item?.type === 'file_change') {
     const changes = Array.isArray(item.changes) ? item.changes : [];
     const status = typeof item.status === 'string' ? item.status : 'completed';
+    const occurredAt = Date.now();
     return {
       type: 'tool_use',
       catId,
       toolName: 'file_change',
+      toolSource: 'host_cli',
+      toolChannel: 'unknown',
       toolInput: { status, changes },
-      timestamp: Date.now(),
+      semanticEvent: {
+        v: 1,
+        id: `diff:codex:${typeof item.id === 'string' ? item.id : occurredAt}`,
+        kind: 'diff',
+        occurredAt,
+        stage: status === 'completed' ? 'completed' : 'updated',
+        summary: `${changes.length} 个文件变更`,
+        provenance: { provider: 'codex', carrier: 'app_server', nativeType: 'item/completed:fileChange' },
+      },
+      timestamp: occurredAt,
     };
   }
 
@@ -460,6 +633,8 @@ export function transformCodexEvent(
       catId,
       content: `${toolLabel} (${status})\n${visibleTextParts.join('\n')}`.trim(),
       toolName: toolLabel,
+      toolSource: 'mcp',
+      toolChannel: 'unknown',
       toolResultStatus,
       ...(approvalFailure ? { toolResultErrorCode: approvalFailure.reasonCode } : {}),
       timestamp: Date.now(),
@@ -515,16 +690,6 @@ export function transformCodexEvent(
     };
   }
 
-  // F045: reasoning → system_info(thinking)
-  if (item?.type === 'reasoning' && typeof item.text === 'string' && item.text.length > 0) {
-    return {
-      type: 'system_info',
-      catId,
-      content: JSON.stringify({ type: 'thinking', catId, text: item.text }),
-      timestamp: Date.now(),
-    };
-  }
-
   // F045: item-level error → system_info(warning)
   if (item?.type === 'error' && typeof item.message === 'string') {
     return {
@@ -536,4 +701,8 @@ export function transformCodexEvent(
   }
 
   return null;
+}
+
+function isCodexGoalStatus(value: unknown): value is import('../../types.js').ProviderNativeGoalStatus {
+  return ['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete'].includes(String(value));
 }

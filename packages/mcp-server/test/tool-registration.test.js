@@ -2,15 +2,16 @@
  * MCP Tool Registration Tests
  * 回归测试: 确认所有预期工具都注册到 MCP server
  *
- * 背景: request_permission / check_permission_status 的 handler 和 schema
- * 早就存在，但 createServer() 漏了 server.tool() 注册。
- * 本测试守住"注册层"，修复前会 Red，修复后 Green。
+ * 本测试守住 canonical registry 与 SDK 注册层的一致性。
  */
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, test } from 'node:test';
+import { useInvocationAuth } from './helpers/invocation-auth.js';
 
 const { CANONICAL_TOOL_REGISTRY } = await import('../dist/server-toolsets.js');
 
@@ -93,15 +94,11 @@ describe('MCP Server Tool Registration', () => {
     );
   });
 
-  test('permission tools have correct input schemas', async () => {
-    const { createServer } = await import('../dist/index.js');
-    const server = createServer();
-
-    const reqTool = server._registeredTools.cat_cafe_request_permission;
-    assert.ok(reqTool, 'request_permission tool should exist');
-
-    const checkTool = server._registeredTools.cat_cafe_check_permission_status;
-    assert.ok(checkTool, 'check_permission_status tool should exist');
+  test('legacy generic permission family is absent', () => {
+    assert.deepEqual(
+      CANONICAL_TOOL_REGISTRY.filter((definition) => definition.resourceFamily === 'permission'),
+      [],
+    );
   });
 
   test('get_thread_context description exposes bounded keyword completeness contract', async () => {
@@ -117,6 +114,12 @@ describe('MCP Server Tool Registration', () => {
     assert.match(threadContextTool.description, /best-effort over a bounded recent scan/);
     assert.match(threadContextTool.description, /scanCapped=true/);
     assert.match(threadContextTool.description, /older history may contain additional matches/);
+    assert.match(threadContextTool.description, /bounded aggregate envelope/);
+    assert.match(threadContextTool.description, /hasMore/);
+    assert.match(threadContextTool.description, /nextCursor/);
+    assert.match(threadContextTool.description, /single item larger/);
+    assert.match(threadContextTool.description, /oversized workflow SOP/);
+    assert.match(threadContextTool.description, /cat_cafe_get_workflow_sop/);
   });
 
   // F167 Phase P fix: hold_ball description must steer "等人" to @co-creator/@cat, NOT hold_ball,
@@ -155,7 +158,8 @@ describe('MCP Server Tool Registration', () => {
     );
   });
 
-  test('structured action descriptions expose the canonical subjectRef grammar (F177 production friction)', async () => {
+  test('invocation action descriptions expose the canonical subjectRef grammar (F177 production friction)', async (t) => {
+    useInvocationAuth(t);
     const { createServer } = await import('../dist/index.js');
     const server = createServer();
 
@@ -181,6 +185,17 @@ describe('MCP Server Tool Registration', () => {
     assert.ok(contextTool.inputSchema._def.shape().agentKeyCatId.isOptional());
     assert.ok(Object.keys(listTool.inputSchema.shape).includes('agentKeyCatId'));
     assert.ok(listTool.inputSchema._def.shape().agentKeyCatId.isOptional());
+  });
+
+  test('workflow-SOP drill is callable with callback or agent-key thread identity', async () => {
+    const { createServer } = await import('../dist/index.js');
+    const tool = createServer()._registeredTools.cat_cafe_get_workflow_sop;
+    assert.ok(tool, 'get_workflow_sop tool should exist');
+    const shape = tool.inputSchema._def.shape();
+    assert.equal(shape.threadId.isOptional(), true);
+    assert.equal(shape.agentKeyCatId.isOptional(), true);
+    assert.match(tool.description, /cat_cafe_get_thread_context/);
+    assert.match(tool.description, /resume capsule/i);
   });
 
   test('thread-context description does not discourage the full contiguous freshness path', async () => {
@@ -253,15 +268,12 @@ describe('MCP Server Tool Registration', () => {
     const agentKeyUnsafeTools = [
       'cat_cafe_get_pending_mentions',
       'cat_cafe_ack_mentions',
-      'cat_cafe_get_thread_cats',
       'cat_cafe_feat_index',
       'cat_cafe_list_tasks',
       'cat_cafe_update_task',
       'cat_cafe_create_task',
       'cat_cafe_create_rich_block',
       'cat_cafe_generate_document',
-      'cat_cafe_request_permission',
-      'cat_cafe_check_permission_status',
       'cat_cafe_register_pr_tracking',
       'cat_cafe_register_issue_tracking',
       'cat_cafe_community_await_external',
@@ -273,6 +285,7 @@ describe('MCP Server Tool Registration', () => {
       'cat_cafe_propose_session_handoff',
       'cat_cafe_propose_profile_update',
       'cat_cafe_propose_taste',
+      'cat_cafe_propose_eval_repair',
       'cat_cafe_update_bootcamp_state',
       'cat_cafe_bootcamp_env_check',
       'cat_cafe_update_guide_state',
@@ -294,10 +307,17 @@ describe('MCP Server Tool Registration', () => {
   test('agent-key collab allowlist is the route-principal-backed surface', async () => {
     const { AGENT_KEY_TOOLS } = await import('../dist/server-toolsets.js');
     const expected = [
+      'cat_cafe_advance_evolution_program_change',
       'cat_cafe_backfill_events',
+      'cat_cafe_census_legacy_paw_feel_blockers',
       'cat_cafe_cross_post_message',
+      'cat_cafe_get_evolution_program',
       'cat_cafe_get_message',
+      'cat_cafe_get_thread_cats',
       'cat_cafe_get_thread_context',
+      'cat_cafe_get_workflow_sop',
+      'cat_cafe_link_evolution_program_observation',
+      'cat_cafe_link_paw_feel_repair_outcome',
       'cat_cafe_list_events',
       'cat_cafe_list_labels',
       'cat_cafe_list_paw_feel_inbox',
@@ -305,23 +325,39 @@ describe('MCP Server Tool Registration', () => {
       'cat_cafe_list_threads',
       'cat_cafe_post_message',
       'cat_cafe_preview_open',
+      'cat_cafe_offer_custody',
       'cat_cafe_preview_scheduled_task',
       'cat_cafe_publish_verdict',
       'cat_cafe_record_eval_lifecycle',
       'cat_cafe_read_diary',
+      'cat_cafe_read_meeting_artifact',
       'cat_cafe_read_profile',
+      'cat_cafe_read_entrusted_work',
       'cat_cafe_list_diaries',
       'cat_cafe_get_person_memory_proposal_status',
+      'cat_cafe_issue_capability_evolution_measurement',
       'cat_cafe_recall_person_relationship',
       'cat_cafe_drill_person_memory',
       'cat_cafe_register_external_runtime_session',
       'cat_cafe_community_request_guardian',
       'cat_cafe_community_guardian_signoff',
+      'cat_cafe_constitute_evolution_program',
+      'cat_cafe_open_evolution_round',
+      'cat_cafe_record_evolution_evaluation',
       'cat_cafe_register_scheduled_task',
       'cat_cafe_remove_scheduled_task',
+      'cat_cafe_retry_custody_admission',
+      'cat_cafe_start_evolution_program',
       'cat_cafe_teleport',
       'cat_cafe_triage_paw_feel',
+      'cat_cafe_update_evolution_program',
       'cat_cafe_workspace_navigate',
+      'cat_cafe_inspect_office_document',
+      'cat_cafe_read_artifact_review',
+      'cat_cafe_prepare_artifact_review',
+      'cat_cafe_act_artifact_review',
+      'cat_cafe_respond_artifact_review',
+      'cat_cafe_edit_office_document',
     ];
 
     assert.deepEqual([...AGENT_KEY_TOOLS].sort(), expected.sort());
@@ -343,6 +379,21 @@ describe('MCP Server Tool Registration', () => {
     }
 
     assert.deepEqual(offenders, []);
+  });
+
+  test('eval repair proposal is a canonical callback-only resource entry', async () => {
+    const { CANONICAL_TOOL_REGISTRY, AGENT_KEY_TOOLS } = await import('../dist/server-toolsets.js');
+    const definition = CANONICAL_TOOL_REGISTRY.find((candidate) => candidate.name === 'cat_cafe_propose_eval_repair');
+
+    assert.ok(definition);
+    assert.equal(definition.policy.activeState, 'canonical');
+    assert.deepEqual(definition.policy.runtimeProfiles, ['full']);
+    assert.deepEqual(definition.policy.standaloneReason, {
+      disposition: 'accepted-boundary',
+      kind: 'resource-entry',
+      admissionRef: 'file:docs/features/F313-analysis-to-outcome-closure-command.md',
+    });
+    assert.equal(AGENT_KEY_TOOLS.has(definition.name), false);
   });
 
   test('deprecated file tools are not registered', async () => {
@@ -445,7 +496,9 @@ describe('F061 READONLY_ALLOWED_TOOLS whitelist', () => {
 
   test('readonly + agent-key exposes only readonly, principal-capable, or non-callback-safe collab tools', async () => {
     const { buildCollabTools } = await import('../dist/server-toolsets.js');
-    const agentKeyNames = new Set(buildCollabTools({ readonly: true, hasAgentKey: true }).map((tool) => tool.name));
+    const agentKeyNames = new Set(
+      buildCollabTools({ readonly: true, hasAgentKey: true, agentKeyUnion: true }).map((tool) => tool.name),
+    );
     const expected = CANONICAL_TOOL_REGISTRY.filter(
       (definition) =>
         definition.serverFamily === 'collab' &&
@@ -459,10 +512,14 @@ describe('F061 READONLY_ALLOWED_TOOLS whitelist', () => {
     assert.deepEqual([...agentKeyNames].filter((name) => name.startsWith('cat_cafe_')).sort(), expected);
   });
 
-  test('readonly mode exposes agent-key tools when only CAT_CAFE_AGENT_KEY_FILES is configured', () => {
+  test('readonly mode with only CAT_CAFE_AGENT_KEY_FILES configured is STRICT (no write leak)', () => {
     const distIndexUrl = new URL('../dist/index.js', import.meta.url).href;
     const script = `
       process.env.CAT_CAFE_READONLY = 'true';
+      delete process.env.CAT_CAFE_INVOCATION_ID;
+      delete process.env.CAT_CAFE_CALLBACK_TOKEN;
+      delete process.env.CAT_CAFE_CREDENTIAL_FILE;
+      delete process.env.CAT_CAFE_DESKTOP_MODE;
       delete process.env.CAT_CAFE_AGENT_KEY_SECRET;
       delete process.env.CAT_CAFE_AGENT_KEY_FILE;
       process.env.CAT_CAFE_AGENT_KEY_FILES = JSON.stringify({
@@ -473,7 +530,61 @@ describe('F061 READONLY_ALLOWED_TOOLS whitelist', () => {
       const server = createServer();
       const names = Object.keys(server._registeredTools);
       if (
+        // agent-key write tools must not leak into a strict readonly mount
+        names.includes('cat_cafe_post_message') ||
+        names.includes('cat_cafe_cross_post_message') ||
+        names.includes('cat_cafe_workspace_navigate') ||
+        names.includes('cat_cafe_preview_open') ||
+        names.includes('cat_cafe_teleport') ||
+        names.includes('cat_cafe_register_scheduled_task') ||
+        names.includes('cat_cafe_remove_scheduled_task') ||
+        names.includes('cat_cafe_publish_verdict') ||
+        names.includes('cat_cafe_backfill_events') ||
+        // agent-key-only read tools are also outside the strict readonly allowlist
+        names.includes('cat_cafe_get_thread_context') ||
+        names.includes('cat_cafe_list_schedule_templates') ||
+        names.includes('cat_cafe_preview_scheduled_task') ||
+        // strict readonly core must remain
+        !names.includes('cat_cafe_get_rich_block_rules') ||
+        !names.includes('cat_cafe_search_evidence') ||
+        !names.includes('cat_cafe_shell_exec') ||
+        !names.includes('cat_cafe_graph_resolve')
+      ) {
+        console.error(JSON.stringify(names.sort()));
+        process.exit(1);
+      }
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  });
+
+  test('readonly mode exposes agent-key tools with explicit CAT_CAFE_READONLY_AGENT_KEY_UNION opt-in', () => {
+    const distIndexUrl = new URL('../dist/index.js', import.meta.url).href;
+    // #1494: the union needs USABLE credentials — fake /tmp paths no longer
+    // count, so hand the subprocess real sidecar files.
+    const keyDir = mkdtempSync(join(tmpdir(), 'tool-registration-agent-key-'));
+    const antigravityKey = join(keyDir, 'antigravity.secret');
+    const opusKey = join(keyDir, 'antig-opus.secret');
+    writeFileSync(antigravityKey, 'agent-key-material\n', 'utf-8');
+    writeFileSync(opusKey, 'agent-key-material\n', 'utf-8');
+    const script = `
+      process.env.CAT_CAFE_READONLY = 'true';
+      process.env.CAT_CAFE_READONLY_AGENT_KEY_UNION = 'true';
+      delete process.env.CAT_CAFE_AGENT_KEY_SECRET;
+      delete process.env.CAT_CAFE_AGENT_KEY_FILE;
+      process.env.CAT_CAFE_AGENT_KEY_FILES = JSON.stringify({
+        antigravity: ${JSON.stringify(antigravityKey)},
+        'antig-opus': ${JSON.stringify(opusKey)},
+      });
+      const { createServer } = await import(${JSON.stringify(distIndexUrl)});
+      const server = createServer();
+      const names = Object.keys(server._registeredTools);
+      if (
         !names.includes('cat_cafe_post_message') ||
+        !names.includes('cat_cafe_get_thread_cats') ||
         !names.includes('cat_cafe_get_thread_context') ||
         !names.includes('cat_cafe_workspace_navigate') ||
         !names.includes('cat_cafe_preview_open') ||
@@ -484,7 +595,6 @@ describe('F061 READONLY_ALLOWED_TOOLS whitelist', () => {
         !names.includes('cat_cafe_register_scheduled_task') ||
         !names.includes('cat_cafe_remove_scheduled_task') ||
         names.includes('cat_cafe_create_rich_block') ||
-        names.includes('cat_cafe_get_thread_cats') ||
         names.includes('cat_cafe_list_tasks') ||
         names.includes('cat_cafe_multi_mention') ||
         names.includes('cat_cafe_hold_ball') ||
@@ -493,6 +603,80 @@ describe('F061 READONLY_ALLOWED_TOOLS whitelist', () => {
         names.includes('cat_cafe_submit_game_action') ||
         // 砚砚 R9 P1: shared-MCP cats must see publish-verdict
         !names.includes('cat_cafe_publish_verdict')
+      ) {
+        console.error(JSON.stringify(names.sort()));
+        process.exit(1);
+      }
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+    rmSync(keyDir, { recursive: true, force: true });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  });
+
+  test('readonly + opt-in + unusable BOUND identity stays strict (real stdio entry surface)', () => {
+    const distIndexUrl = new URL('../dist/index.js', import.meta.url).href;
+    // #1494 round 2: the bound identity's map entry is missing, so the union
+    // must not fire even with an explicit opt-in and an unrelated readable
+    // sidecar in the variant map.
+    const keyDir = mkdtempSync(join(tmpdir(), 'tool-registration-agent-key-'));
+    const antigravityKey = join(keyDir, 'antigravity.secret');
+    writeFileSync(antigravityKey, 'agent-key-material\n', 'utf-8');
+    const script = `
+      process.env.CAT_CAFE_READONLY = 'true';
+      process.env.CAT_CAFE_READONLY_AGENT_KEY_UNION = 'true';
+      process.env.CAT_CAFE_AGENT_KEY_BOUND_CAT_ID = 'gpt-pro';
+      delete process.env.CAT_CAFE_AGENT_KEY_SECRET;
+      delete process.env.CAT_CAFE_AGENT_KEY_FILE;
+      process.env.CAT_CAFE_AGENT_KEY_FILES = JSON.stringify({ antigravity: ${JSON.stringify(antigravityKey)} });
+      const { createServer } = await import(${JSON.stringify(distIndexUrl)});
+      const server = createServer();
+      const names = Object.keys(server._registeredTools);
+      if (
+        !names.includes('cat_cafe_search_evidence') ||
+        names.includes('cat_cafe_post_message') ||
+        names.includes('cat_cafe_cross_post_message') ||
+        names.includes('cat_cafe_teleport') ||
+        names.includes('cat_cafe_register_scheduled_task') ||
+        names.includes('cat_cafe_remove_scheduled_task') ||
+        names.includes('cat_cafe_publish_verdict')
+      ) {
+        console.error(JSON.stringify(names.sort()));
+        process.exit(1);
+      }
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+    rmSync(keyDir, { recursive: true, force: true });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  });
+
+  test('readonly + opt-in + blank SECRET stays strict (real stdio entry surface)', () => {
+    const distIndexUrl = new URL('../dist/index.js', import.meta.url).href;
+    // #1494 round 3: a whitespace-only secret is no material — the union must
+    // not fire even with an explicit opt-in, so the entry stays strict.
+    const script = `
+      process.env.CAT_CAFE_READONLY = 'true';
+      process.env.CAT_CAFE_READONLY_AGENT_KEY_UNION = 'true';
+      process.env.CAT_CAFE_AGENT_KEY_SECRET = '   ';
+      delete process.env.CAT_CAFE_AGENT_KEY_FILE;
+      delete process.env.CAT_CAFE_AGENT_KEY_FILES;
+      delete process.env.CAT_CAFE_AGENT_KEY_BOUND_CAT_ID;
+      const { createServer } = await import(${JSON.stringify(distIndexUrl)});
+      const server = createServer();
+      const names = Object.keys(server._registeredTools);
+      if (
+        !names.includes('cat_cafe_search_evidence') ||
+        names.includes('cat_cafe_post_message') ||
+        names.includes('cat_cafe_cross_post_message') ||
+        names.includes('cat_cafe_teleport') ||
+        names.includes('cat_cafe_register_scheduled_task') ||
+        names.includes('cat_cafe_remove_scheduled_task') ||
+        names.includes('cat_cafe_publish_verdict')
       ) {
         console.error(JSON.stringify(names.sort()));
         process.exit(1);

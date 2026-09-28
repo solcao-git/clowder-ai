@@ -1,11 +1,13 @@
 /**
  * Queue Management API Routes (F39)
+ * Architecture cell: dispatch
  *
  * GET    /api/threads/:threadId/queue               → 列出队列条目
  * DELETE /api/threads/:threadId/queue/:entryId       → 撤回条目
  * POST   /api/threads/:threadId/queue/next          → 手动触发处理下一条
  * POST   /api/threads/:threadId/queue/steer-batch   → #1291 exact ordinary-user Batch Steer
  * POST   /api/threads/:threadId/queue/:entryId/steer → Steer queued entry（取消当前轮并以同一消息立即启动）
+ * POST   /api/threads/:threadId/queue/:entryId/targets/:targetCatId/retry → Retry one failed target
  * PATCH  /api/threads/:threadId/queue/:entryId/move → 重排序（上移/下移）
  * PATCH  /api/threads/:threadId/queue/reorder       → F175: 批量设置 position（拖拽重排）
  * DELETE /api/threads/:threadId/queue               → 清空队列
@@ -16,6 +18,8 @@ import { randomUUID } from 'node:crypto';
 import type { CatId, FreshnessCarrierCapability } from '@cat-cafe/shared';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import type { WaitContinuationRetryCommitter } from '../domains/ball-custody/WaitContinuationRetryCommitter.js';
+import type { WaitContinuationRetryPreflight } from '../domains/ball-custody/WaitContinuationRetryPreflight.js';
 import {
   type AgentSessionMutexLike,
   agentSessionMutex,
@@ -28,9 +32,14 @@ import {
 } from '../domains/cats/services/agents/invocation/active-execution-service.js';
 import {
   type InvocationQueue,
+  isOrdinaryQueueTargetEligible,
   isSystemPinnedQueueEntry,
   type QueueEntry,
 } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
+import {
+  canSteerQueueSources,
+  readQueueCarrierMessages,
+} from '../domains/cats/services/agents/invocation/QueueCarrierSourceProjection.js';
 import type { QueuedMessageCustodyCoordinator } from '../domains/cats/services/agents/invocation/QueuedMessageCustodyCoordinator.js';
 import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
 import type { IDraftStore } from '../domains/cats/services/stores/ports/DraftStore.js';
@@ -41,7 +50,12 @@ import type { ITurnExecutionStore } from '../domains/cats/services/stores/ports/
 import type { DynamicTaskStore } from '../infrastructure/scheduler/DynamicTaskStore.js';
 import { buildCancelMessages, type SocketManager } from '../infrastructure/websocket/index.js';
 import type { CliExecutionOwnerService, LiveCliExecutionOwner } from '../utils/cli-process-ownership.js';
-import { emitQueueUpdated, enrichQueueEntries, projectPublicQueueEntry } from '../utils/queue-enrichment.js';
+import {
+  emitQueueUpdated,
+  enrichQueueEntries,
+  projectPublicQueueEntry,
+  resolveDurableRetryAttemptId,
+} from '../utils/queue-enrichment.js';
 import { resolveUserId } from '../utils/request-identity.js';
 import { type LiveExecutionCandidate, registerActiveExecutionRoutes } from './active-execution-routes.js';
 import { getMultiMentionOrchestrator } from './callback-multi-mention-routes.js';
@@ -67,6 +81,9 @@ export interface QueueRoutesOptions {
   socketManager: SocketManager;
   /** MessageStore supplies receipt hydration; Queue withdrawal never deletes author history. */
   messageStore?: IMessageStore;
+  /** Canonical authority guards shared with the message-bound Retry route. */
+  retryAuthorityPreflight?: Pick<WaitContinuationRetryPreflight, 'preflight'>;
+  retryAuthorityCommitter?: Pick<WaitContinuationRetryCommitter, 'commit'>;
   /** F254: persist reorder/promote mutations before acknowledging them. */
   queueCustodyCoordinator?: QueuedMessageCustodyCoordinator;
   /** F194 Phase B: canonical liveness read sources (record + draft). When omitted,
@@ -136,6 +153,7 @@ function projectCanonicalLiveCandidate(
   const trackerExecutionId = tracker.getExecutionId?.(threadId, candidate.catId);
   return {
     ...candidate,
+    ...(candidate.turnInvocationId ? { invocationId: candidate.turnInvocationId } : {}),
     ownerUserId,
     controlSource: candidate.executionId && trackerExecutionId === candidate.executionId ? 'tracker' : 'unavailable',
   };
@@ -254,6 +272,12 @@ const remindBodySchema = z
   })
   .strict();
 
+const retryTargetBodySchema = z
+  .object({
+    recoveryActionId: z.string().min(1),
+  })
+  .strict();
+
 type ReminderRequestResolution =
   | {
       ok: true;
@@ -353,6 +377,16 @@ export const queueRoutes: FastifyPluginAsync<QueueRoutesOptions> = async (app, o
     for (const entryId of new Set(entryIds)) {
       const entry = invocationQueue.getEntrySnapshot(threadId, userId, entryId);
       if (entry) await opts.queueCustodyCoordinator.persistEntry(entry);
+    }
+  };
+
+  const validateSteerSources = async (threadId: string, userId: string, entryIds: readonly string[], catId: string) => {
+    if (!messageStore) return;
+    for (const entryId of entryIds) {
+      const entry = invocationQueue.getEntrySnapshot(threadId, userId, entryId);
+      if (!entry || !canSteerQueueSources(entry, await readQueueCarrierMessages(entry, messageStore), catId)) {
+        throw new Error(`Steer source is no longer executable: ${entryId}/${catId}`);
+      }
     }
   };
 
@@ -747,6 +781,121 @@ export const queueRoutes: FastifyPluginAsync<QueueRoutesOptions> = async (app, o
     },
   );
 
+  // POST /api/threads/:threadId/queue/:entryId/targets/:targetCatId/retry
+  // The Queue row owns the action identity. Message-backed work delegates the
+  // mutation to durable custody; message-less A2A uses the same exact Queue
+  // failure fence without inventing another store.
+  app.post<{
+    Params: { threadId: string; entryId: string; targetCatId: string };
+    Body: { recoveryActionId?: unknown };
+  }>('/api/threads/:threadId/queue/:entryId/targets/:targetCatId/retry', async (request, reply) => {
+    const { threadId, entryId, targetCatId } = request.params;
+    const guard = await guardThreadOwnership(request, reply, threadStore, threadId);
+    if (!guard) return;
+    const parsed = retryTargetBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.status(400);
+      return { error: 'Invalid body', details: parsed.error.issues };
+    }
+
+    const entry = invocationQueue.getEntrySnapshot(threadId, guard.userId, entryId);
+    const expectedAction = entry
+      ? projectPublicQueueEntry(entry).recoveryActions.find(
+          (action) => action.kind === 'retry_target' && action.targetCatId === targetCatId,
+        )
+      : undefined;
+    if (!entry || expectedAction?.id !== parsed.data.recoveryActionId) {
+      reply.status(409);
+      return { error: 'This target is no longer retryable', code: 'QUEUE_TARGET_NOT_RETRYABLE' };
+    }
+
+    const messageIds = queueEntryMessageIds(entry);
+    if (messageIds.length === 0) {
+      const result = await queueProcessor.retryFailedTargetWithoutCustody(
+        threadId,
+        guard.userId,
+        entryId,
+        targetCatId,
+        parsed.data.recoveryActionId,
+      );
+      if (result.outcome !== 'retried') {
+        reply.status(409);
+        return { error: 'This target is no longer retryable', code: 'QUEUE_TARGET_NOT_RETRYABLE' };
+      }
+      reply.status(202);
+      return { status: 'retry_queued', entryId, targetCatId, attemptId: result.attemptId };
+    }
+
+    const retryAuthorityPreflight = opts.retryAuthorityPreflight;
+    const retryAuthorityCommitter = opts.retryAuthorityCommitter;
+    if (!messageStore || !retryAuthorityPreflight || !retryAuthorityCommitter) {
+      reply.status(503);
+      return { error: 'Queue retry is temporarily unavailable', code: 'QUEUE_RETRY_UNAVAILABLE' };
+    }
+    let authorityMessage: Awaited<ReturnType<IMessageStore['getById']>> | null = null;
+    let expectedAttemptId: string | undefined;
+    for (const messageId of messageIds) {
+      const message = await messageStore.getById(messageId);
+      if (!message || message.userId !== guard.userId || !message.queueCustody) continue;
+      const attemptId = resolveDurableRetryAttemptId(entry, message, targetCatId);
+      if (!attemptId) continue;
+      authorityMessage = message;
+      expectedAttemptId = attemptId;
+      break;
+    }
+    if (!authorityMessage || !expectedAttemptId) {
+      reply.status(409);
+      return { error: 'This target is no longer retryable', code: 'QUEUE_TARGET_NOT_RETRYABLE' };
+    }
+    const authorityMessageId = authorityMessage.id;
+
+    const authority = await retryAuthorityPreflight.preflight({
+      message: authorityMessage,
+      requestingUserId: guard.userId,
+      targetCatId,
+    });
+    if (!authority.ok) {
+      reply.status(409);
+      return {
+        error: 'This target no longer has current retry authority',
+        code: 'QUEUE_RETRY_AUTHORITY_STALE',
+        reason: authority.reason,
+      };
+    }
+    const result = await queueProcessor.retryFailedTarget(
+      threadId,
+      guard.userId,
+      entryId,
+      targetCatId,
+      expectedAttemptId,
+      (transitions) =>
+        retryAuthorityCommitter.commit({
+          authorityMessageId,
+          requestingUserId: guard.userId,
+          targetCatId,
+          transitions,
+        }),
+    );
+    if (result.outcome === 'unavailable') {
+      reply.status(503);
+      return { error: 'Queue retry is temporarily unavailable', code: 'QUEUE_RETRY_UNAVAILABLE' };
+    }
+    if (result.outcome === 'authority_stale') {
+      reply.status(409);
+      return {
+        error: 'This target no longer has current retry authority',
+        code: 'QUEUE_RETRY_AUTHORITY_STALE',
+        reason: result.reason,
+      };
+    }
+    if (result.outcome !== 'retried') {
+      reply.status(409);
+      return { error: 'This target is no longer retryable', code: 'QUEUE_TARGET_NOT_RETRYABLE' };
+    }
+    reply.status(202);
+    return { status: 'retry_queued', entryId, targetCatId, attemptId: result.attemptId };
+  });
+
   // POST /api/threads/:threadId/queue/steer-batch
   app.post<{ Params: { threadId: string } }>('/api/threads/:threadId/queue/steer-batch', async (request, reply) => {
     const { threadId } = request.params;
@@ -797,7 +946,9 @@ export const queueRoutes: FastifyPluginAsync<QueueRoutesOptions> = async (app, o
     };
 
     try {
+      await validateSteerSources(threadId, guard.userId, reserved.entryIds, reserved.targetCatId);
       await persistQueueEntries(threadId, guard.userId, reserved.entryIds);
+      await validateSteerSources(threadId, guard.userId, reserved.entryIds, reserved.targetCatId);
     } catch (err) {
       await releaseReservation();
       request.log.error(
@@ -915,7 +1066,11 @@ export const queueRoutes: FastifyPluginAsync<QueueRoutesOptions> = async (app, o
       // Steer has exactly one meaning: cancel the current target invocation and
       // immediately start this same durable queue entry. Reordering remains a
       // separate drag/move interaction and is never accepted as a Steer mode.
-      const steerCatId = entry.targetCats[0] ?? 'unknown';
+      const steerCatId = entry.targetCats.find((catId) => isOrdinaryQueueTargetEligible(entry, catId));
+      if (!steerCatId) {
+        reply.status(409);
+        return { error: 'Steer 状态已变化，请重试', code: 'STEER_STATE_CHANGED' };
+      }
       // Reserve the entry BEFORE preempting. Preemption cancels a running turn;
       // doing it first meant a losing CAS returned STEER_STATE_CHANGED *after*
       // the user's turn was already killed — they lost the work and did not get
@@ -944,7 +1099,9 @@ export const queueRoutes: FastifyPluginAsync<QueueRoutesOptions> = async (app, o
         }
       };
       try {
+        await validateSteerSources(threadId, guard.userId, [entryId], steerCatId);
         await persistQueueEntries(threadId, guard.userId, [entryId]);
+        await validateSteerSources(threadId, guard.userId, [entryId], steerCatId);
       } catch (err) {
         await releaseSteerReservation();
         request.log.error({ err, threadId, entryId }, 'Failed to persist exact Steer reservation before preemption');
@@ -1334,6 +1491,32 @@ export const queueRoutes: FastifyPluginAsync<QueueRoutesOptions> = async (app, o
       executionIds: [],
       executionIdByCatId: {},
     };
+    // The Queue reservation is canonical pre-start ownership. Tracker, record,
+    // and session-lock rows are only secondary witnesses and may all still be
+    // absent in the create→startAll window. Install exact retirement barriers
+    // before this route performs another await, then close the durable group.
+    const prestartRetirement = await queueProcessor.retireThreadPrestartProcessingGroups(threadId, guard.userId);
+    if (prestartRetirement.outcome === 'terminalization_failed') {
+      reply.status(503);
+      return {
+        error: '启动中的队列条目未能写入持久终态，请重试',
+        code: 'PRESTART_TERMINALIZATION_FAILED',
+      };
+    }
+    if (prestartRetirement.outcome === 'state_changed') {
+      reply.status(409);
+      return { error: '启动中的队列状态已变化，请重试', code: 'PRESTART_STATE_CHANGED' };
+    }
+    if (prestartRetirement.retiredCatIds.length > 0) {
+      await emitQueueUpdated(
+        socketManager,
+        guard.userId,
+        threadId,
+        invocationQueue.list(threadId, guard.userId),
+        messageStore,
+        'force_reset',
+      );
+    }
     const managedWakeRetirement = await opts
       .getManagedCommandWakeRecovery?.()
       ?.retireThread(threadId, guard.userId, 'force_reset');
@@ -1379,13 +1562,12 @@ export const queueRoutes: FastifyPluginAsync<QueueRoutesOptions> = async (app, o
     }
 
     // 2+3. Collect EVERY user-owned cat whose processingSlot may still pin hasActiveExecution:
-    //    cancelledCatIds (tracker slots just aborted) ∪ running records' targetCats. The latter
-    //    covers the STALE case codex flagged — when the tracker slot is already gone (so cancelAll
-    //    returned []) but the processingSlot + running record persist, force-reset must still
-    //    release that orphan processingSlot or hasActiveExecution stays true until TTL.
+    //    cancelledCatIds (tracker slots just aborted) ∪ pre-start reservation owners ∪ running
+    //    records' targetCats. The latter two cover both recordless and recorded stale slots after
+    //    the tracker slot is gone, so force-reset does not leave hasActiveExecution pinned until TTL.
     //    Sources are guard.userId-scoped, but QueueProcessor slots are not; the final owner check
     //    below prevents a stale source from colliding with a newer foreign tracker slot.
-    const slotsToRelease = new Set<string>(cancelledCatIds);
+    const slotsToRelease = new Set<string>([...cancelledCatIds, ...prestartRetirement.retiredCatIds]);
     let canceledRecords = 0;
     if (opts.invocationRecordStore) {
       const runningRecords = await opts.invocationRecordStore.listRunningByThread(threadId, guard.userId);

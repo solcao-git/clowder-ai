@@ -10,17 +10,24 @@ export interface L0CacheGeneration {
 function computeProfileContentSignature(profileDir: string): string | null {
   if (!existsSync(profileDir)) return 'missing';
   const entries: string[] = [];
-  const capsulePath = resolve(profileDir, 'landy-capsule.md');
+  const capsulePath = resolve(profileDir, 'operator-capsule.md');
   try {
-    entries.push(`landy-capsule.md\t${createHash('sha256').update(readFileSync(capsulePath)).digest('hex')}`);
+    entries.push(`operator-capsule.md\t${createHash('sha256').update(readFileSync(capsulePath)).digest('hex')}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
-    entries.push('landy-capsule.md\tmissing');
+    entries.push('operator-capsule.md\tmissing');
   }
 
   const relationshipDir = resolve(profileDir, 'relationship');
   if (!existsSync(relationshipDir)) entries.push('relationship\tmissing');
   else if (!collectContentHashes(relationshipDir, 'relationship', entries)) return null;
+
+  // Phase E: corpus content is part of the profile signature so that corpus r1→r2
+  // invalidates the L0 cache for ALL cats sharing this owner (owner-wide pointer).
+  const corpusDir = resolve(profileDir, 'corpus');
+  if (!existsSync(corpusDir)) entries.push('corpus\tmissing');
+  else if (!collectContentHashes(corpusDir, 'corpus', entries)) return null;
+
   return entries.join('\n');
 }
 
@@ -135,6 +142,18 @@ export class L0ProfileCache {
     this.results.clear();
     this.inflight.clear();
     this.profileSignatures.clear();
+    this.bumpGlobalGeneration();
+  }
+
+  /**
+   * Phase E: owner-wide cache invalidation for corpus changes.
+   * Corpus is shared across all cats for this owner, so when corpus content changes,
+   * ALL cached L0s for this userId must be invalidated (not just one cat's).
+   */
+  clearOwner(userId: string): void {
+    for (const key of this.allKeys()) {
+      if (key.startsWith(`${userId}\0`)) this.deleteKey(key);
+    }
     this.bumpGlobalGeneration();
   }
 

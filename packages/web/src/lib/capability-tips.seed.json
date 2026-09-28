@@ -1,5 +1,43 @@
 [
   {
+    "id": "capability-cloud-pro-root-collaboration",
+    "kind": "capability",
+    "sourceRef": { "path": "cat-cafe-skills/refs/gpt-pro-custom-instructions.md", "anchor": "核验三个真实入口" },
+    "structureSource": {
+      "path": "packages/mcp-server/src/tools/callback-tools.ts",
+      "anchor": "getThreadCatsInputSchema"
+    },
+    "bodySource": { "path": "cat-cafe-skills/refs/gpt-pro-custom-instructions.md", "anchor": "主动 root" },
+    "contexts": ["concierge_open", "feature_dev"],
+    "audience": ["cvo"],
+    "body": "想让云端猫主动找本地猫协作？告诉它目标会话和队友，它会先查可路由名单，再发送；不必等本地猫先叫它。",
+    "action": {
+      "type": "open_source",
+      "label": "查看云端协作指令",
+      "sourceRef": { "path": "cat-cafe-skills/refs/gpt-pro-custom-instructions.md", "anchor": "核验三个真实入口" }
+    },
+    "owner": "codex-astra"
+  },
+  {
+    "id": "capability-routing-human-recovery",
+    "kind": "capability",
+    "sourceRef": { "path": "docs/features/F293-live-routing-context.md", "anchor": "AC-B4" },
+    "structureSource": {
+      "path": "packages/web/src/components/routing-context/RoutingPreflightActions.tsx",
+      "anchor": "RoutingPreflightActions"
+    },
+    "bodySource": { "path": "docs/features/F293-live-routing-context.md", "anchor": "AC-C6" },
+    "contexts": ["thinking", "long_running", "concierge_open"],
+    "audience": ["cvo"],
+    "body": "猫猫近期遇到额度限制时，你主动发送仍会尝试。旧请求被拦后可点「重试这条」；一处成功会解除同猫的相关旧限制，其他会话不会自动重放。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "了解发送与恢复",
+      "draftPrompt": "请说明近期额度限制下如何主动尝试，以及怎样在原消息旁重试被拦的请求。"
+    },
+    "owner": "codex-astra"
+  },
+  {
     "id": "magic-word-scaffold",
     "kind": "magic_word",
     "sourceRef": { "path": "cat-cafe-skills/refs/shared-rules.md", "anchor": "「脚手架」" },
@@ -140,16 +178,20 @@
   {
     "id": "capability-image-generation",
     "kind": "capability",
-    "sourceRef": { "path": "cat-cafe-skills/refs/capability-wakeup-index.md", "anchor": "image-generation" },
+    "sourceRef": { "path": "cat-cafe-skills/image-generation/SKILL.md", "anchor": "Codex 原生能力校准" },
     "structureSource": {
       "path": "packages/api/src/infrastructure/harness-eval/capability-wakeup/capability-wakeup-rules.ts",
       "anchor": "image-generation"
     },
-    "bodySource": { "path": "cat-cafe-skills/refs/capability-wakeup-index.md", "anchor": "`image-generation`" },
+    "bodySource": { "path": "cat-cafe-skills/image-generation/SKILL.md", "anchor": "解释型漫画、信息图" },
     "contexts": ["thinking", "feature_dev"],
     "audience": ["all"],
-    "body": "需要架构图或设计素材？孟加拉猫和缅因猫 GPT-5.5 都能生成图片——告诉猫猫你想要什么。",
-    "action": { "type": "open_concierge_draft", "label": "了解更多" },
+    "body": "想用一张图讲清一个机制？告诉猫猫读者是谁、要讲清什么，它会把动作和变化组织成解释型漫画或信息图；已有分镜可以直接制作。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "用图讲清机制",
+      "draftPrompt": "请用一张解释型漫画或信息图讲清这个机制，先根据已有材料明确读者问题、各方动作与可见变化。"
+    },
     "owner": "codex"
   },
   {
@@ -343,6 +385,31 @@
     "owner": "codex"
   },
   {
+    "id": "workflow-memory-search-single-owner",
+    "kind": "workflow",
+    "sourceRef": {
+      "path": "cat-cafe-skills/memory-search-best-practices/SKILL.md",
+      "anchor": "单一 owner 闭环"
+    },
+    "structureSource": {
+      "path": "cat-cafe-skills/memory-search-best-practices/SKILL.md",
+      "anchor": "Output: 单一 owner"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/memory-search-best-practices/SKILL.md",
+      "anchor": "query、scope、语言或工具切片不得升级"
+    },
+    "contexts": ["thinking", "long_running"],
+    "audience": ["cvo"],
+    "body": "让猫猫查「所有提过 X 的地方」时，它会在内部多路检索并统一收敛，最后只交一份完整结果，不把搜索切片变成你要追的多个任务。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "帮我完整回溯",
+      "draftPrompt": "请完整回溯所有提过 X 的地方，多路查证后统一给我一份终局结论，不要拆成多个需要我跟踪的任务。"
+    },
+    "owner": "codex-sol"
+  },
+  {
     "id": "workflow-alpha-validation",
     "kind": "workflow",
     "sourceRef": { "path": "docs/SOP.md", "anchor": "pnpm alpha:start" },
@@ -357,14 +424,52 @@
   {
     "id": "workflow-merge-gate",
     "kind": "workflow",
-    "sourceRef": { "path": "docs/SOP.md", "anchor": "merge-gate" },
-    "structureSource": { "path": "docs/SOP.md", "anchor": "门禁 → PR → 云端 review" },
-    "bodySource": { "path": "cat-cafe-skills/merge-gate/SKILL.md", "anchor": "merge-gate" },
+    "sourceRef": {
+      "path": "cat-cafe-skills/merge-gate/SKILL.md",
+      "anchor": "昂贵 gate 连续性"
+    },
+    "structureSource": {
+      "path": "cat-cafe-skills/merge-gate/SKILL.md",
+      "anchor": "Gate 选择 — targeted 默认，full 按影响范围"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/merge-gate/SKILL.md",
+      "anchor": "禁止仅因 main 又前进而重跑 full gate"
+    },
     "contexts": ["merge_gate", "review"],
     "audience": ["developer", "maintainer"],
-    "body": "准备合入时走 merge-gate：本地门禁、PR、云端 review、squash merge。",
-    "action": { "type": "open_concierge_draft", "label": "了解更多" },
-    "owner": "codex"
+    "body": "合入前按风险选择 targeted 或 full gate；一次 full gate 绑定作者 patch 与冻结 base，main 的无关前进不会让猫重复跑半小时门禁。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "帮我选择门禁",
+      "draftPrompt": "请按这次改动的行为、数据、安全、契约和不可逆风险选择门禁；如果已有 full gate 证据，也请判断后续 base 变化是否真的需要重跑。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "workflow-skill-validation-risk-routed",
+    "kind": "workflow",
+    "sourceRef": {
+      "path": "cat-cafe-skills/writing-skills/SKILL.md",
+      "anchor": "发布检查清单"
+    },
+    "structureSource": {
+      "path": "cat-cafe-skills/writing-skills/SKILL.md",
+      "anchor": "验证"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/writing-skills/SKILL.md",
+      "anchor": "只有共享契约、门禁执行链或 targeted 无法覆盖跨包合流风险时才跑 full"
+    },
+    "contexts": ["feature_dev", "merge_gate"],
+    "audience": ["developer", "maintainer"],
+    "body": "修改 skill 后先跑 skill、reference、surface 与 claim 对应的定向检查；只有共享契约、门禁执行链或 targeted 无法覆盖跨包合流风险时才跑 full gate。五轴高风险单独加强对应独立审查 / 授权。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "帮我验证 skill",
+      "draftPrompt": "请根据我修改的 skill 和具体 claim，列出足够的定向验证；只有共享契约、门禁执行链或 targeted 无法覆盖跨包合流风险时才跑 full gate，五轴高风险单独加强对应独立审查 / 授权。"
+    },
+    "owner": "codex-sol"
   },
   {
     "id": "workflow-feature-tips-contribution",
@@ -393,13 +498,73 @@
   {
     "id": "workflow-community-decision-queue",
     "kind": "workflow",
-    "sourceRef": { "path": "cat-cafe-skills/opensource-ops/SKILL.md", "anchor": "Decision Queue 是操作者入口" },
-    "structureSource": { "path": "cat-cafe-skills/opensource-ops/SKILL.md", "anchor": "Decision Queue 是操作者入口" },
-    "bodySource": { "path": "cat-cafe-skills/opensource-ops/SKILL.md", "anchor": "ask/why/evidence/action" },
+    "sourceRef": {
+      "path": "docs/features/F116-opensource-ops.md",
+      "anchor": "公开便携层与家内运营层分离"
+    },
+    "structureSource": {
+      "path": "docs/features/F116-opensource-ops.md",
+      "anchor": "场景 B: Inbound PR（社区 PR 评估 + 合入 + 吸收）"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/opensource-ops/SKILL.md",
+      "anchor": "五问"
+    },
     "contexts": ["thinking", "feature_dev"],
     "audience": ["developer", "maintainer"],
-    "body": "社区 issue/PR 进 Decision Queue——猫猫按优先级处理，看板可追踪。",
-    "action": { "type": "open_concierge_draft", "label": "了解更多" },
+    "body": "外部 PR/issue 进入子 thread 后，先加载 opensource-ops skill 做 grounding、五问与 custody 判断。",
+    "action": {
+      "type": "open_source",
+      "label": "查看 opensource-ops skill",
+      "sourceRef": { "path": "cat-cafe-skills/opensource-ops/SKILL.md", "anchor": "Open-Source Ops" }
+    },
+    "owner": "codex"
+  },
+  {
+    "id": "workflow-stable-public-sync-release",
+    "kind": "workflow",
+    "sourceRef": {
+      "path": "cat-cafe-skills/opensource-ops/SKILL.md",
+      "anchor": "D: Outbound Sync"
+    },
+    "structureSource": {
+      "path": "cat-cafe-skills/opensource-ops/SKILL.md",
+      "anchor": "G: Public Release"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/opensource-ops/SKILL.md",
+      "anchor": "Sync ≠ Release"
+    },
+    "contexts": ["long_running", "feature_dev", "merge_gate"],
+    "audience": ["developer", "maintainer"],
+    "body": "要全量同步或给稳定 public main 发版时，先分清 Full Sync / Public Release；已有写授权只让 writer 跑一轮 public gate，无授权才做 no-write validate。",
+    "action": {
+      "type": "open_source",
+      "label": "查看稳定同步与发版车道",
+      "sourceRef": {
+        "path": "cat-cafe-skills/opensource-ops/SKILL.md",
+        "anchor": "D: Outbound Sync"
+      }
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "workflow-thread-orchestration-community",
+    "kind": "workflow",
+    "sourceRef": { "path": "cat-cafe-skills/thread-orchestration/SKILL.md", "anchor": "社区 PR / issue 分发" },
+    "structureSource": { "path": "cat-cafe-skills/thread-orchestration/SKILL.md", "anchor": "社区 PR / issue 分发" },
+    "bodySource": {
+      "path": "cat-cafe-skills/thread-orchestration/SKILL.md",
+      "anchor": "主动加载 `opensource-ops` skill"
+    },
+    "contexts": ["feature_dev", "review"],
+    "audience": ["developer", "maintainer"],
+    "body": "thread-orchestration 分发社区 PR/issue 时，服务端不再推断作者角色，改由子线程侧 opensource-ops skill 处理。",
+    "action": {
+      "type": "open_source",
+      "label": "查看 thread-orchestration 指引",
+      "sourceRef": { "path": "cat-cafe-skills/thread-orchestration/SKILL.md", "anchor": "社区 PR / issue 分发" }
+    },
     "owner": "codex"
   },
   {
@@ -583,6 +748,31 @@
     "owner": "opus"
   },
   {
+    "id": "feature-f306-runtime-interaction",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F306-codex-app-capability-parity.md",
+      "anchor": "## User Journey"
+    },
+    "structureSource": {
+      "path": "docs/features/F306-codex-app-capability-parity.md",
+      "anchor": "### Phase B: Provider-neutral Runtime Interaction"
+    },
+    "bodySource": {
+      "path": "docs/features/F306-codex-app-capability-parity.md",
+      "anchor": "### Primary Journey: 在 Clowder AI 使用 Codex App 的原生控制力"
+    },
+    "contexts": ["thinking", "waiting_external", "pet_waiting_for_user"],
+    "audience": ["cvo"],
+    "body": "Codex 运行中需要授权或补充信息时，直接在当前对话卡片回答；审批中心只负责提醒并带你回到同一请求，不会另存一份决定。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "处理运行中请求",
+      "draftPrompt": "请带我找到当前对话里正在等待回答的 Codex 请求，并说明审批、普通问题或 MCP 补充信息应如何安全处理。"
+    },
+    "owner": "codex-sol"
+  },
+  {
     "id": "feature-f281-structured-rejection-feedback",
     "kind": "feature",
     "sourceRef": {
@@ -698,6 +888,53 @@
     "body": "对话太多找不到？给 Thread 打标签（比如「重要」「待办」），方便在侧边栏筛选。",
     "action": { "type": "open_concierge_draft", "label": "了解更多" },
     "owner": "opus"
+  },
+  {
+    "id": "feature-f277-search-group",
+    "kind": "feature",
+    "sourceRef": { "path": "docs/features/F277-thread-attention-navigation.md", "anchor": "Search Group Organizing" },
+    "structureSource": {
+      "path": "docs/features/F277-thread-attention-navigation.md",
+      "anchor": "Search Group Organizing"
+    },
+    "bodySource": { "path": "docs/features/F277-thread-attention-navigation.md", "anchor": "Search Group Organizing" },
+    "contexts": ["thinking", "long_running", "concierge_open"],
+    "audience": ["all"],
+    "body": "搜索后点「整理全部」，未置顶的匹配对话也能一起收进 Group。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "了解搜索整理",
+      "draftPrompt": "请带我从侧栏搜索开始，把匹配的对话（包括未置顶者）批量整理到 Group，并说明如何补入成员和撤销。"
+    },
+    "owner": "codex-astra"
+  },
+  {
+    "id": "feature-f277-thread-attention-navigation",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F277-thread-attention-navigation.md",
+      "anchor": "Supporting Journeys"
+    },
+    "structureSource": {
+      "path": "docs/features/F277-thread-attention-navigation.md",
+      "anchor": "Phase C: L1 Navigation + L2 Dual-Thread Reading"
+    },
+    "bodySource": {
+      "path": "docs/features/F277-thread-attention-navigation.md",
+      "anchor": "Group Display Name Boundary"
+    },
+    "contexts": ["thinking", "long_running"],
+    "audience": ["cvo"],
+    "body": "默认侧边栏不会自动归组。想整理时，长按一条对话进入整理模式，再拖到另一条对话上创建 Group；也可以从更多操作进入，之后随时改名、移入或移出。",
+    "action": {
+      "type": "open_source",
+      "label": "查看 Group 整理说明",
+      "sourceRef": {
+        "path": "docs/features/F277-thread-attention-navigation.md",
+        "anchor": "Supporting Journeys"
+      }
+    },
+    "owner": "codex-sol"
   },
   {
     "id": "feature-f127-native-cli-effort",
@@ -987,6 +1224,34 @@
     "owner": "opus-48"
   },
   {
+    "id": "collab-exact-review-consumption",
+    "kind": "workflow",
+    "sourceRef": {
+      "path": "cat-cafe-skills/request-review/SKILL.md",
+      "anchor": "Request-Review-Consumption-Handle"
+    },
+    "structureSource": {
+      "path": "packages/mcp-server/src/tools/skill-consumption-tools.ts",
+      "anchor": "cat_cafe_prepare_request_review_consumption"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/request-review/SKILL.md",
+      "anchor": "author 先"
+    },
+    "contexts": ["review", "feature_dev"],
+    "audience": ["developer", "maintainer"],
+    "body": "发本地 review 前先预约精确 skill 版本、HEAD 与 accepted source；回执才能证明这次审阅实际沿用了它。",
+    "action": {
+      "type": "open_source",
+      "label": "查看 review 消费契约",
+      "sourceRef": {
+        "path": "cat-cafe-skills/request-review/SKILL.md",
+        "anchor": "Request-Review-Consumption-Handle"
+      }
+    },
+    "owner": "codex-sol"
+  },
+  {
     "id": "collab-cats-ask-for-help",
     "kind": "workflow",
     "sourceRef": { "path": "cat-cafe-skills/refs/shared-rules.md", "anchor": "P2. 共创伙伴" },
@@ -1118,20 +1383,20 @@
       "anchor": "## User Journey"
     },
     "structureSource": {
-      "path": "docs/features/F279-workspace-listen-mode.md",
-      "anchor": "### Phase C — Workspace Player Integration + UAT"
+      "path": "docs/discussions/2026-08-12-f279-background-document-cache/README.md",
+      "anchor": "## 推荐交互（operator 已签）"
     },
     "bodySource": {
-      "path": "docs/features/F279-workspace-listen-mode.md",
-      "anchor": "从任意句开始、按自己舒服的速度听下去"
+      "path": "docs/discussions/2026-08-12-f279-background-document-cache/README.md",
+      "anchor": "打开 Markdown → 点“缓存全文”"
     },
     "contexts": ["thinking", "concierge_open"],
     "audience": ["cvo"],
-    "body": "长 Markdown 看不进去时，在 Workspace 打开渲染正文，点顶部“听读”；也可点任意一句从这里开始，随后暂停、跳句或切换倍速。",
+    "body": "长 Markdown 看不进去时，在 Workspace 打开渲染正文：点“缓存全文”可先把整篇准备好，暂停、切文件或切 thread 也会继续；想马上听可点“听读”或任意一句。",
     "action": {
       "type": "open_concierge_draft",
       "label": "帮我打开长文",
-      "draftPrompt": "请帮我在 Workspace 打开一篇 Markdown 长文，我想用听读模式从指定句子开始。"
+      "draftPrompt": "请帮我在 Workspace 打开一篇 Markdown 长文，先缓存全文，再用听读模式从指定句子开始。"
     },
     "owner": "codex-sol"
   },
@@ -1261,6 +1526,31 @@
     "owner": "codex-sol"
   },
   {
+    "id": "capability-tech-writing-cutaway",
+    "kind": "capability",
+    "sourceRef": {
+      "path": "cat-cafe-skills/tech-writing/SKILL.md",
+      "anchor": "技术叙事的证据剖面"
+    },
+    "structureSource": {
+      "path": "cat-cafe-skills/concept-demo-design/refs/falsifiable-technical-cutaway.md",
+      "anchor": "Claim Bench 最小结构"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/tech-writing/SKILL.md",
+      "anchor": "故事负责获得注意力；实验台负责赢得信任。"
+    },
+    "contexts": ["thinking", "feature_dev"],
+    "audience": ["cvo", "developer"],
+    "body": "技术方案讲得太泛？让猫猫把技术主张拆成失效机制、技术对象、可操纵消融、判词和 claim ceiling；需要时再做成能亲手证伪的实验台。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "拆解技术主张",
+      "draftPrompt": "请把这项技术竞争力拆成可证伪的技术主张、失效机制、技术对象、可操纵消融、判词和 claim ceiling。"
+    },
+    "owner": "codex-sol"
+  },
+  {
     "id": "feature-session-strategy-policy",
     "kind": "feature",
     "sourceRef": {
@@ -1312,5 +1602,457 @@
       }
     },
     "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f299-invocation-trajectory",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F299-workspace-invocation-trajectory.md",
+      "anchor": "Primary Journey: 出事确诊三步"
+    },
+    "structureSource": {
+      "path": "docs/features/F299-workspace-invocation-trajectory.md",
+      "anchor": "Phase B.1: P1 语义阅读层纠偏"
+    },
+    "bodySource": {
+      "path": "docs/features/F299-workspace-invocation-trajectory.md",
+      "anchor": "Primary Journey: 出事确诊三步"
+    },
+    "contexts": ["thinking", "long_running"],
+    "audience": ["cvo", "developer"],
+    "body": "猫猫这一轮出错、取消或超时？从消息锚点进入轨迹，先看触发输入，再按 USER / ASSISTANT / TOOL 等语义卡和工具来源、结果确诊；Raw 仍保留逐事件证据。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "怎么看这轮轨迹",
+      "draftPrompt": "请打开当前对话的 Workspace 轨迹，带我从触发输入开始检查语义时间线、工具来源和结果，再看 Raw 事件并回到原消息。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f299-request-envelope",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F299-workspace-invocation-trajectory.md",
+      "anchor": "Phase D: P3 durable request envelope"
+    },
+    "structureSource": {
+      "path": "docs/features/F299-workspace-invocation-trajectory.md",
+      "anchor": "Phase D（P3 request envelope）"
+    },
+    "bodySource": {
+      "path": "docs/features/F299-workspace-invocation-trajectory.md",
+      "anchor": "按需展开"
+    },
+    "contexts": ["thinking", "long_running"],
+    "audience": ["cvo", "developer"],
+    "body": "想确认猫这轮真正提交了什么？打开消息轨迹里的 Input generations；摘要默认可见，正文会按原来源权限逐段展开。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "检查本轮模型输入",
+      "draftPrompt": "请打开当前消息的 Workspace 轨迹，带我检查 Input generations 的 provider、模型、连续性、工具面与重试边界；需要正文时再按来源权限展开。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f229-canonical-cat-ball-chat",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F229-cat-ball-concierge.md",
+      "anchor": "Chat Surface Convergence（2026-08-28 Gate）"
+    },
+    "structureSource": {
+      "path": "packages/web/src/components/thread-chat/ThreadChatSurface.tsx",
+      "anchor": "ThreadChatSurface"
+    },
+    "bodySource": {
+      "path": "docs/features/F229-cat-ball-concierge.md",
+      "anchor": "full Chat 与 compact Cat Ball"
+    },
+    "contexts": ["concierge_open", "thinking"],
+    "audience": ["cvo"],
+    "body": "猫猫球现在和完整 Chat 共用同一条对话时间线：系统错误、连接诊断、操作卡片和发送状态都会保留，不会再因为紧凑布局被藏掉。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "让前台猫帮我看看",
+      "draftPrompt": "请结合当前猫猫球对话里可见的错误、连接诊断和操作卡片，告诉我下一步该怎么处理。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f302-portable-governance",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F302-runtime-first-portable-governance.md",
+      "anchor": "Product Contract"
+    },
+    "structureSource": {
+      "path": "docs/features/F302-runtime-first-portable-governance.md",
+      "anchor": "User Journey"
+    },
+    "bodySource": {
+      "path": "docs/features/F302-runtime-first-portable-governance.md",
+      "anchor": "默认零写入"
+    },
+    "contexts": ["thinking", "feature_dev", "concierge_open"],
+    "audience": ["cvo", "developer"],
+    "body": "进入外部项目可直接开工，不会自动写治理文件；想补项目指南、Skills 或文档时，在 Project Setup 先预览，再确认所选内容。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "预览项目治理",
+      "draftPrompt": "请检查当前项目是否需要可选治理；先只打开 Project Setup 并预览建议，不要写入文件。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f195-true-companion-audio",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F195-meeting-copilot-live-advisory.md",
+      "anchor": "True companion journeys (Phase I)"
+    },
+    "structureSource": {
+      "path": "packages/web/src/components/workspace/AudioInputPicker.tsx",
+      "anchor": "AudioInputPicker"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/refs/live-audio.md",
+      "anchor": "App + 本地麦克风"
+    },
+    "contexts": ["concierge_idle", "thinking"],
+    "audience": ["cvo"],
+    "body": "陪看视频或开线上会议时，可以在实时转写面板同时选择 App 声音和本地麦克风；采集会跨猫猫回合持续，并分别显示 ASR、说话人和每路输入的健康状态。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "打开伴随音频",
+      "draftPrompt": "请打开当前 thread 的实时转写面板，带我同时选择会议或视频 App 与本地麦克风，并先检查 ASR、说话人和输入健康。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f063-workspace-home-search",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F063-hub-workspace-explorer.md",
+      "anchor": "AC-3: 全文搜索可搜到文件内容并展示匹配上下文"
+    },
+    "structureSource": {
+      "path": "packages/web/src/components/workspace/WorkspaceLauncherSearch.tsx",
+      "anchor": "WorkspaceLauncherSearch"
+    },
+    "bodySource": {
+      "path": "docs/features/F063-hub-workspace-explorer.md",
+      "anchor": "全文搜索：输关键词 → 搜遍仓库 → 返回匹配文件+行号+上下文"
+    },
+    "contexts": ["thinking", "feature_dev", "concierge_open"],
+    "audience": ["cvo", "developer"],
+    "body": "不记得文件在哪？打开 Workspace 后，直接在首页搜文件名或正文；结果会带行号和片段，点一下就能打开原文件。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "帮我找文件",
+      "draftPrompt": "请打开 Workspace，帮我按文件名或正文找到目标文件并定位到匹配行。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f307-composable-workbench",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F307-composable-workbench.md",
+      "anchor": "## User Journey"
+    },
+    "structureSource": {
+      "path": "packages/web/src/components/workbench/F307WorkbenchControlRail.tsx",
+      "anchor": "F307WorkbenchControlRail"
+    },
+    "bodySource": {
+      "path": "docs/features/F307-composable-workbench.md",
+      "anchor": "tab 内容可横向滚动"
+    },
+    "contexts": ["thinking", "feature_dev", "concierge_open"],
+    "audience": ["cvo", "developer"],
+    "body": "右侧 Workspace 会保留你打开的文件、Browser、Terminal 和 Agent Run。顶部常驻控制轨可把当前 Tab 临时展开到主区并原样返回，也可回 Home、收起其他未固定页面或退出分屏；这些视图动作不会停止任务或删除对象。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "打开工作台",
+      "draftPrompt": "请打开右侧 Workspace，带我保留并切换多个工作现场。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f287-explicit-eli5-html",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F287-memory-cue-plane.md",
+      "anchor": "Post-close hardening: explicit approved Taste consumption"
+    },
+    "structureSource": {
+      "path": "packages/api/src/domains/memory/cue/ExplicitApprovedTasteTriggerCatalog.ts",
+      "anchor": "EXPLICIT_APPROVED_TASTE_TRIGGERS"
+    },
+    "bodySource": {
+      "path": "docs/features/F287-memory-cue-plane.md",
+      "anchor": "公开 `bodySource` 只指向本 feature 的已导出行为合同"
+    },
+    "contexts": ["thinking", "long_running", "concierge_open"],
+    "audience": ["cvo"],
+    "body": "想把复杂概念讲得一眼能懂？直接说「ELI5」；猫会读取已批准的表达偏好，用可视化 HTML 富文本回答，而不是只发 Markdown 长文。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "用 ELI5 解释",
+      "draftPrompt": "请用 ELI5 解释这个概念，并按已批准的表达偏好生成可视化 HTML 富文本。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f290-collective",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F290-ai-native-collective.md",
+      "anchor": "Collective Entry and Host Contract"
+    },
+    "structureSource": {
+      "path": "packages/web/src/components/collective/CollectiveLaunchSurface.tsx",
+      "anchor": "CollectiveLaunchSurface"
+    },
+    "bodySource": {
+      "path": "docs/features/F290-ai-native-collective.md",
+      "anchor": "本轮产品旅程"
+    },
+    "contexts": ["thinking", "feature_dev", "concierge_open"],
+    "audience": ["cvo", "developer"],
+    "body": "需要跨真人、跨 Café 协作？用 Human 身份进入 Collective，配对后在 Café 的“带猫加入”里选择猫和公开频道。成员可以请求它回应；持续私人执行由猫的主人另行授权。浏览器直达与 Café 内入口打开同一个世界。",
+    "action": {
+      "type": "open_capability_surface",
+      "label": "进入 Collective",
+      "surfaceId": "collective"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "workflow-collective-result-return",
+    "kind": "workflow",
+    "sourceRef": { "path": "cat-cafe-skills/collective-participation/SKILL.md", "anchor": "恢复与真实状态" },
+    "structureSource": {
+      "path": "packages/web/src/components/collective/CollectiveWorkRequests.tsx",
+      "anchor": "CollectiveWorkRequests"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/collective-participation/SKILL.md",
+      "anchor": "丢了响应或换了 invocation"
+    },
+    "contexts": ["long_running", "concierge_open"],
+    "audience": ["all"],
+    "body": "Collective 私人工作中断后，在“带猫加入 → 收到的请求与私人工作”中继续原工作。猫会恢复原来源再回流，不需要重新发起一份委托；回复送达与工作完成会分别记录。",
+    "action": { "type": "open_capability_surface", "label": "查看 Collective 工作", "surfaceId": "collective" },
+    "owner": "codex-astra"
+  },
+  {
+    "id": "capability-self-evolution",
+    "kind": "capability",
+    "sourceRef": {
+      "path": "docs/features/F100-self-evolution.md",
+      "anchor": "Primary Journey: 从一次真实协作中形成可见、可验证的改进"
+    },
+    "structureSource": {
+      "path": "cat-cafe-skills/self-evolution/SKILL.md",
+      "anchor": "三个模式"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/self-evolution/SKILL.md",
+      "anchor": "先排除 F311 产品意图"
+    },
+    "contexts": ["thinking", "feature_dev", "review", "long_running"],
+    "audience": ["all"],
+    "body": "想把这次已经发生的偏差、重复踩坑或好方法沉淀下来，可以让猫猫复盘并改进对应规则、Skill 或 Harness；这是经验闭环，不会冒充“我们来进化 X”的 Evolution Program。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "复盘并沉淀",
+      "draftPrompt": "请复盘这次已经发生的工作，把可复用的教训沉淀到正确机制；一次性问题不要过度进化。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "capability-evolution-intent",
+    "kind": "capability",
+    "sourceRef": {
+      "path": "cat-cafe-skills/capability-evolution/SKILL.md",
+      "anchor": "Capability Evolution — 从一句话进入受治理的进化"
+    },
+    "structureSource": {
+      "path": "packages/api/src/infrastructure/harness-eval/capability-wakeup/capability-wakeup-rules.ts",
+      "anchor": "capability-evolution"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/capability-evolution/SKILL.md",
+      "anchor": "先分意图，再决定是否写入"
+    },
+    "contexts": ["thinking", "feature_dev", "concierge_idle", "concierge_open"],
+    "audience": ["all"],
+    "body": "想知道咱们能进化什么，直接问猫猫；只有说“我们来进化 X”并给出具体目标时，才会创建可追踪的 Evolution Program，普通复盘仍走 self-evolution。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "了解可进化对象",
+      "draftPrompt": "你们能进化什么？"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f311-evolution-program",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F311-capability-evolution-workspace.md",
+      "anchor": "Phase 1: 建制与可见（Start & See）"
+    },
+    "structureSource": {
+      "path": "packages/web/src/components/capability-evolution/EvolutionProgramSurface.tsx",
+      "anchor": "EvolutionProgramSurface"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/capability-evolution/SKILL.md",
+      "anchor": "继续现有项目：把准备推进到实际动作"
+    },
+    "contexts": ["thinking", "feature_dev", "concierge_idle", "concierge_open"],
+    "audience": ["cvo", "developer"],
+    "body": "能力项目卡在准备阶段时，可以点“请猫猫推进评估”，在发起对话中接续已有工作，并查看送达回执与回复。四个阶段可点击阅读，阅读和催办都不会跳过审批或改变当前采用。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "请猫猫推进项目",
+      "draftPrompt": "请读取我当前的能力项目，按真实缺口继续推进评估，并回报这次完成的动作。不要重复创建项目。"
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f311-exploration-results",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F311-capability-evolution-workspace.md",
+      "anchor": "Exploration Focus"
+    },
+    "structureSource": {
+      "path": "packages/web/src/components/capability-evolution/exploration/EvolutionExplorationWorkspace.tsx",
+      "anchor": "EvolutionExplorationWorkspace"
+    },
+    "bodySource": {
+      "path": "docs/features/F311-capability-evolution-workspace.md",
+      "anchor": "Exploration Focus"
+    },
+    "contexts": ["thinking", "feature_dev", "concierge_open"],
+    "audience": ["cvo", "developer"],
+    "body": "在能力项目的“探索进化”中，先选版本和实验，再点失败案例查看原始回放或实际输入输出。两轮样本不同时，先确认配对范围；阅读选择不会改变当前沿用，未写完的想法会保留发起时版本。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "阅读当前项目的实验",
+      "draftPrompt": "请打开我当前能力项目的探索进化，读取所选版本的实验、失败案例与证据范围。不要新建项目或发起训练。"
+    },
+    "owner": "codex-astra"
+  },
+  {
+    "id": "feature-f138-content-owner-contract",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F138-video-studio.md",
+      "anchor": "## User Journey"
+    },
+    "structureSource": {
+      "path": "packages/api/src/domains/video-studio/content-owner/service.ts",
+      "anchor": "ProjectContentOwnerService"
+    },
+    "bodySource": {
+      "path": "docs/features/F138-video-studio.md",
+      "anchor": "接受只通过 owner CAS 产生新 revision 与 receipt"
+    },
+    "contexts": ["feature_dev", "review"],
+    "audience": ["developer", "maintainer"],
+    "body": "实现 DOCX、视频或猫猫代写时，每次可见修改都要带 base revision 经 CAS 结算；成功只认新 revision 与 receipt。",
+    "action": {
+      "type": "open_source",
+      "label": "打开 owner 契约",
+      "sourceRef": {
+        "path": "docs/features/F138-video-studio.md",
+        "anchor": "## User Journey"
+      }
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f309-content-editor-provider",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F309-collaborative-content-plane.md",
+      "anchor": "operator plugin choice"
+    },
+    "structureSource": {
+      "path": "packages/api/src/domains/collaborative-content/editor-surface-admission.ts",
+      "anchor": "EditorSurfaceAdmissionV1"
+    },
+    "bodySource": {
+      "path": "docs/features/F309-collaborative-content-plane.md",
+      "anchor": "Host 以单个 typed surface admission"
+    },
+    "contexts": ["feature_dev", "review", "merge_gate"],
+    "audience": ["developer", "maintainer"],
+    "body": "接 Office 编辑器插件时，先由 F202 精确核验安装、权限、运行态、来源和 SRI；任一漂移都必须在交付 session bearer 前停住。",
+    "action": {
+      "type": "open_source",
+      "label": "打开 provider 契约",
+      "sourceRef": {
+        "path": "docs/features/F309-collaborative-content-plane.md",
+        "anchor": "operator plugin choice"
+      }
+    },
+    "owner": "codex-sol"
+  },
+  {
+    "id": "feature-f309-artifact-review",
+    "kind": "feature",
+    "sourceRef": {
+      "path": "docs/features/F309-collaborative-content-plane.md",
+      "anchor": "### Phase R: Complete Immutable Artifact Review"
+    },
+    "structureSource": {
+      "path": "packages/web/src/components/content-review/ReviewArtifactButton.tsx",
+      "anchor": "ReviewArtifactButton"
+    },
+    "bodySource": {
+      "path": "docs/features/F309-collaborative-content-plane.md",
+      "anchor": "在原 F310 prepared Artifact 入口完成图片/mp4"
+    },
+    "contexts": ["concierge_open", "pet_waiting_for_user", "review"],
+    "audience": ["all"],
+    "body": "打开原任务的“审阅产物”，点击或圈选画面就能评论；在“标注”里画好后点“保存标记”，伙伴也能读到。图片选区旁可让猫移除内容，比例菜单可请求新尺寸；猫交新版时，旧标记仍留在原版。",
+    "action": {
+      "type": "open_source",
+      "label": "查看产物审阅说明",
+      "sourceRef": {
+        "path": "docs/features/F309-collaborative-content-plane.md",
+        "anchor": "### Phase R: Complete Immutable Artifact Review"
+      }
+    },
+    "owner": "codex-astra"
+  },
+  {
+    "id": "capability-co-creation-storytelling",
+    "kind": "capability",
+    "sourceRef": {
+      "path": "cat-cafe-skills/co-creation-storytelling/SKILL.md",
+      "anchor": "Co-creation Storytelling — 长故事中的人、猫与变化"
+    },
+    "structureSource": {
+      "path": "cat-cafe-skills/co-creation-storytelling/SKILL.md",
+      "anchor": "交付与下一步"
+    },
+    "bodySource": {
+      "path": "cat-cafe-skills/co-creation-storytelling/SKILL.md",
+      "anchor": "把散落材料还原成可信的经历"
+    },
+    "contexts": ["thinking", "concierge_open"],
+    "audience": ["all"],
+    "body": "经历很多却讲不清重点？把已有材料交给猫猫，它会核对事实、梳理各方做了什么和事情怎样改变，再整理成适合一页或短讲的故事稿。",
+    "action": {
+      "type": "open_concierge_draft",
+      "label": "整理这段经历",
+      "draftPrompt": "请把已有经历材料整理成清楚的一页或短讲故事稿，保留各方行动、事实来源和真实变化。"
+    },
+    "owner": "codex-astra"
   }
 ]

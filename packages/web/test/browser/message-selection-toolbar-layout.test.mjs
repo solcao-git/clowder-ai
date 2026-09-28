@@ -6,11 +6,20 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '../../../ppt-forge/node_modules/playwright/index.mjs';
+import { createNextDevTestEnvironment } from './next-dev-test-environment.mjs';
 
 const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const NEXT_BIN = path.resolve(WEB_ROOT, '../../node_modules/next/dist/bin/next');
 const OLD_WEB_REVISION = 'a'.repeat(40);
 const NEW_SERVER_REVISION = 'b'.repeat(40);
+const GROUP_FIRST_TITLE = '这是一条足够长的分组交互卡标题，用来证明转发动作不会遮住可读内容';
+
+function overlapArea(first, second) {
+  return (
+    Math.max(0, Math.min(first.x + first.width, second.x + second.width) - Math.max(first.x, second.x)) *
+    Math.max(0, Math.min(first.y + first.height, second.y + second.height) - Math.max(first.y, second.y))
+  );
+}
 
 async function findFreePort() {
   const server = createServer();
@@ -119,15 +128,13 @@ test(
   async () => {
     const port = await findFreePort();
     const output = [];
+    const nextDev = await createNextDevTestEnvironment('selection-toolbar-layout', {
+      CAT_CAFE_WEB_BUILD_REVISION: OLD_WEB_REVISION,
+      CAT_CAFE_DEPLOYMENT_REVISION_REQUIRED: '1',
+    });
     const server = spawn(process.execPath, [NEXT_BIN, 'dev', '-H', '127.0.0.1', '-p', String(port)], {
       cwd: WEB_ROOT,
-      env: {
-        ...process.env,
-        NEXT_TELEMETRY_DISABLED: '1',
-        NODE_ENV: 'development',
-        CAT_CAFE_WEB_BUILD_REVISION: OLD_WEB_REVISION,
-        CAT_CAFE_DEPLOYMENT_REVISION_REQUIRED: '1',
-      },
+      env: nextDev.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     server.stdout.on('data', (chunk) => output.push(chunk.toString()));
@@ -228,7 +235,78 @@ test(
       await cliForwardDialog.waitFor();
       await cliForwardDialog.getByRole('button', { name: '取消', exact: true }).click();
 
+      await page.mouse.move(350, 790);
+      const richBlock = page.locator('[data-rich-block-id="decision-card"]');
       const richForward = page.getByRole('button', { name: '转发富块：决策摘要' });
+      const restingRichAction = await richForward.evaluate((element) => {
+        const dock = element.closest('[data-testid="rich-block-forward-actions"]');
+        if (!dock) throw new Error('Rich Block forward action dock did not render');
+        const style = getComputedStyle(dock);
+        const rect = dock.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return {
+          opacity: style.opacity,
+          pointerEvents: style.pointerEvents,
+          hitInsideDock: hit instanceof Node && dock.contains(hit),
+          visibleLabel: element.textContent.trim(),
+          hasIcon: Boolean(element.querySelector('svg')),
+        };
+      });
+      assert.equal(restingRichAction.opacity, '0', 'Rich Block forwarding must not paint at rest');
+      assert.equal(restingRichAction.pointerEvents, 'none', 'resting Rich Block forwarding must not intercept clicks');
+      assert.equal(restingRichAction.hitInsideDock, false, 'resting Rich Block forwarding must fail hit-testing');
+      assert.equal(restingRichAction.visibleLabel, '', 'Rich Block forwarding should use the compact icon treatment');
+      assert.equal(restingRichAction.hasIcon, true, 'Rich Block forwarding needs a recognizable icon');
+
+      await richForward.focus();
+      await page.waitForFunction(() => {
+        const dock = document.querySelector(
+          '[data-rich-block-id="decision-card"] [data-testid="rich-block-forward-actions"]',
+        );
+        return dock && getComputedStyle(dock).opacity === '1';
+      });
+      assert.equal(
+        await richForward.evaluate((element) => document.activeElement === element),
+        true,
+        'keyboard focus must reach the Rich Block forward action',
+      );
+      await richForward.blur();
+      await page.mouse.move(350, 790);
+      await page.waitForFunction(() => {
+        const dock = document.querySelector(
+          '[data-rich-block-id="decision-card"] [data-testid="rich-block-forward-actions"]',
+        );
+        return dock && getComputedStyle(dock).opacity === '0';
+      });
+
+      await richBlock.hover();
+      await richForward.waitFor({ state: 'visible' });
+      await page.waitForFunction(() => {
+        const dock = document.querySelector(
+          '[data-rich-block-id="decision-card"] [data-testid="rich-block-forward-actions"]',
+        );
+        return dock && getComputedStyle(dock).opacity === '1';
+      });
+      const hoveredRichAction = await richForward.evaluate((element) => {
+        const dock = element.closest('[data-testid="rich-block-forward-actions"]');
+        if (!dock) throw new Error('Rich Block forward action dock did not render');
+        const style = getComputedStyle(dock);
+        const rect = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return {
+          opacity: style.opacity,
+          pointerEvents: style.pointerEvents,
+          hitInsideButton: hit instanceof Node && element.contains(hit),
+        };
+      });
+      assert.equal(hoveredRichAction.opacity, '1', 'hover must reveal Rich Block forwarding');
+      assert.equal(hoveredRichAction.pointerEvents, 'auto', 'hovered Rich Block forwarding must accept clicks');
+      assert.equal(
+        hoveredRichAction.hitInsideButton,
+        true,
+        'hovered Rich Block forwarding must hit-test to its button',
+      );
+
       const richForwardBox = await richForward.boundingBox();
       assert.ok(richForwardBox, 'Rich Block forward action did not render');
       assert.ok(richForwardBox.width >= 44, `Rich Block target width was ${richForwardBox.width}px`);
@@ -249,6 +327,101 @@ test(
       assert.doesNotMatch(cliTargetText, /neighboring execution detail|neighboring secret/);
 
       await page.getByRole('dialog', { name: '转发到' }).getByRole('button', { name: '取消', exact: true }).click();
+
+      await page.mouse.move(350, 790);
+      const fileBlock = page.locator(
+        '[data-testid="f294-rich-file-source"] [data-rich-block-id="resource-request-file"]',
+      );
+      const fileForward = fileBlock.getByRole('button', {
+        name: '转发富块：昇腾算力资源申请-Agent自进化-单独转发这个富块-8-27B场景化后训练.docx',
+      });
+      await fileBlock.hover();
+      await fileForward.waitFor({ state: 'visible' });
+      const [fileForwardDockBox, fileCopyBox, fileDownloadBox] = await Promise.all([
+        fileBlock.getByTestId('rich-block-forward-action-dock').boundingBox(),
+        fileBlock.getByRole('button', { name: '复制完整文件名', exact: true }).boundingBox(),
+        fileBlock.getByRole('link', { name: '下载', exact: true }).boundingBox(),
+      ]);
+      assert.ok(fileForwardDockBox && fileCopyBox && fileDownloadBox, 'file Rich Block action geometry did not render');
+      for (const intrinsicActionBox of [fileCopyBox, fileDownloadBox]) {
+        assert.ok(
+          fileForwardDockBox.y >= intrinsicActionBox.y + intrinsicActionBox.height,
+          'file forwarding must render below, not inside, the file copy/download action row',
+        );
+      }
+
+      await page.mouse.move(350, 790);
+      const richGroup = page.locator('[data-testid="f294-rich-group-source"] [data-rich-block-group-id]');
+      const groupActions = richGroup.getByTestId('rich-block-forward-actions');
+      const groupDock = richGroup.getByTestId('rich-block-forward-action-dock');
+      const firstGroupForward = richGroup.getByRole('button', { name: `转发富块：${GROUP_FIRST_TITLE}` });
+      const secondGroupForward = richGroup.getByRole('button', { name: '转发富块：第二张分组交互卡' });
+      const restingGroupAction = await groupActions.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { opacity: style.opacity, pointerEvents: style.pointerEvents };
+      });
+      assert.equal(restingGroupAction.opacity, '0', 'grouped Rich Block forwarding must not paint at rest');
+      assert.equal(
+        restingGroupAction.pointerEvents,
+        'none',
+        'grouped Rich Block forwarding must not intercept clicks at rest',
+      );
+
+      await firstGroupForward.focus();
+      await page.waitForFunction(() => {
+        const dock = document.querySelector(
+          '[data-testid="f294-rich-group-source"] [data-testid="rich-block-forward-actions"]',
+        );
+        return dock && getComputedStyle(dock).opacity === '1';
+      });
+      assert.equal(
+        await firstGroupForward.evaluate((element) => document.activeElement === element),
+        true,
+        'keyboard focus must reveal a grouped Rich Block forward action',
+      );
+      await firstGroupForward.blur();
+      await page.mouse.move(350, 790);
+      await page.waitForFunction(() => {
+        const dock = document.querySelector(
+          '[data-testid="f294-rich-group-source"] [data-testid="rich-block-forward-actions"]',
+        );
+        return dock && getComputedStyle(dock).opacity === '0';
+      });
+
+      await richGroup.hover();
+      await page.waitForFunction(() => {
+        const dock = document.querySelector(
+          '[data-testid="f294-rich-group-source"] [data-testid="rich-block-forward-actions"]',
+        );
+        return dock && getComputedStyle(dock).opacity === '1';
+      });
+      const [groupDockBox, groupTitleBox, groupControlBox] = await Promise.all([
+        groupDock.boundingBox(),
+        page.getByText(GROUP_FIRST_TITLE, { exact: true }).boundingBox(),
+        richGroup.getByRole('button', { name: '保留首张卡的选项', exact: true }).boundingBox(),
+      ]);
+      assert.ok(groupDockBox && groupTitleBox && groupControlBox, 'grouped Rich Block geometry did not render');
+      assert.equal(
+        overlapArea(groupDockBox, groupTitleBox),
+        0,
+        'grouped forward actions must not cover the first title',
+      );
+      assert.equal(
+        overlapArea(groupDockBox, groupControlBox),
+        0,
+        'grouped forward actions must not cover the first interactive control',
+      );
+      for (const action of [firstGroupForward, secondGroupForward]) {
+        const box = await action.boundingBox();
+        assert.ok(box, 'grouped Rich Block forward action did not render');
+        assert.ok(box.width >= 44, `grouped Rich Block target width was ${box.width}px`);
+        assert.ok(box.height >= 44, `grouped Rich Block target height was ${box.height}px`);
+      }
+      await secondGroupForward.click();
+      const groupedPicker = page.getByRole('dialog', { name: '转发到' });
+      await groupedPicker.waitFor();
+      await groupedPicker.getByRole('button', { name: '取消', exact: true }).click();
+
       await assertLongRosterPickerLayout(page, 'bottom-sheet', 'f294-transfer-picker-bottom-sheet');
       await assertLongRosterPickerLayout(page, 'modal', 'f294-transfer-picker-modal');
 
@@ -289,6 +462,7 @@ test(
         true,
         'runtime update guard did not move focus to its only recovery action',
       );
+      await page.locator('[data-context-quote-segment-id="runtime-stdout"]').scrollIntoViewIfNeeded();
       await page.evaluate(() => {
         const segment = document.querySelector('[data-context-quote-segment-id="runtime-stdout"]');
         const textNode = segment?.firstChild;
@@ -334,9 +508,90 @@ test(
       );
       await reloadButton.click();
       await page.getByTestId('f294-reload-requested').waitFor();
+
+      const touchContext = await browser.newContext({ viewport: { width: 360, height: 800 }, hasTouch: true });
+      try {
+        await touchContext.route('**/api/health', async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ status: 'ok', deploymentRevision: OLD_WEB_REVISION }),
+          });
+        });
+        await touchContext.route('**/api/ready', async (route) => {
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok' }) });
+        });
+        await touchContext.route('**/api/session', async (route) => {
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+        });
+        await touchContext.route('**/api/cats', async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ cats: [{ roster: { available: true } }] }),
+          });
+        });
+        const touchPage = await touchContext.newPage();
+        await touchPage.goto(url, { waitUntil: 'networkidle' });
+        const touchForward = touchPage.getByRole('button', { name: '转发富块：决策摘要' });
+        const touchAction = await touchForward.evaluate((element) => {
+          const dock = element.closest('[data-testid="rich-block-forward-actions"]');
+          if (!dock) throw new Error('touch Rich Block forward action dock did not render');
+          const style = getComputedStyle(dock);
+          const rect = element.getBoundingClientRect();
+          const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+          return {
+            opacity: style.opacity,
+            pointerEvents: style.pointerEvents,
+            hitInsideButton: hit instanceof Node && element.contains(hit),
+          };
+        });
+        assert.equal(touchAction.opacity, '1', 'touch-only users must keep Rich Block forwarding visible');
+        assert.equal(touchAction.pointerEvents, 'auto', 'touch-only Rich Block forwarding must accept taps');
+        assert.equal(touchAction.hitInsideButton, true, 'touch-only Rich Block forwarding must hit-test to its button');
+        await touchForward.tap();
+        const touchPicker = touchPage.getByRole('dialog', { name: '转发到' });
+        await touchPicker.waitFor();
+        await touchPicker.getByRole('button', { name: '取消', exact: true }).tap();
+
+        const touchGroup = touchPage.locator('[data-testid="f294-rich-group-source"] [data-rich-block-group-id]');
+        const touchGroupActions = touchGroup.getByTestId('rich-block-forward-actions');
+        const touchGroupDock = touchGroup.getByTestId('rich-block-forward-action-dock');
+        const touchSecondForward = touchGroup.getByRole('button', { name: '转发富块：第二张分组交互卡' });
+        const [touchGroupDockBox, touchGroupTitleBox, touchGroupControlBox] = await Promise.all([
+          touchGroupDock.boundingBox(),
+          touchPage.getByText(GROUP_FIRST_TITLE, { exact: true }).boundingBox(),
+          touchGroup.getByRole('button', { name: '保留首张卡的选项', exact: true }).boundingBox(),
+        ]);
+        assert.ok(
+          touchGroupDockBox && touchGroupTitleBox && touchGroupControlBox,
+          'touch grouped Rich Block geometry did not render',
+        );
+        const touchGroupStyle = await touchGroupActions.evaluate((element) => {
+          const style = getComputedStyle(element);
+          return { opacity: style.opacity, pointerEvents: style.pointerEvents };
+        });
+        assert.equal(touchGroupStyle.opacity, '1', 'touch grouped Rich Block forwarding must remain visible');
+        assert.equal(touchGroupStyle.pointerEvents, 'auto', 'touch grouped Rich Block forwarding must accept taps');
+        assert.equal(
+          overlapArea(touchGroupDockBox, touchGroupTitleBox),
+          0,
+          'touch grouped forward actions must not cover the first title',
+        );
+        assert.equal(
+          overlapArea(touchGroupDockBox, touchGroupControlBox),
+          0,
+          'touch grouped forward actions must not cover the first interactive control',
+        );
+        await touchSecondForward.tap();
+        await touchPage.getByRole('dialog', { name: '转发到' }).waitFor();
+      } finally {
+        await touchContext.close();
+      }
     } finally {
       await browser?.close();
       await stopServer(server);
+      await nextDev.cleanup();
     }
   },
 );

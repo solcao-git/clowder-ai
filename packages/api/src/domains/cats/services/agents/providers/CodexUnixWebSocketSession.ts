@@ -14,6 +14,7 @@ import type { AgentCarrierSession, AgentCarrierSessionOptions } from '../../type
 
 const SOCKET_READY_TIMEOUT_MS = 10_000;
 const CLOSE_GRACE_MS = 1_500;
+const MAX_TERMINAL_DIAGNOSTIC_LENGTH = 256;
 const SESSION_SCOPED_ENV_KEYS = new Set<string>([...MCP_CALLBACK_ENV_KEYS, 'CAT_CAFE_CREDENTIAL_FILE']);
 
 export interface CodexAppServerHostLaunch {
@@ -133,7 +134,10 @@ class CodexUnixWebSocketSession implements AgentCarrierSession {
       }
     });
     socket.once('error', (error) => this.inbox.end(error));
-    socket.once('close', () => this.inbox.end());
+    socket.once('close', (_code, reason) => {
+      const diagnostic = sanitizeCliStderr(reason.toString('utf8').trim()).slice(0, MAX_TERMINAL_DIAGNOSTIC_LENGTH);
+      this.inbox.end(diagnostic ? new Error(diagnostic) : undefined);
+    });
   }
 
   read(): AsyncIterable<unknown> {
@@ -192,8 +196,8 @@ class SpawnedCodexAppServerHost implements CodexAppServerHostProcess {
   }
 }
 
-function normalizeEnv(input?: Record<string, string | null>): NodeJS.ProcessEnv {
-  return buildChildEnv(input);
+function normalizeEnv(input: Record<string, string | null> | undefined, workingDirectory: string): NodeJS.ProcessEnv {
+  return buildChildEnv(input, { workingDirectory });
 }
 
 export function createCodexSocketDirectory(): string {
@@ -208,8 +212,9 @@ export async function removeCodexSocketDirectory(path: string): Promise<void> {
 
 export async function spawnCodexAppServerHost(launch: CodexAppServerHostLaunch): Promise<CodexAppServerHostProcess> {
   const stderr: string[] = [];
+  const childCwd = launch.cwd ?? process.cwd();
   const supervised = buildUnixSupervisedSpawnPlan(launch.command, launch.args, {
-    env: normalizeEnv(launch.env),
+    env: normalizeEnv(launch.env, childCwd),
     killGraceMs: Math.max(250, CLOSE_GRACE_MS - 500),
     socketDirectory: launch.socketDirectory,
   });

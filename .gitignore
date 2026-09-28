@@ -50,7 +50,8 @@ packages/web/public/vendor/
 .agent/
 .agents/
 .augment/
-.codex/
+.codex/*
+!.codex/hooks.json
 .gemini/
 .antigravitycli/
 .kimi/
@@ -58,7 +59,6 @@ packages/web/public/vendor/
 .trae/
 .qoder/
 .dare/
-.codex/
 .gemini/
 .gitnexus/
 *.swp
@@ -177,6 +177,7 @@ docs/discussions/exported-threads/
 # Large media files (GitHub 100MB limit)
 *.mov
 *.mp4
+!site/assets/guides/*.mp4
 *.avi
 *.mkv
 *.wav
@@ -231,6 +232,11 @@ generated/capability-wakeup/
 packages/api/test/__b1_parent_a__/
 .claude/skills/organize-threads
 .claude/skills/thread-orchestration
+.codex-tmp-*
+.tmp/
+
+# Isolated artwork preview sessions; user-entered drafts and SQLite stay local.
+var/f309-artwork-preview/
 
 # PowerShell module analysis cache (mistracked binary, environment-written)
 Microsoft/

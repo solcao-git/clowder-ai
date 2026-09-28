@@ -7,13 +7,14 @@ description_source: model
 description_author: codex-sol
 description_generated_by: codex-sol@gpt-5.6-sol
 description_generated_at: "2026-08-01T00:00:00-07:00"
-description_confirmed_by: landy
+description_confirmed_by: operator
 description_updated_at: "2026-08-01T00:00:00-07:00"
 doc_kind: architecture
 created: 2026-08-01
 canonical_features: [F275]
 code_anchors:
   - packages/shared/src/types/managed-work.ts
+  - packages/shared/src/types/task.ts
   - packages/api/src/domains/cats/services/stores/ports/WorkflowSopStore.ts
   - packages/api/src/domains/cats/services/stores/redis-keys/managed-work-keys.ts
   - packages/api/src/domains/cats/services/stores/redis/RedisWorkflowSopStore.ts
@@ -23,6 +24,7 @@ code_anchors:
   - packages/api/src/domains/cats/services/agents/invocation/RedisAuthInvocationBackend.ts
   - packages/api/src/domains/cats/services/agents/invocation/invoke-single-cat.ts
   - packages/api/src/domains/cats/services/stores/ports/TaskStore.ts
+  - packages/api/src/domains/cats/services/stores/ports/TaskQuery.ts
   - packages/api/src/domains/cats/services/stores/ports/TaskManagedWorkBinding.ts
   - packages/api/src/domains/cats/services/stores/redis/RedisTaskStore.ts
   - packages/api/src/domains/cats/services/stores/redis/RedisTaskManagedWorkBindingStore.ts
@@ -33,6 +35,7 @@ doc_anchors:
 static_scan_hints: [WorkAdmission, WorkAttempt, workId, attemptId, managed_attributed, managed_unattributed, unmanaged_not_applicable, workflow_sop_v1]
 cited_by:
   - {feature: F275, date: 2026-08-01, delta: "new thin identity cell for SOP admission, attempt 1, and explicit invocation/PR/Episode attribution"}
+  - {feature: F313, date: 2026-09-10, delta: "D8 adds one bounded task-feature contract plus a tenant-bound exact-feature query/ref over the existing TaskStore projection, without creating work identity or write authority"}
 ---
 
 # Managed Work Identity

@@ -20,6 +20,7 @@ export type {
   McpOperationContract,
   McpRisk,
   McpRuntimeProfile,
+  McpSchemaDeliveryPolicy,
   McpStandaloneReason,
   McpToolDefinition,
   McpToolDefinitionInput,
@@ -36,10 +37,11 @@ export { validateToolGovernance } from './tool-governance-validation.js';
 export function bindMcpImplementation(
   ref: McpImplementationBinding['ref'],
   run: McpImplementationBinding['run'],
+  runWithExtra?: NonNullable<McpImplementationBinding['runWithExtra']>,
 ): McpImplementationBinding {
   const match = /^module:(.+)#([^#]+)$/.exec(ref);
   if (!match) throw new Error(`Invalid MCP implementation binding: ${ref}`);
-  return { ref, run, [implementationBindingBrand]: true };
+  return { ref, run, ...(runWithExtra ? { runWithExtra } : {}), [implementationBindingBrand]: true };
 }
 
 function operationActions(operation: McpOperationContract): readonly string[] {
@@ -133,9 +135,9 @@ export function defineMigrationCandidateMcpTool(input: McpMigrationCandidateInpu
     implementation: bindMcpImplementation(governance.implementationRef, input.handler),
     policy: {
       resourceFamily: governance.resourceFamily,
-      exposureTier: {
-        current: 'eager-core',
-        ...(governance.targetExposure ? { target: governance.targetExposure } : {}),
+      schemaDelivery: {
+        policy: 'host-default',
+        ...(governance.targetExposure === 'lazy-discoverable' ? { candidate: 'discoverable' as const } : {}),
         evidenceRef: governance.sourceRef,
       },
       runtimeProfiles: governance.runtimeProfiles,

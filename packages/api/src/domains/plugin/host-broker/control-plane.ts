@@ -24,11 +24,13 @@ import {
 } from './builtin-loopback.js';
 import { digestBrokerValue } from './canonical-json.js';
 import type { HostBrokerStore, HostBrokerTransaction } from './ports.js';
+import { revokeStaticFeatures } from './static-feature-ledger.js';
 import type {
   BrokerCallContext,
   BrokerCallError,
   BrokerCallRecord,
   BrokerMethodHandler,
+  BrokerRuntimeLeaseRecord,
   BrokerSessionRecord,
   BrokerTransportKind,
 } from './types.js';
@@ -60,6 +62,18 @@ type CallLedgerDecision =
   | { readonly kind: 'replay'; readonly result: unknown }
   | { readonly kind: 'failed'; readonly error: BrokerCallError };
 
+type RuntimeLeaseRenewalDecision =
+  | { readonly kind: 'renewed' }
+  | {
+      readonly kind: 'lost_authority';
+      readonly closeRequired: boolean;
+      readonly proposedCloseReason: string;
+    };
+
+type RuntimeLeaseAssessment =
+  | { readonly live: true; readonly lease: BrokerRuntimeLeaseRecord }
+  | { readonly live: false; readonly closeReason: string };
+
 const DEFAULT_PRE_ACTIVE_TIMEOUT_MS = 10_000;
 const DEFAULT_ACTIVE_LEASE_TTL_MS = 30_000;
 
@@ -71,6 +85,58 @@ function sessionForConnection(transaction: HostBrokerTransaction, connectionId: 
   const session = transaction.sessions.getByConnectionId(connectionId);
   if (!session) throw new HostBrokerError('SESSION_NOT_FOUND', `unknown Broker connection ${connectionId}`);
   return session;
+}
+
+function sameGrants(left: readonly Capability[], right: readonly Capability[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((grant, index) => grant === sortedRight[index]);
+}
+
+function authorityChanged(
+  session: BrokerSessionRecord,
+  lease: BrokerRuntimeLeaseRecord,
+  authority: CurrentAuthority,
+): boolean {
+  return (
+    authority.instance.runtimeState !== 'healthy' ||
+    authority.instance.packageDigest !== session.packageDigest ||
+    authority.grants.grantRevision !== session.grantRevision ||
+    authority.grants.grantRevision !== lease.grantRevision ||
+    lease.pluginInstanceId !== session.pluginInstanceId ||
+    lease.packageDigest !== session.packageDigest ||
+    lease.brokerSessionId !== session.brokerSessionId ||
+    !sameGrants(authority.grants.effectiveGrants, session.effectiveGrants ?? [])
+  );
+}
+
+function assessRuntimeLease(
+  session: BrokerSessionRecord,
+  lease: BrokerRuntimeLeaseRecord | undefined,
+  now: number,
+): RuntimeLeaseAssessment {
+  const expiredWhileActive =
+    session.phase === 'active' &&
+    ((session.activeLeaseExpiresAt !== undefined && session.activeLeaseExpiresAt <= now) ||
+      (lease !== undefined && lease.expiresAt <= now));
+  if (
+    session.phase === 'active' &&
+    session.activeLeaseExpiresAt !== undefined &&
+    !expiredWhileActive &&
+    lease?.state === 'live'
+  ) {
+    return { live: true, lease };
+  }
+  return {
+    live: false,
+    closeReason:
+      session.phase !== 'active'
+        ? (session.closeReason ?? 'session_not_active')
+        : expiredWhileActive
+          ? 'runtime_lease_expired'
+          : 'session_not_active',
+  };
 }
 
 export class HostBrokerControlPlane implements BrokerConnectionController {
@@ -207,7 +273,7 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
     if (
       authority.instance.packageDigest !== session.packageDigest ||
       authority.grants.grantRevision !== session.grantRevision ||
-      !this.sameGrants(authority.grants.effectiveGrants, session.effectiveGrants ?? [])
+      !sameGrants(authority.grants.effectiveGrants, session.effectiveGrants ?? [])
     ) {
       await this.rejectHandshake(connectionId, 'AUTHORITY_VIOLATION', 'Host authority changed during handshake');
     }
@@ -256,6 +322,13 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
     const context = await this.currentCallContext(connectionId, row.grant);
     const validated = handler.validateInput(input);
     if (!validated.valid) throw new HostBrokerError('INVALID_CALL_INPUT', `${method} input is invalid`);
+    if (handler.settlementAuthority === 'domain') {
+      const result = await handler.dispatch(context, validated.value);
+      if (!handler.validateResult(result)) {
+        throw new HostBrokerError('INVALID_CALL_RESULT', `${method} handler returned an invalid result`);
+      }
+      return structuredClone(result);
+    }
     const settlementKey = handler.settlementKey(context, validated.value);
     if (typeof settlementKey !== 'string' || settlementKey.length === 0 || settlementKey.length > 4096) {
       throw new HostBrokerError('BROKER_INVARIANT', `${method} produced an invalid settlement key`);
@@ -297,28 +370,79 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
     return this.call(sessions[0].connectionId, 'events.publish', input) as Promise<EventsPublishResult>;
   }
 
+  /** Authorize a queued Host delivery without requiring a live runtime session. */
+  async authorizeHostDelivery(pluginInstanceId: string): Promise<void> {
+    const authority = await this.currentAuthority(pluginInstanceId, true);
+    const requiredGrant = WIRE_METHOD_REGISTRY['host.messaging.deliver'].grant;
+    if (!authority.grants.effectiveGrants.includes(requiredGrant)) {
+      throw new HostBrokerError('CAPABILITY_DENIED', `${pluginInstanceId} lacks required grant ${requiredGrant}`);
+    }
+  }
+
+  async authorizeHostCall(pluginInstanceId: string, requiredGrant: Capability): Promise<BrokerCallContext> {
+    return this.authorizeConnection(pluginInstanceId, requiredGrant);
+  }
+
+  /** Host Manager only: intrinsic lifecycle binding grants no plugin effect API. */
+  async authorizeStaticFeature(pluginInstanceId: string): Promise<BrokerCallContext> {
+    return this.authorizeConnection(pluginInstanceId, 'protocol-intrinsic');
+  }
+
+  private async authorizeConnection(
+    pluginInstanceId: string,
+    requiredGrant: Capability | 'protocol-intrinsic',
+  ): Promise<BrokerCallContext> {
+    const sessions = (await this.options.store.snapshot()).sessions.filter(
+      (candidate) => candidate.pluginInstanceId === pluginInstanceId && candidate.phase === 'active',
+    );
+    if (sessions.length === 0) {
+      throw new HostBrokerError('INSTANCE_NOT_READY', `${pluginInstanceId} has no active Broker session`);
+    }
+    if (sessions.length !== 1) {
+      throw new HostBrokerError('BROKER_INVARIANT', `${pluginInstanceId} has multiple active Broker sessions`);
+    }
+    return this.currentCallContext(sessions[0].connectionId, requiredGrant);
+  }
+
   async renewRuntimeLease(connectionId: string): Promise<number> {
     const context = await this.currentCallContext(connectionId, 'protocol-intrinsic');
     const now = this.now();
     const expiresAt = now + this.activeLeaseTtlMs;
-    await this.options.store.transaction((transaction) => {
+    const decision = await this.options.store.transaction<RuntimeLeaseRenewalDecision>((transaction) => {
       const session = sessionForConnection(transaction, connectionId);
       const lease = transaction.runtimeLeases.get(session.runtimeLeaseId);
+      const leaseExpiredWhileActive =
+        session.phase === 'active' &&
+        ((session.activeLeaseExpiresAt !== undefined && session.activeLeaseExpiresAt <= now) ||
+          (lease !== undefined && lease.expiresAt <= now));
+      const contextStillMatches =
+        session.brokerSessionId === context.brokerSessionId &&
+        session.runtimeLeaseId === context.runtimeLeaseId &&
+        lease?.brokerSessionId === context.brokerSessionId &&
+        lease.pluginInstanceId === context.pluginInstanceId &&
+        lease.packageDigest === context.packageDigest &&
+        lease.grantRevision === context.grantRevision;
       if (
         session.phase !== 'active' ||
         session.activeLeaseExpiresAt === undefined ||
-        session.activeLeaseExpiresAt <= now ||
-        session.brokerSessionId !== context.brokerSessionId ||
-        session.runtimeLeaseId !== context.runtimeLeaseId ||
+        leaseExpiredWhileActive ||
         !lease ||
         lease.state !== 'live' ||
-        lease.expiresAt <= now ||
-        lease.brokerSessionId !== context.brokerSessionId ||
-        lease.pluginInstanceId !== context.pluginInstanceId ||
-        lease.packageDigest !== context.packageDigest ||
-        lease.grantRevision !== context.grantRevision
+        !contextStillMatches
       ) {
-        throw new HostBrokerError('SESSION_NOT_ACTIVE', `${connectionId} lost Broker authority before renewal`);
+        const proposedCloseReason =
+          session.phase === 'closed'
+            ? (session.closeReason ?? 'session_not_active')
+            : leaseExpiredWhileActive
+              ? 'runtime_lease_expired'
+              : !contextStillMatches
+                ? 'authority_changed'
+                : 'session_not_active';
+        return {
+          kind: 'lost_authority',
+          closeRequired: session.phase !== 'closed',
+          proposedCloseReason,
+        };
       }
       transaction.sessions.put({
         ...session,
@@ -330,7 +454,16 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
         expiresAt,
         updatedAt: now,
       });
+      return { kind: 'renewed' };
     });
+    if (decision.kind === 'lost_authority') {
+      await this.throwPersistedInactiveSession(
+        connectionId,
+        decision.proposedCloseReason,
+        decision.closeRequired,
+        `${connectionId} lost Broker authority before renewal`,
+      );
+    }
     return expiresAt;
   }
 
@@ -382,6 +515,12 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
       });
       const lease = transaction.runtimeLeases.get(current.runtimeLeaseId);
       if (lease) transaction.runtimeLeases.put({ ...lease, state: 'closed', updatedAt: now });
+      const features = transaction.staticFeatures.get();
+      if (features.leases.some((r) => r.brokerSessionId === current.brokerSessionId && r.state !== 'revoked')) {
+        transaction.staticFeatures.put(
+          revokeStaticFeatures(features, (r) => r.brokerSessionId === current.brokerSessionId, now),
+        );
+      }
     });
     if (session) await this.setInventoryRuntimeState(session.pluginInstanceId, session.packageDigest, 'stopped');
   }
@@ -409,6 +548,10 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
         if (lease.state === 'closed') continue;
         transaction.runtimeLeases.put({ ...lease, state: 'closed', updatedAt: now });
       }
+      const features = transaction.staticFeatures.get();
+      if (features.leases.some((r) => r.state !== 'revoked')) {
+        transaction.staticFeatures.put(revokeStaticFeatures(features, () => true, now));
+      }
     });
     for (const [pluginInstanceId, packageDigest] of affected) {
       await this.setInventoryRuntimeState(pluginInstanceId, packageDigest, 'stopped');
@@ -433,21 +576,23 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
     connectionId: string,
     requiredGrant: Capability | 'protocol-intrinsic',
   ): Promise<BrokerCallContext> {
-    const session = await this.readSession(connectionId);
-    const lease = (await this.options.store.snapshot()).runtimeLeases.find(
-      (candidate) => candidate.runtimeLeaseId === session.runtimeLeaseId,
+    const brokerSnapshot = await this.options.store.snapshot();
+    const session = brokerSnapshot.sessions.find((candidate) => candidate.connectionId === connectionId);
+    if (!session) throw new HostBrokerError('SESSION_NOT_FOUND', `unknown Broker connection ${connectionId}`);
+    const assessment = assessRuntimeLease(
+      session,
+      brokerSnapshot.runtimeLeases.find((candidate) => candidate.runtimeLeaseId === session.runtimeLeaseId),
+      this.now(),
     );
-    if (
-      session.phase !== 'active' ||
-      session.activeLeaseExpiresAt === undefined ||
-      session.activeLeaseExpiresAt <= this.now() ||
-      !lease ||
-      lease.state !== 'live' ||
-      lease.expiresAt <= this.now()
-    ) {
-      await this.close(connectionId, 'runtime_lease_expired').catch(() => undefined);
-      throw new HostBrokerError('SESSION_NOT_ACTIVE', `${connectionId} has no live Broker authority`);
+    if (!assessment.live) {
+      return this.throwPersistedInactiveSession(
+        connectionId,
+        assessment.closeReason,
+        session.phase !== 'closed',
+        `${connectionId} has no live Broker authority`,
+      );
     }
+    const { lease } = assessment;
     let authority: CurrentAuthority;
     try {
       authority = await this.currentAuthority(session.pluginInstanceId, true);
@@ -455,19 +600,12 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
       await this.close(connectionId, 'authority_changed').catch(() => undefined);
       throw new HostBrokerError('AUTHORITY_CHANGED', `${connectionId} inventory authority changed`);
     }
-    if (
-      authority.instance.runtimeState !== 'healthy' ||
-      authority.instance.packageDigest !== session.packageDigest ||
-      authority.grants.grantRevision !== session.grantRevision ||
-      authority.grants.grantRevision !== lease.grantRevision ||
-      lease.pluginInstanceId !== session.pluginInstanceId ||
-      lease.packageDigest !== session.packageDigest ||
-      lease.brokerSessionId !== session.brokerSessionId ||
-      !this.sameGrants(authority.grants.effectiveGrants, session.effectiveGrants ?? []) ||
-      (requiredGrant !== 'protocol-intrinsic' && !authority.grants.effectiveGrants.includes(requiredGrant))
-    ) {
+    if (authorityChanged(session, lease, authority)) {
       await this.close(connectionId, 'authority_changed').catch(() => undefined);
       throw new HostBrokerError('AUTHORITY_CHANGED', `${connectionId} grant or package authority changed`);
+    }
+    if (requiredGrant !== 'protocol-intrinsic' && !authority.grants.effectiveGrants.includes(requiredGrant)) {
+      throw new HostBrokerError('CAPABILITY_DENIED', `${connectionId} lacks required grant ${requiredGrant}`);
     }
     return {
       connectionId,
@@ -480,6 +618,21 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
       grantRevision: authority.grants.grantRevision,
       effectiveGrants: [...authority.grants.effectiveGrants],
     };
+  }
+
+  private async throwPersistedInactiveSession(
+    connectionId: string,
+    proposedCloseReason: string,
+    closeRequired: boolean,
+    message: string,
+  ): Promise<never> {
+    if (closeRequired) await this.close(connectionId, proposedCloseReason).catch(() => undefined);
+    const persistedSession = await this.readSession(connectionId);
+    const closeReason =
+      persistedSession.phase === 'closed'
+        ? (persistedSession.closeReason ?? 'session_not_active')
+        : 'session_not_active';
+    throw new HostBrokerError('SESSION_NOT_ACTIVE', message, undefined, closeReason);
   }
 
   private async settleCallSuccess(
@@ -669,10 +822,6 @@ export class HostBrokerControlPlane implements BrokerConnectionController {
     if (candidate.contractVersion !== authority.packageRecord.contractVersion) return 'CONTRACT_INCOMPATIBLE';
     if (candidate.wireVersion !== WIRE_VERSION) return 'WIRE_INCOMPATIBLE';
     return undefined;
-  }
-
-  private sameGrants(left: readonly Capability[], right: readonly Capability[]): boolean {
-    return left.length === right.length && left.every((grant, index) => grant === right[index]);
   }
 
   private async setInventoryRuntimeState(

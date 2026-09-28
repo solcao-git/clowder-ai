@@ -8,6 +8,8 @@ import {
 export type OfficialPluginCatalogRefreshErrorCode =
   | 'CATALOG_FETCH_FAILED'
   | 'CATALOG_INVALID_METADATA'
+  | 'CATALOG_CONTRACT_INVALID'
+  | 'CATALOG_POLICY_MISSING'
   | 'CATALOG_ROLLBACK_REJECTED'
   | 'CATALOG_EQUIVOCATION_REJECTED';
 
@@ -268,7 +270,13 @@ export class RefreshingOfficialPluginCatalog implements OfficialPluginCatalogPro
 
   private async refresh(): Promise<OfficialPluginCatalogSnapshot> {
     try {
-      const releases = await Promise.all(this.options.policies.map((policy) => this.fetchRelease(policy)));
+      const releases = await Promise.all(
+        this.options.policies.map((policy) =>
+          policy.distribution === 'bundled'
+            ? Promise.resolve(this.releases.get(policy.catalogId) ?? policy.bootstrapRelease)
+            : this.fetchRelease(policy),
+        ),
+      );
       for (let index = 0; index < this.options.policies.length; index += 1) {
         this.releases.set(this.options.policies[index].catalogId, releases[index]);
       }

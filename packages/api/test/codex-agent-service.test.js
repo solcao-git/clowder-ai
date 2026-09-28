@@ -12,10 +12,21 @@ import { describe, mock, test } from 'node:test';
 import { catRegistry } from '@cat-cafe/shared';
 import { fakeL0Compiler } from './helpers/fake-l0-compiler.js';
 
-const { CodexAgentService, buildCodexReasoningArgs, isGitRepositoryPath } = await import(
-  '../dist/domains/cats/services/agents/providers/CodexAgentService.js'
-);
+const {
+  CodexAgentService: ProductionCodexAgentService,
+  buildCodexReasoningArgs,
+  isGitRepositoryPath,
+} = await import('../dist/domains/cats/services/agents/providers/CodexAgentService.js');
 const { _resetCachedConfig } = await import('../dist/config/cat-config-loader.js');
+
+// Every invocation in this suite injects a mock spawn function. Resolve a
+// guaranteed executable first so the public runner never needs Codex itself
+// merely to reach that mock. Production still defaults to `codex`.
+class CodexAgentService extends ProductionCodexAgentService {
+  constructor(options = {}) {
+    super({ ...options, cliCommand: process.execPath });
+  }
+}
 
 /** Helper: collect all items from async iterable */
 async function collect(iterable) {
@@ -1500,7 +1511,10 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
           const pencilArgsArg = args.find((a) => a.includes('mcp_servers.pencil.args='));
           assert.ok(pencilArgsArg, 'pencil entry must inject args');
           assert.ok(pencilArgsArg.includes('--app'), 'pencil args must include --app');
-          assert.ok(pencilArgsArg.includes('vscode'), 'pencil args must include app name');
+          assert.ok(
+            pencilArgsArg.includes('visual_studio_code'),
+            'legacy vscode override must emit the current Pencil host identifier',
+          );
           // Must explicitly enable to override any stale config.toml disabled state
           assert.ok(
             args.includes('mcp_servers.pencil.enabled=true'),
@@ -2210,6 +2224,78 @@ describe('CodexAgentService Tests (CLI mode)', { concurrency: false }, () => {
     assert.ok(
       args.includes('model_provider="custom"'),
       'provider selection is not part of the capacity binding and must retain its existing precedence',
+    );
+  });
+
+  test('injects the config-owned native window, not the session-pinned effective capacity (#1381)', async () => {
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({
+      l0CompilerFn: fakeL0Compiler,
+      spawnFn,
+      catId: 'runtime-sol',
+      model: 'gpt-5.6-sol',
+    });
+
+    const promise = collect(
+      service.invoke('hello', {
+        // Effective capacity after the session pin; Codex reports 95% of the
+        // native window, so injecting this back would recurse (258400 → 245480
+        // → 233206 → …). The native injection must use the config-owned value.
+        contextCapacity: { windowTokens: 245480, inputCeilingTokens: 229480, actionable: true },
+        contextNativeWindowTokens: 258400,
+      }),
+    );
+    emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-native-window-1381' }]);
+    await promise;
+
+    const args = spawnFn.mock.calls[0].arguments[1];
+    assert.ok(
+      args.includes('model_context_window=258400'),
+      `native model_context_window must come from member config, got argv: ${JSON.stringify(args)}`,
+    );
+    assert.ok(
+      !args.includes('model_context_window=245480'),
+      'session-pinned effective capacity must never be fed back as the native window',
+    );
+    assert.ok(
+      args.includes('model_auto_compact_token_limit=227392'),
+      'auto-compact limit derives from the native window',
+    );
+  });
+
+  test('skips native window injection when the invocation has no config-owned window (#1381)', async () => {
+    const proc = createMockProcess();
+    const spawnFn = createMockSpawnFn(proc);
+    const service = new CodexAgentService({
+      l0CompilerFn: fakeL0Compiler,
+      spawnFn,
+      catId: 'runtime-sol',
+      model: 'gpt-5.6-sol',
+    });
+
+    const promise = collect(
+      service.invoke('hello', {
+        contextCapacity: { windowTokens: 245480, inputCeilingTokens: 229480, actionable: true },
+        // Explicit null: this invocation's capacity is report/pin-derived, so
+        // there is no raw/native value to hand Codex — injecting the effective
+        // capacity would restart the feedback loop.
+        contextNativeWindowTokens: null,
+      }),
+    );
+    emitCodexEvents(proc, [{ type: 'thread.started', thread_id: 't-no-native-window-1381' }]);
+    await promise;
+
+    const args = spawnFn.mock.calls[0].arguments[1];
+    assert.equal(
+      args.some((arg) => arg.startsWith('model_context_window=')),
+      false,
+      `report-derived capacity must not become a native window: ${JSON.stringify(args)}`,
+    );
+    assert.equal(
+      args.some((arg) => arg.startsWith('model_auto_compact_token_limit=')),
+      false,
+      'no native window means no derived compaction limit either',
     );
   });
 

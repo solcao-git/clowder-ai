@@ -77,6 +77,11 @@ const historyPage: PawFeelInboxPage = {
         exitKind: 'terminal_disposition',
         evidenceRefs: ['commit:abc'],
       },
+      issue: {
+        resolution: 'open',
+        continuation: { kind: 'legacy_blocker_unbound', evidenceRefs: ['commit:abc'] },
+        ageMs: 7 * 24 * 3_600_000,
+      },
       source: {
         availability: 'available',
         preview: '工具卡住后没有返回清晰错误',
@@ -118,6 +123,7 @@ const historyPage: PawFeelInboxPage = {
     blocked: 0,
     terminal: 1,
   },
+  issueCounts: { open: 1, resolved: 0, overdue: 1 },
   degraded: false,
 };
 
@@ -167,7 +173,7 @@ describe('HubEvalTab paw-feel settings surface', () => {
       backupCatId: 'codex-sol',
       version: 1,
       updatedAt: '2026-07-26T00:00:00.000Z',
-      updatedBy: 'you',
+      updatedBy: 'operator',
     };
     vi.mocked(apiFetch).mockImplementation(async (url, init) => {
       if (url === '/api/eval-hub/summary') return jsonResponse(emptyEvalSummary);
@@ -250,7 +256,7 @@ describe('HubEvalTab paw-feel settings surface', () => {
       backupCatId: 'codex-sol',
       version: 3,
       updatedAt: '2026-07-26T00:00:00.000Z',
-      updatedBy: 'you',
+      updatedBy: 'operator',
     };
     vi.mocked(apiFetch).mockImplementation(async (url) => {
       if (url === '/api/eval-hub/summary') return jsonResponse(emptyEvalSummary);

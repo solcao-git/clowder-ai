@@ -2,6 +2,7 @@ import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Thread } from '@/stores/chat-types';
 import { useLabelStore } from '@/stores/label-store';
+import type { SidebarSnapshotRow } from '@/stores/sidebarProjectionStore';
 import {
   createThreadSidebarHarness,
   defaultSidebarApiMock,
@@ -16,7 +17,9 @@ import {
 
 const NOW = 1710000000000;
 
-function makeThread(overrides: Partial<Thread> & { id: string }): Thread {
+type TestThread = Thread & Partial<Pick<SidebarSnapshotRow, 'presence' | 'unreadCount' | 'hasUserMention'>>;
+
+function makeThread(overrides: Partial<TestThread> & { id: string }): TestThread {
   return {
     projectPath: 'default',
     title: null,
@@ -137,6 +140,42 @@ describe('ThreadSidebar v9 tab redesign', () => {
     expect(harness.container.querySelector('[data-testid="virtual-thread-list"]')).not.toBeNull();
   });
 
+  it('keeps a large pinned list virtualized when explicit metadata forms a Group', async () => {
+    const pinnedThreads = Array.from({ length: 250 }, (_, index) =>
+      makeThread({
+        id: `grouped-${index}`,
+        title: `Grouped ${index}`,
+        pinned: true,
+        pinnedAt: NOW - index,
+        lastActiveAt: NOW - index,
+      }),
+    );
+    Object.assign(mockStore, {
+      currentThreadId: 'grouped-0',
+      threads: [makeThread({ id: 'default', title: '大厅' }), ...pinnedThreads],
+    });
+    mockApiFetch.mockImplementation((path: string) => {
+      if (path === '/api/labels') return jsonOk([]);
+      if (path === '/api/config/thread-attention') {
+        return jsonOk({
+          aliases: {},
+          open: {},
+          groups: [{ id: 'attention_virtualized', threadIds: pinnedThreads.map((thread) => thread.id) }],
+        });
+      }
+      return defaultSidebarApiMock(path);
+    });
+
+    await harness.render();
+    await harness.flush();
+
+    const renderedIds = visibleThreadIds(harness.container);
+    expect(renderedIds.length).toBeGreaterThan(0);
+    expect(renderedIds.length).toBeLessThan(50);
+    expect(renderedIds).toContain('grouped-0');
+    expect(harness.container.querySelector('[data-testid="virtual-attention-list"]')).not.toBeNull();
+  });
+
   it('keeps label filtering in the same row as sidebar tabs', async () => {
     mockStore.threads = [
       makeThread({ id: 'default', title: '大厅', lastActiveAt: NOW }),
@@ -185,6 +224,44 @@ describe('ThreadSidebar v9 tab redesign', () => {
 
     await clickTab(harness.container, 'favorites', harness.flush);
     expect(visibleThreadIds(harness.container)).toEqual(['favorite']);
+  });
+
+  it('renders canonical working rows above inactive unread rows without reshuffling concurrent work', async () => {
+    Object.assign(mockStore, {
+      currentThreadId: 'inactive-unread',
+      threads: [
+        makeThread({ id: 'default', title: '大厅' }),
+        makeThread({
+          id: 'working-first',
+          title: 'Working First',
+          pinned: true,
+          lastActiveAt: NOW - 60_000,
+          presence: { status: 'working', activeSince: NOW - 10 * 60_000 },
+        }),
+        makeThread({
+          id: 'working-second',
+          title: 'Working Second',
+          pinned: true,
+          lastActiveAt: NOW,
+          presence: { status: 'working', activeSince: NOW - 5 * 60_000 },
+        }),
+        makeThread({
+          id: 'inactive-unread',
+          title: 'Inactive Unread',
+          pinned: true,
+          lastActiveAt: NOW + 1_000,
+          unreadCount: 1,
+          hasUserMention: false,
+          presence: { status: 'idle' },
+        }),
+      ],
+      threadStates: {},
+    });
+
+    await harness.render();
+    await clickTab(harness.container, 'recent', harness.flush);
+
+    expect(visibleThreadIds(harness.container)).toEqual(['working-first', 'working-second', 'inactive-unread']);
   });
 
   it('restores the user-selected tab after the sidebar remounts', async () => {

@@ -26,23 +26,20 @@ function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
 
 function selectText(node: Node, text: string) {
   const rect = () => ({ top: 120, right: 260, bottom: 140, left: 120, width: 140, height: 20 }) as DOMRect;
+  const range = document.createRange();
+  range.setStart(node, 0);
+  range.setEnd(node, text.length);
+  Object.defineProperties(range, {
+    getClientRects: { value: () => [rect()] },
+    getBoundingClientRect: { value: rect },
+  });
   vi.spyOn(window, 'getSelection').mockReturnValue({
     isCollapsed: false,
     anchorNode: node,
     focusNode: node,
-    toString: () => text,
+    toString: () => range.toString(),
     rangeCount: 1,
-    getRangeAt: () => ({
-      getClientRects: () => [rect()],
-      getBoundingClientRect: rect,
-      commonAncestorContainer: node,
-      toString: () => text,
-      cloneRange: () => ({
-        selectNodeContents: vi.fn(),
-        setEnd: vi.fn(),
-        toString: () => '',
-      }),
-    }),
+    getRangeAt: () => range,
     removeAllRanges: vi.fn(),
   } as unknown as Selection);
   document.dispatchEvent(new Event('selectionchange'));
@@ -179,6 +176,54 @@ describe('Message quote forwarding', () => {
         text: 'selected source text',
         selectionStart: 0,
         selectionEnd: 20,
+      },
+    ]);
+  });
+
+  it('labels Markdown-rendered CLI stdout with its readable projection and browser uniqueness proof', () => {
+    act(() => {
+      root.render(
+        <MessageActions
+          message={{
+            id: 'source-message-1',
+            type: 'assistant',
+            catId: 'opus',
+            content: '| Surface | Status |\n| --- | --- |\n| Hub | `green` |',
+            timestamp: 1,
+            projectionSourceMessageIds: ['source-stream-1', 'source-message-1'],
+          }}
+          threadId="source-thread"
+        >
+          <div data-context-quote-source="cli_output">
+            <span
+              data-testid="source-text"
+              data-context-quote-segment-id="stdout"
+              data-context-quote-projection-version="2"
+            >
+              Hub green
+            </span>
+          </div>
+        </MessageActions>,
+      );
+    });
+    const textNode = container.querySelector('[data-testid="source-text"]')?.firstChild;
+    if (!textNode) throw new Error('source text missing');
+    act(() => selectText(textNode, 'Hub green'));
+    act(() => document.body.querySelector<HTMLButtonElement>('[data-testid="message-selection-add-to-chat"]')?.click());
+    act(() => document.body.querySelector<HTMLButtonElement>('[data-testid="context-annotation-forward"]')?.click());
+
+    const probe = container.querySelector<HTMLOutputElement>('[data-testid="forward-picker-probe"]');
+    expect(JSON.parse(probe?.dataset.items ?? '[]')).toEqual([
+      {
+        kind: 'cli_quote',
+        messageId: 'source-message-1',
+        sourceMessageIds: ['source-stream-1', 'source-message-1'],
+        segmentId: 'stdout',
+        text: 'Hub green',
+        selectionStart: 0,
+        selectionEnd: 9,
+        sourceProjectionVersion: 2,
+        renderedOccurrences: 1,
       },
     ]);
   });

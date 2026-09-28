@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { Thread } from '@/stores/chat-types';
+import type { SidebarSnapshotRow } from '@/stores/sidebarProjectionStore';
 
 export const VIRTUAL_THREAD_LIST_THRESHOLD = 50;
 const ROW_HEIGHT_PX = 80;
@@ -17,12 +17,13 @@ const FALLBACK_VIEWPORT_HEIGHT_PX = 640;
 
 export interface VirtualThreadListHandle {
   scrollToIndex(index: number): void;
+  ensureIndexVisible(index: number): void;
 }
 
 interface VirtualThreadListProps {
-  threads: Thread[];
+  threads: SidebarSnapshotRow[];
   scrollContainerRef: RefObject<HTMLDivElement>;
-  renderItem: (thread: Thread) => ReactNode;
+  renderItem: (thread: SidebarSnapshotRow) => ReactNode;
 }
 
 function offsetTopWithin(element: HTMLElement, container: HTMLElement): number {
@@ -33,6 +34,18 @@ function offsetTopWithin(element: HTMLElement, container: HTMLElement): number {
     current = current.offsetParent as HTMLElement | null;
   }
   return top;
+}
+
+function visibleTopInset(container: HTMLElement): number {
+  const containerTop = container.getBoundingClientRect().top;
+  const occluder = container.querySelector<HTMLElement>('[data-scroll-occluder="true"]');
+  if (!occluder) return 0;
+  const rect = occluder.getBoundingClientRect();
+  return rect.top <= containerTop + 2 && rect.bottom > containerTop ? rect.bottom - containerTop : 0;
+}
+
+function viewportHeight(container: HTMLElement): number {
+  return container.clientHeight || FALLBACK_VIEWPORT_HEIGHT_PX;
 }
 
 export const VirtualThreadList = forwardRef<VirtualThreadListHandle, VirtualThreadListProps>(function VirtualThreadList(
@@ -82,11 +95,30 @@ export const VirtualThreadList = forwardRef<VirtualThreadListHandle, VirtualThre
         const container = scrollContainerRef.current;
         const list = listRef.current;
         if (!container || !list || index < 0 || index >= threads.length) return;
-        const viewportHeight = container.clientHeight || FALLBACK_VIEWPORT_HEIGHT_PX;
+        const height = viewportHeight(container);
         container.scrollTop = Math.max(
           0,
-          offsetTopWithin(list, container) + index * ROW_HEIGHT_PX - viewportHeight / 2 + ROW_HEIGHT_PX / 2,
+          offsetTopWithin(list, container) + index * ROW_HEIGHT_PX - height / 2 + ROW_HEIGHT_PX / 2,
         );
+        updateRange();
+      },
+      ensureIndexVisible(index: number) {
+        const container = scrollContainerRef.current;
+        const list = listRef.current;
+        if (!container || !list || index < 0 || index >= threads.length) return;
+        const height = viewportHeight(container);
+        const rowTop = offsetTopWithin(list, container) + index * ROW_HEIGHT_PX;
+        const rowBottom = rowTop + ROW_HEIGHT_PX;
+        const topInset = visibleTopInset(container);
+        const visibleTop = container.scrollTop + topInset;
+        const visibleBottom = container.scrollTop + height;
+
+        if (rowTop < visibleTop) {
+          container.scrollTop = Math.max(0, rowTop - topInset);
+          updateRange();
+          return;
+        }
+        if (rowBottom > visibleBottom) container.scrollTop = rowBottom - height;
         updateRange();
       },
     }),

@@ -345,6 +345,82 @@ describe('MessageReceiptDock', () => {
     expect(container.textContent).not.toContain('处理完成');
   });
 
+  it('renders terminal TurnExecution truth without a broken lineage claim and converges after lineage hydration', () => {
+    const terminalWithoutLineage = {
+      version: 1,
+      entryId: 'cross-thread:message-output-rejected',
+      scope: 'cross_thread_delivery',
+      targets: [
+        {
+          catId: 'codex-sol',
+          state: 'handled',
+          invocationId: 'child-output-rejected',
+          seenAt: 700,
+          outcome: {
+            invocationId: 'child-output-rejected',
+            disposition: 'completed_with_turn',
+            evidenceRef: { kind: 'turn_execution', invocationId: 'child-output-rejected' },
+            handledAt: 800,
+          },
+        },
+      ],
+      reminderAttempts: [],
+    } as unknown as QueueMessageReceipt;
+
+    act(() => {
+      root.render(<MessageReceiptDock receipt={terminalWithoutLineage} messages={[]} getCatLabel={() => '砚砚'} />);
+    });
+
+    expect(container.textContent).toContain('砚砚 · 本轮已结束，无可见回复');
+    expect(container.querySelector('[data-receipt-lineage-link]')).toBeNull();
+    expect(container.textContent).not.toContain('查看本轮');
+
+    act(() => {
+      root.render(
+        <MessageReceiptDock
+          receipt={structuredClone(terminalWithoutLineage)}
+          messages={[]}
+          getCatLabel={() => '砚砚'}
+        />,
+      );
+    });
+    expect(container.textContent).toContain('砚砚 · 本轮已结束，无可见回复');
+    expect(container.querySelector('[data-receipt-lineage-link]')).toBeNull();
+
+    const repairedLineage: ChatMessage[] = [
+      {
+        id: 'authorized-lineage-repair',
+        type: 'assistant',
+        catId: 'codex-sol',
+        content: 'authorized persisted repair',
+        timestamp: 900,
+        extra: {
+          turnExecution: {
+            invocationId: 'child-output-rejected',
+            parentInvocationId: 'parent-output-rejected',
+            executionKind: 'ordinary',
+          },
+        },
+      },
+    ];
+    act(() => {
+      root.render(
+        <MessageReceiptDock
+          receipt={structuredClone(terminalWithoutLineage)}
+          messages={repairedLineage}
+          getCatLabel={() => '砚砚'}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain('砚砚 · 正文已由本轮消费');
+    expect(container.textContent).not.toContain('本轮已结束，无可见回复');
+    const lineageLinks = container.querySelectorAll<HTMLButtonElement>('[data-receipt-lineage-link]');
+    expect(lineageLinks).toHaveLength(1);
+    expect(lineageLinks[0]?.disabled).toBe(false);
+    expect(lineageLinks[0]?.textContent).toBe('查看本轮 ↑');
+  });
+
   it('distinguishes failure before child creation from invoked-but-unsettled', () => {
     const base: QueueMessageReceipt = {
       version: 1,
@@ -446,6 +522,46 @@ describe('MessageReceiptDock', () => {
         />,
       );
     });
+    expect(container.querySelector('[data-retry-target="codex"]')).toBeNull();
+  });
+
+  it('shows runtime restart as an explicit interruption without automatic retry', () => {
+    act(() => {
+      root.render(
+        <MessageReceiptDock
+          messageId="message-interrupted"
+          receipt={{
+            version: 1,
+            entryId: 'entry-interrupted',
+            targets: [
+              {
+                catId: 'codex',
+                state: 'interrupted',
+                invocationId: 'invocation-interrupted',
+                attempts: [
+                  {
+                    id: 'entry-interrupted:codex:1',
+                    targetCatId: 'codex',
+                    sequence: 1,
+                    state: 'interrupted',
+                    invocationId: 'invocation-interrupted',
+                    createdAt: 100,
+                    updatedAt: 200,
+                    terminalReason: 'runtime_restart',
+                  },
+                ],
+              },
+            ],
+            reminderAttempts: [],
+          }}
+          messages={[]}
+          getCatLabel={() => '砚砚'}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain('砚砚 · 运行因服务重启中断 · 未自动重试');
+    expect(container.textContent).toContain('运行已因服务重启中断；系统没有自动重放');
     expect(container.querySelector('[data-retry-target="codex"]')).toBeNull();
   });
 
@@ -562,11 +678,39 @@ describe('MessageReceiptDock', () => {
     expect(container.querySelector('[title="消息已由你撤出待处理，提醒随之结束"]')).not.toBeNull();
   });
 
+  it('shows a terminal no-op instead of recovery for an ended action-successor notice', () => {
+    const terminalNotice: QueueMessageReceipt = {
+      version: 1,
+      entryId: 'entry-terminal-notice',
+      scope: 'cross_thread_delivery',
+      targets: [{ catId: 'codex', state: 'withdrawn', retryable: false, withdrawnAt: 900 }],
+      reminderAttempts: [],
+    };
+
+    act(() => {
+      root.render(
+        <MessageReceiptDock
+          messageId="message-terminal-notice"
+          receipt={terminalNotice}
+          messages={[]}
+          getCatLabel={() => '砚砚'}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain('砚砚 · 通知未送达 · 关联事项已结束');
+    expect(container.querySelector('[data-retry-target="codex"]')).toBeNull();
+  });
+
   it('does not render a work-period dock for the message that started the invocation', () => {
     act(() => {
       root.render(
         <MessageReceiptDock
-          receipt={{ ...receipt, scope: 'primary_trigger' }}
+          receipt={{
+            ...receipt,
+            targets: receipt.targets.filter((target) => target.state === 'handled'),
+            scope: 'primary_trigger',
+          }}
           messages={[]}
           getCatLabel={(catId) => catId}
         />,
@@ -575,6 +719,35 @@ describe('MessageReceiptDock', () => {
 
     expect(container.querySelector('[data-testid="message-receipt-dock"]')).toBeNull();
     expect(container.textContent).toBe('');
+  });
+
+  it('shows an explicit retry for a rejected queued primary trigger without replaying healthy siblings', async () => {
+    const failedAttempt = {
+      id: 'entry-1:sonnet:1',
+      targetCatId: 'sonnet',
+      sequence: 1,
+      state: 'failed' as const,
+      createdAt: 100,
+      updatedAt: 200,
+      terminalReason: 'invocation_failed' as const,
+    };
+    await act(async () => {
+      root.render(
+        <MessageReceiptDock
+          messageId="original-queued"
+          receipt={{
+            ...receipt,
+            scope: 'primary_trigger',
+            targets: [receipt.targets[0]!, { catId: 'sonnet', state: 'failed', attempts: [failedAttempt] }],
+          }}
+          messages={[]}
+          getCatLabel={(id) => id}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-retry-target="opus"]')).toBeNull();
+    expect(container.querySelector('[data-retry-target="sonnet"]')).not.toBeNull();
+    expect(mockApiFetch.mock.calls.every((call) => call[1]?.method !== 'POST')).toBe(true);
   });
 });
 

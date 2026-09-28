@@ -1,5 +1,6 @@
 import type { CatId } from '@cat-cafe/shared';
 import type { DynamicTaskDef } from '../../infrastructure/scheduler/DynamicTaskStore.js';
+import type { OwnerAuthProvenance } from '../cats/services/owner-auth-provenance.js';
 import type { InvocationRecord } from '../cats/services/stores/ports/InvocationRecordStore.js';
 import type { IMessageStore, StoredMessage } from '../cats/services/stores/ports/MessageStore.js';
 import {
@@ -16,6 +17,7 @@ import {
  * 此处 re-export 保持既有 import 路径不变；判别仍然只有一份实现。
  */
 export {
+  buildAdmissionFactIdempotencyKey,
   createInitialManagedCommandWakeProjection,
   HOLD_BALL_TASK_ID_PREFIX,
   isHoldBallWakeTask,
@@ -42,6 +44,13 @@ export type ManagedCommandWakeTriggerOutcome = 'dispatched' | 'enqueued' | 'full
 
 export type ManagedCommandWakeEventCarrier =
   | { state: 'missing' | 'pending' | 'orphaned' }
+  | {
+      state: 'failed';
+      attemptId: string;
+      attemptSequence: number;
+      invocationId?: string;
+      errorCode?: string;
+    }
   | { state: 'handled'; invocationId?: string }
   | { state: 'terminal'; reason: ManagedCommandWakeCarrierTerminalReason };
 
@@ -67,6 +76,20 @@ export function resolveManagedCommandWakeEventCarrier(
     if ('activeQueueEntryId' in expected && expected.activeQueueEntryId !== custody.entryId) {
       return { state: 'orphaned' };
     }
+    if (custody.failedByCatIds.includes(expected.catId as CatId)) {
+      const failedAttempt = (custody.targetAttempts ?? [])
+        .filter((attempt) => attempt.targetCatId === expected.catId && attempt.state === 'failed')
+        .sort((left, right) => left.sequence - right.sequence)
+        .at(-1);
+      if (failedAttempt) {
+        return {
+          state: 'failed',
+          attemptId: failedAttempt.id,
+          attemptSequence: failedAttempt.sequence,
+          ...(failedAttempt.invocationId ? { invocationId: failedAttempt.invocationId } : {}),
+        };
+      }
+    }
     return { state: 'pending' };
   }
   return { state: 'missing' };
@@ -80,20 +103,22 @@ export interface ManagedCommandWakeTrigger {
     message: string,
     messageId: string,
     contentBlocks?: undefined,
-    policy?: { sourceCategory?: string; forceQueue?: boolean },
+    policy?: { sourceCategory?: string; forceQueue?: boolean; ownerAuthProvenance?: OwnerAuthProvenance },
   ): Promise<ManagedCommandWakeTriggerOutcome>;
 }
 
 export interface ManagedCommandWakeDynamicTaskStore {
   getAll(): DynamicTaskDef[];
   getById(id: string): DynamicTaskDef | null;
+  /** Production stores must expose the private carrier; runtime legacy shapes still normalize to unknown. */
+  getPrivateOwnerAuthProvenance(id: string): OwnerAuthProvenance;
   updateParamsIfCurrent(id: string, current: Record<string, unknown>, next: Record<string, unknown>): boolean;
   setEnabled(id: string, enabled: boolean): boolean;
 }
 
 export interface ManagedCommandWakeRecoveryDeps {
   readonly dynamicTaskStore: ManagedCommandWakeDynamicTaskStore;
-  readonly messageStore: Pick<IMessageStore, 'append' | 'getByIdempotencyKey'> &
+  readonly messageStore: Pick<IMessageStore, 'append' | 'getByIdempotencyKey' | 'markCanceled'> &
     Partial<Pick<IMessageStore, 'getById'>>;
   readonly socketManager: { broadcastToRoom(room: string, event: string, payload: unknown): void };
   readonly taskRunner: { unregister(taskId: string): void };
@@ -112,6 +137,15 @@ export interface ManagedCommandWakeRecoveryDeps {
     catId: string;
     messageId: string;
   }) => ManagedCommandWakeEventCarrier | Promise<ManagedCommandWakeEventCarrier>;
+  /** Retry one exact failed Queue target; the implementation must append a durable attempt fence before execution. */
+  readonly retryEventCarrier?: (input: {
+    taskId: string;
+    threadId: string;
+    userId: string;
+    catId: string;
+    messageId: string;
+    attemptId: string;
+  }) => 'retried' | 'not_retryable' | 'unavailable' | Promise<'retried' | 'not_retryable' | 'unavailable'>;
   readonly now?: () => number;
   readonly dispatchedCarrierGraceMs?: number;
   readonly wakeSlaMs?: number;
@@ -139,7 +173,7 @@ export function buildCancelledManagedCommandCompletionParams(
     !command ||
     command.state !== 'command_running' ||
     !isPlainRecord(lifecycle) ||
-    lifecycle.status !== 'cancelled_by_user'
+    (lifecycle.status !== 'cancelled_by_user' && lifecycle.status !== 'cancel_requested')
   ) {
     return null;
   }
@@ -147,6 +181,7 @@ export function buildCancelledManagedCommandCompletionParams(
     ...task.params,
     holdLifecycle: {
       ...lifecycle,
+      status: 'cancelled_by_user',
       managedCommand: {
         ...command,
         state: 'cancelled',

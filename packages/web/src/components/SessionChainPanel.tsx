@@ -1,11 +1,11 @@
 'use client';
 
-// biome-ignore lint/correctness/noUnusedImports: React needed for JSX in vitest environment
 import React, { useEffect, useState } from 'react';
 import { formatCatName, useCatData } from '@/hooks/useCatData';
 import type { CatInvocationInfo, ContextHealthData } from '@/stores/chat-types';
 import { apiFetch } from '@/utils/api-client';
 import { BindNewSessionSection } from './BindNewSessionSection';
+import { CloudConversationLink } from './CloudConversationLink';
 import { ContextHealthBar } from './ContextHealthBar';
 import { CriticalText } from './content-overflow';
 import { BindSessionInput, SessionIdTag } from './SessionChainInputs';
@@ -36,15 +36,6 @@ interface SessionSummary {
     cacheReadTokens?: number;
     costUsd?: number;
   };
-  appliedPolicy?: {
-    config: { strategy: 'handoff' | 'compress' | 'hybrid' };
-    source: string;
-    revision: string;
-    execution: {
-      status: 'active' | 'degraded' | 'unavailable';
-      missingCapabilities: string[];
-    };
-  };
   runtimeSession?: RuntimeSessionSummary;
 }
 
@@ -70,7 +61,29 @@ interface RuntimeSessionSummary {
   };
 }
 
+interface SessionChainLoadError {
+  kind: 'access_denied' | 'request_failed';
+  message: string;
+}
+
 const sessionCache = new Map<string, SessionSummary[]>();
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isSessionSummary(value: unknown): value is SessionSummary {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const session = value as Record<string, unknown>;
+  return (
+    typeof session.id === 'string' &&
+    typeof session.catId === 'string' &&
+    isFiniteNumber(session.seq) &&
+    (session.status === 'active' || session.status === 'sealing' || session.status === 'sealed') &&
+    isFiniteNumber(session.messageCount) &&
+    isFiniteNumber(session.createdAt)
+  );
+}
 
 export function __resetSessionChainCacheForTest() {
   sessionCache.clear();
@@ -79,6 +92,7 @@ export function __resetSessionChainCacheForTest() {
 export interface SessionChainPanelProps {
   threadId: string;
   catInvocations: Record<string, CatInvocationInfo>;
+  activeInvocations?: Record<string, { catId: string; mode: string; startedAt?: number }>;
   onViewSession?: (sessionId: string, catId?: string) => void;
 }
 
@@ -139,9 +153,6 @@ function sealedSessionDetails(session: SessionSummary): string | undefined {
         ? `${session.compressionCount} compress`
         : '0 compress observed',
     session.sealReason ? sealReasonLabel(session.sealReason) : null,
-    session.appliedPolicy
-      ? `${session.appliedPolicy.config.strategy} · ${session.appliedPolicy.execution.status}`
-      : null,
   ].filter(Boolean);
   return details.length > 0 ? details.join(' · ') : undefined;
 }
@@ -152,13 +163,43 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-export function SessionChainPanel({ threadId, catInvocations, onViewSession }: SessionChainPanelProps) {
+function unsealedSessionLifecycle(isRunning: boolean) {
+  if (isRunning) {
+    return {
+      kind: 'running',
+      label: '正在工作',
+      dotClass: 'animate-pulse bg-[var(--color-conn-emerald-text)]',
+      labelClass: 'text-conn-emerald-text',
+    } as const;
+  }
+  return {
+    kind: 'resumable',
+    label: '未封存 · 可续接',
+    dotClass: 'bg-cafe-muted',
+    labelClass: 'text-cafe-muted',
+  } as const;
+}
+
+function terminalSessionLifecycle(status: SessionSummary['status']) {
+  if (status === 'sealed') return { kind: 'sealed', label: '已封存' } as const;
+  return { kind: 'sealing', label: '封存中' } as const;
+}
+
+export function SessionChainPanel({
+  threadId,
+  catInvocations,
+  activeInvocations = {},
+  onViewSession,
+}: SessionChainPanelProps) {
   const { getCatById } = useCatData();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadedThreadId, setLoadedThreadId] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<SessionChainLoadError | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [restoringSessionId, setRestoringSessionId] = useState<string | null>(null);
+  const [sealingSessionId, setSealingSessionId] = useState<string | null>(null);
+  const [compactingSessionId, setCompactingSessionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [chainCollapsed, setChainCollapsed] = useState(false);
   const [sealedCollapsed, setSealedCollapsed] = useState(true);
@@ -182,8 +223,8 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
     .map((inv) => `${inv.sessionSeq ?? ''}:${inv.sessionSealed ?? ''}`)
     .join(',');
 
-  // Fetch sessions — stale-while-revalidate: keep old data visible until
-  // the new response arrives, preventing blank flashes on thread switch / F5.
+  // Fetch sessions into a thread-owned result set. Cached data for the requested
+  // thread may render immediately; data owned by another thread never may.
   // biome-ignore lint/correctness/useExhaustiveDependencies: sealSignal+refreshKey intentionally trigger re-fetch
   useEffect(() => {
     let cancelled = false;
@@ -192,20 +233,47 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
       setSessions(cached);
       setLoadedThreadId(threadId);
     }
+    setLoadError(null);
     setLoading(true);
     apiFetch(`/api/threads/${threadId}/sessions`)
       .then(async (res) => {
         if (cancelled) return;
-        if (!res.ok) return;
-        const data = (await res.json()) as { sessions: SessionSummary[] };
+        if (!res.ok) {
+          let code: string | undefined;
+          try {
+            code = ((await res.json()) as { code?: string }).code;
+          } catch {
+            // A non-JSON failure still gets an honest typed fallback below.
+          }
+          if (cancelled) return;
+          if (res.status === 403 || code === 'THREAD_ACCESS_DENIED') {
+            sessionCache.delete(threadId);
+            setSessions([]);
+            setLoadedThreadId(null);
+            setLoadError({
+              kind: 'access_denied',
+              message: '无权查看这个 Thread 的 Session Chain',
+            });
+          } else {
+            setLoadError({ kind: 'request_failed', message: `Session Chain 加载失败 (${res.status})` });
+          }
+          return;
+        }
+        const data = (await res.json()) as { sessions?: unknown };
+        if (!Array.isArray(data.sessions) || !data.sessions.every(isSessionSummary)) {
+          throw new Error('Session Chain response contained an invalid sessions collection');
+        }
+        const sessions = data.sessions;
         if (!cancelled) {
-          sessionCache.set(threadId, data.sessions);
-          setSessions(data.sessions);
+          sessionCache.set(threadId, sessions);
+          setSessions(sessions);
           setLoadedThreadId(threadId);
+          setLoadError(null);
         }
       })
       .catch(() => {
-        // Keep stale data visible on transient errors
+        // Keep the last result cached under its owner, but never project it under this thread.
+        if (!cancelled) setLoadError({ kind: 'request_failed', message: 'Session Chain 加载失败' });
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -215,9 +283,11 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
     };
   }, [threadId, sealSignal, refreshKey]);
 
-  const activeSessions = sessions.filter((s) => s.status === 'active');
-  const activeCatIds = new Set(activeSessions.map((s) => s.catId));
-  const sealedSessions = sessions
+  const visibleSessions = loadedThreadId === threadId ? sessions : [];
+  const unsealedSessions = visibleSessions.filter((s) => s.status === 'active');
+  const activeCatIds = new Set(unsealedSessions.map((s) => s.catId));
+  const runningCatIds = new Set(Object.values(activeInvocations).map((invocation) => invocation.catId));
+  const sealedSessions = visibleSessions
     .filter((s) => s.status === 'sealed' || s.status === 'sealing')
     .sort((a, b) => (b.sealedAt ?? b.createdAt) - (a.sealedAt ?? a.createdAt));
 
@@ -258,7 +328,7 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
 
   const handleRestoreAsCurrent = async (session: SessionSummary) => {
     if (restoringSessionId) return;
-    const current = activeSessions.find((candidate) => candidate.catId === session.catId);
+    const current = unsealedSessions.find((candidate) => candidate.catId === session.catId);
     if (
       current &&
       !window.confirm(
@@ -288,6 +358,59 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
     }
   };
 
+  const handleSeal = async (sessionId: string) => {
+    if (sealingSessionId) return;
+    setActionError(null);
+    setSealingSessionId(sessionId);
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}/seal`, { method: 'POST' });
+      if (!res.ok) {
+        let message = `封存失败 (${res.status})`;
+        try {
+          const data = (await res.json()) as { error?: string };
+          if (data?.error) message = data.error;
+        } catch {
+          /* best-effort */
+        }
+        setActionError(message);
+        // A non-2xx seal response can still report a completed state transition
+        // (for example SESSION_SEAL_PARTIAL), so reconcile with the authoritative chain.
+        setRefreshKey((key) => key + 1);
+        return;
+      }
+      setRefreshKey((key) => key + 1);
+    } catch {
+      setActionError('封存请求失败');
+      // A transport failure is ambiguous: the server may have claimed and sealed
+      // the session before the connection dropped. Reconcile with the
+      // authoritative chain rather than leaving an actionable stale card.
+      setRefreshKey((key) => key + 1);
+    } finally {
+      setSealingSessionId(null);
+    }
+  };
+
+  const handleNativeCompact = async (session: SessionSummary) => {
+    if (compactingSessionId || !session.cliSessionId) return;
+    setActionError(null);
+    setCompactingSessionId(session.id);
+    try {
+      const response = await apiFetch(`/api/threads/${threadId}/sessions/${session.catId}/compact-native`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        setActionError(body.error ?? `原生压缩失败 (${response.status})`);
+        return;
+      }
+      setRefreshKey((key) => key + 1);
+    } catch {
+      setActionError('原生压缩请求失败');
+    } finally {
+      setCompactingSessionId(null);
+    }
+  };
+
   return (
     <section className={`${settingsResourceCardClass} p-2.5`}>
       <button
@@ -305,9 +428,19 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
           <h3 className="text-xs font-bold text-cafe">Session Chain</h3>
         </div>
         <span className="text-micro font-bold text-cafe-muted">
-          {activeSessions.length} active · {sessions.length} total
+          {loadError?.kind === 'access_denied' && visibleSessions.length === 0
+            ? '不可用'
+            : `${unsealedSessions.length} 未封存 · ${visibleSessions.length} total`}
         </span>
       </button>
+      {loadError && (
+        <div
+          data-testid={loadError.kind === 'access_denied' ? 'session-chain-access-denied' : 'session-chain-load-failed'}
+          className="mb-2 rounded border border-conn-red-ring bg-conn-red-bg px-2 py-1 text-micro text-conn-red-text"
+        >
+          {loadError.message}
+        </div>
+      )}
       {actionError && (
         <div className="mb-2 rounded border border-conn-red-ring bg-conn-red-bg px-2 py-1 text-micro text-conn-red-text">
           {actionError}
@@ -327,10 +460,11 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
         </div>
       )}
 
-      {/* Active sessions */}
+      {/* Current unsealed sessions. Storage status "active" does not imply live execution. */}
       {!chainCollapsed &&
-        activeSessions.map((session) => {
+        unsealedSessions.map((session) => {
           const inv = catInvocations[session.catId];
+          const lifecycle = unsealedSessionLifecycle(runningCatIds.has(session.catId));
           const health: ContextHealthData | undefined =
             inv?.contextHealth ??
             (session.contextHealth
@@ -342,18 +476,20 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
           // Prefer live invocation usage, fallback to persisted session usage
           const usage = inv?.usage ?? session.lastUsage;
           const cachePct = cachePercent(usage?.cacheReadTokens, usage?.inputTokens);
+          const invocationIsActive = Boolean(inv?.invocationId);
 
           const colors = colorsForCat(session.catId);
 
           return (
             <div key={session.id} className="mb-2">
               <div className="flex items-center gap-1 mb-1">
-                <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-conn-emerald-text)]" />
-                <span className="text-micro font-bold text-conn-emerald-text uppercase tracking-wider">Active</span>
+                <span className={`inline-block h-1.5 w-1.5 rounded-full ${lifecycle.dotClass}`} />
+                <span className={`text-micro font-bold ${lifecycle.labelClass}`}>{lifecycle.label}</span>
               </div>
               <div
                 data-testid="session-card-active"
                 data-cat-id={session.catId}
+                data-session-lifecycle={lifecycle.kind}
                 className="console-list-card session-corner-arcs rounded-xl p-2.5"
                 style={{ boxShadow: colors.cardShadow }}
               >
@@ -383,18 +519,6 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
                   )}
                   {session.compressionCount === 0 && <span className="text-cafe-muted"> · 0 compress observed</span>}
                 </div>
-                {session.appliedPolicy && (
-                  <div
-                    data-testid="session-policy-state"
-                    className="mb-1.5 rounded bg-[var(--console-runtime-field-bg)] px-2 py-1 text-micro text-cafe-secondary"
-                  >
-                    <span className="font-semibold">policy {session.appliedPolicy.config.strategy}</span>
-                    <span> · {session.appliedPolicy.execution.status}</span>
-                    {session.appliedPolicy.execution.missingCapabilities.length > 0 && (
-                      <span> · missing {session.appliedPolicy.execution.missingCapabilities.join(', ')}</span>
-                    )}
-                  </div>
-                )}
                 {session.runtimeSession && (
                   <div
                     data-testid="runtime-session-summary"
@@ -446,6 +570,40 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
                 )}
                 {/* Context health bar (already shows % internally, no duplicate text) */}
                 {health && <ContextHealthBar catId={session.catId} health={health} />}
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  {session.cliSessionId && (
+                    <button
+                      type="button"
+                      data-testid={`compact-native-session-${session.id}`}
+                      onClick={() => void handleNativeCompact(session)}
+                      disabled={compactingSessionId !== null || isStale || invocationIsActive}
+                      title={
+                        invocationIsActive
+                          ? '请先停止该 Agent，再压缩原生上下文'
+                          : '请求 provider 原生压缩并保留 Clowder AI continuity'
+                      }
+                      className="rounded border border-cafe-subtle px-2 py-0.5 text-micro text-cafe-secondary hover:bg-cafe-surface-elevated disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {compactingSessionId === session.id ? '压缩中…' : '原生压缩'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    data-testid={`seal-session-${session.id}`}
+                    className="rounded border border-[var(--_accent-20)] px-2 py-0.5 text-micro text-[var(--color-cafe-accent)] hover:bg-[var(--_accent-5)] disabled:cursor-not-allowed disabled:opacity-50"
+                    style={
+                      {
+                        '--_accent-20': 'color-mix(in oklch, var(--color-cafe-accent) 20%, transparent)',
+                        '--_accent-5': 'color-mix(in oklch, var(--color-cafe-accent) 5%, transparent)',
+                      } as React.CSSProperties
+                    }
+                    onClick={() => void handleSeal(session.id)}
+                    disabled={sealingSessionId !== null || isStale || invocationIsActive}
+                    title={invocationIsActive ? '请先停止该 Agent，再封存会话' : '封存当前会话；下次激活将使用新会话'}
+                  >
+                    {sealingSessionId === session.id ? '封存中…' : '封存当前会话'}
+                  </button>
+                </div>
                 {/* Bind CLI session ID (skip default thread — system-owned, bind returns 403) */}
                 {threadId !== 'default' && (
                   <BindSessionInput
@@ -475,18 +633,20 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
             >
               ▾
             </span>
-            <span className="text-micro font-bold text-cafe-muted uppercase tracking-wider">Sealed</span>
+            <span className="text-micro font-bold text-cafe-muted tracking-wider">已封存</span>
             <span className="text-micro text-cafe-muted">{sealedSessions.length}</span>
           </button>
           {!sealedCollapsed && (
             <div className="space-y-1">
               {visibleSealedSessions.map((session) => {
                 const sealedColors = colorsForCat(session.catId);
+                const lifecycle = terminalSessionLifecycle(session.status);
                 return (
                   <div
                     key={session.id}
                     data-testid="session-card-sealed"
                     data-cat-id={session.catId}
+                    data-session-lifecycle={lifecycle.kind}
                     className="console-list-card session-corner-arcs flex items-center gap-2 rounded-xl px-2.5 py-1.5"
                     style={{ boxShadow: sealedColors.cardShadow }}
                   >
@@ -520,6 +680,7 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
                         <SessionIdTag id={session.cliSessionId ?? session.id} />
                       </div>
                       <div data-testid="sealed-session-summary" className="min-w-0">
+                        <div className="text-micro font-medium text-cafe-muted">{lifecycle.label}</div>
                         <CriticalText
                           summary={sealedSessionSummary(session)}
                           details={sealedSessionDetails(session)}
@@ -579,21 +740,20 @@ export function SessionChainPanel({ threadId, catInvocations, onViewSession }: S
         </div>
       )}
 
-      {/* F33: Bind new external session (skip default thread — system-owned, bind returns 403) */}
-      {threadId !== 'default' && (
-        <BindNewSessionSection
-          threadId={threadId}
-          activeCatIds={activeCatIds}
-          onBound={() => setRefreshKey((k) => k + 1)}
-          disabled={isStale}
-        />
+      {/* External conversation/session bindings (skip default thread — system-owned routes return 403). */}
+      {!chainCollapsed && threadId !== 'default' && loadError?.kind !== 'access_denied' && (
+        <>
+          <CloudConversationLink threadId={threadId} />
+          <BindNewSessionSection
+            threadId={threadId}
+            activeCatIds={activeCatIds}
+            onBound={() => setRefreshKey((k) => k + 1)}
+            disabled={isStale}
+          />
+        </>
       )}
 
-      {isStale && sessions.length > 0 && (
-        <div className="text-micro text-cafe-muted text-center py-1 animate-pulse">Refreshing...</div>
-      )}
-
-      {loading && sessions.length === 0 && (
+      {loading && visibleSessions.length === 0 && (
         <div className="text-micro text-cafe-muted text-center py-2">Loading sessions...</div>
       )}
     </section>

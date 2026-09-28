@@ -1,6 +1,12 @@
 'use client';
 
-import type { CliDiagnostics, FreshnessSupplementProjection, ReplyPreview } from '@cat-cafe/shared';
+import type {
+  A2ARoutingProjection,
+  CliDiagnostics,
+  FreshnessSupplementProjection,
+  ProviderSemanticEvent,
+  ReplyPreview,
+} from '@cat-cafe/shared';
 import { useCallback, useEffect, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { parseFreshnessCarrierCapability } from '@/components/message-disposition-presentation';
@@ -9,6 +15,7 @@ import { recordBubbleInvariantViolation } from '@/debug/bubbleInvariantDiagnosti
 import { recordDebugEvent } from '@/debug/invocationEventDebug';
 import { adaptIncomingToBubbleEvent } from '@/hooks/bubble-event-adapter';
 import { useCatNameResolver } from '@/hooks/useCatNameResolver';
+import { resolveProviderSemanticMessage } from '@/lib/provider-semantic-registry';
 import { deriveBubbleKindFromMessage } from '@/stores/bubble-invariants';
 import { projectCanonicalBubbles } from '@/stores/bubble-projection';
 import { applyBubbleEvent, type BubbleReducerInput, type BubbleReducerOutput } from '@/stores/bubble-reducer';
@@ -45,7 +52,7 @@ import {
   formatAgyProgressDetail,
   formatSessionSealRequested,
   formatVisibleSystemInfo,
-  isInternalSystemInfoTelemetry,
+  isSystemInfoProtocolPayload,
 } from './system-info-visible';
 import {
   type ActiveSeedSource,
@@ -270,6 +277,7 @@ function terminalizeSameParentLocalToolOnlyResidues(
 
 interface AgentMsg {
   type: string;
+  semanticEvent?: ProviderSemanticEvent;
   catId: string;
   content?: string;
   textMode?: 'append' | 'replace';
@@ -283,6 +291,7 @@ interface AgentMsg {
     sessionId?: string;
     usage?: import('../stores/chat-types').TokenUsage;
     diagnostics?: Record<string, unknown>;
+    subexecutionEvents?: ChatMessageMetadata['subexecutionEvents'];
     /** F212 Phase B: structured CLI error diagnostics stamped by api providers. */
     cliDiagnostics?: CliDiagnostics;
   };
@@ -299,12 +308,14 @@ interface AgentMsg {
   timestamp?: number;
   /** Machine-readable A2A target cat for handoff events. */
   targetCatId?: string;
+  /** F086/F216: structured serial-vs-parallel scheduling mode for handoff events. */
+  routing?: A2ARoutingProjection;
   /** F67: Whether this message @mentions the co-creator */
   mentionsUser?: boolean;
   /** F52: Cross-thread origin metadata */
   extra?: {
     crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
-    a2aRouting?: { fromCatId?: string; targetCatId?: string; invocationId?: string };
+    a2aRouting?: { fromCatId?: string; targetCatId?: string; invocationId?: string; routing?: A2ARoutingProjection };
     /** #814: True when message originated from an explicit post_message callback */
     isExplicitPost?: boolean;
     /** F098-C1: Explicit target cats from post_message (direction pills) */
@@ -499,6 +510,7 @@ function isCurrentFreshParentSeed(
 
 export interface BackgroundAgentMessage {
   type: string;
+  semanticEvent?: ProviderSemanticEvent;
   catId: string;
   threadId: string;
   content?: string;
@@ -517,6 +529,7 @@ export interface BackgroundAgentMessage {
     sessionId?: string;
     usage?: TokenUsage;
     diagnostics?: Record<string, unknown>;
+    subexecutionEvents?: ChatMessageMetadata['subexecutionEvents'];
     /** F212 Phase B: structured CLI error diagnostics stamped by api providers on __cliError/__cliTimeout.
      *  Travels as-is through `broadcastAgentMessage` spread; web error-path unpacks into `extra.cliDiagnostics`. */
     cliDiagnostics?: CliDiagnostics;
@@ -545,6 +558,8 @@ export interface BackgroundAgentMessage {
   invocationId?: string;
   /** Machine-readable A2A target cat for handoff events. */
   targetCatId?: string;
+  /** F086/F216: structured serial-vs-parallel scheduling mode for handoff events. */
+  routing?: A2ARoutingProjection;
   /** F194 Phase Z3 (砚砚 R P1-1): per-cat-turn invocation id for bubble identity stable key
    *  (prevents same-parent multi-turn-same-cat bubble merge). Backend `messages.ts` broadcastPayload
    *  sets this from inner invokeSingleCat invocation_created event. Frontend writes to
@@ -1271,9 +1286,11 @@ export function consumeBackgroundSystemInfo(
   let sysVariant: 'info' | 'a2a_followup' = 'info';
   let consumed = false;
   let systemInfo: SystemInfoProjection | undefined;
+  let protocolPayload = false;
 
   try {
     const parsed = JSON.parse(sysContent);
+    protocolPayload = isSystemInfoProtocolPayload(parsed);
     const providerRecovery = projectProviderRecoveryMessage(parsed, {
       catId: msg.catId,
       invocationId: msg.invocationId,
@@ -1785,9 +1802,6 @@ export function consumeBackgroundSystemInfo(
         },
       });
       consumed = true;
-    } else if (isInternalSystemInfoTelemetry(parsed)) {
-      // Internal telemetry — suppress to avoid raw JSON bubbles in background threads
-      consumed = true;
     } else if (parsed?.type === 'session_seal_requested') {
       if (parsed.catId) {
         options.store.setThreadCatInvocation(msg.threadId, parsed.catId, {
@@ -1862,6 +1876,9 @@ export function consumeBackgroundSystemInfo(
       consumed = true;
     }
   } catch (error) {
+    // A recognized protocol envelope stays non-visible even when its projector fails.
+    // The failure is diagnostic; it must never reclassify machine data as chat copy.
+    if (protocolPayload) consumed = true;
     if (consumed) {
       console.warn('[system_info] background internal projection failed; payload suppressed', {
         catId: msg.catId,
@@ -1869,9 +1886,13 @@ export function consumeBackgroundSystemInfo(
         error,
       });
     }
-    // Parse failures keep the original content as user-facing system info. Known
-    // internal telemetry sets consumed first and therefore remains fail-closed.
+    // Parse failures keep the original content as user-facing system info. Structured
+    // protocol envelopes fail closed regardless of whether their projector was known.
   }
+
+  // Explicit readable formatters retain `systemInfo`; handled internal projections set
+  // `consumed`. Everything else with a typed protocol envelope is internal by default.
+  if (protocolPayload && !systemInfo) consumed = true;
 
   return { consumed, content: sysContent, variant: sysVariant, systemInfo };
 }
@@ -2111,11 +2132,13 @@ function addBackgroundSystemMessage(
   content: string,
   variant: 'info' | 'a2a_followup' = 'info',
   extra?: ChatMessage['extra'],
+  explicitId?: string,
 ): void {
   const id =
-    extra?.systemKind === 'a2a_routing' && msg.messageId
+    explicitId ??
+    ((extra?.systemKind === 'a2a_routing' || extra?.systemInfo?.payload.type === 'routing_preflight') && msg.messageId
       ? msg.messageId
-      : `bg-sys-${msg.timestamp}-${msg.catId}-${options.nextBgSeq()}`;
+      : `bg-sys-${msg.timestamp}-${msg.catId}-${options.nextBgSeq()}`);
   options.store.addMessageToThread(msg.threadId, {
     id,
     type: 'system',
@@ -2125,6 +2148,26 @@ function addBackgroundSystemMessage(
     timestamp: msg.timestamp,
     ...(extra ? { extra } : {}),
   });
+}
+
+function resolveSemanticSystemMessage(
+  msg: Pick<BackgroundAgentMessage, 'catId' | 'semanticEvent' | 'timestamp'>,
+): { action: 'replace'; message: ChatMessage } | { action: 'augment' } | { action: 'suppress' } {
+  if (!msg.semanticEvent) return { action: 'augment' };
+  const result = resolveProviderSemanticMessage(msg.semanticEvent);
+  if (result.action !== 'replace') return { action: result.action };
+  return {
+    action: 'replace',
+    message: {
+      id: `semantic:${result.projection.eventId}`,
+      type: 'system',
+      variant: result.projection.severity === 'error' ? 'error' : 'info',
+      catId: msg.catId,
+      content: result.projection.content,
+      timestamp: msg.semanticEvent.occurredAt ?? msg.timestamp,
+      extra: { semanticEvent: msg.semanticEvent },
+    },
+  };
 }
 
 /**
@@ -2508,6 +2551,21 @@ export function handleBackgroundAgentMessage(
 ): void {
   const streamKey = getStreamKey(msg);
   const existing = options.bgStreamRefs.get(streamKey);
+
+  if (msg.semanticEvent) {
+    if (msg.semanticEvent.kind === 'subexecution' && msg.metadata?.subexecutionEvents?.length) {
+      ensureBackgroundAssistantMessage(msg, streamKey, existing, options);
+    }
+    const semantic = resolveSemanticSystemMessage(msg);
+    if (semantic.action === 'replace') {
+      const exists = options.store
+        .getThreadState(msg.threadId)
+        .messages.some((message) => message.id === semantic.message.id);
+      if (exists) options.store.patchThreadMessage(msg.threadId, semantic.message.id, semantic.message);
+      else options.store.addMessageToThread(msg.threadId, semantic.message);
+    }
+    if (semantic.action !== 'augment') return;
+  }
 
   if (msg.type === 'text' && msg.content) {
     const isCallbackText = msg.origin === 'callback';
@@ -3010,7 +3068,16 @@ export function handleBackgroundAgentMessage(
   }
 
   if (msg.type === 'done') {
-    stopTrackedStream(streamKey, msg, options);
+    const finalizedStream = stopTrackedStream(streamKey, msg, options);
+    let finalizedMessageId = finalizedStream?.id;
+    if (finalizedStream && msg.messageId && finalizedStream.id !== msg.messageId) {
+      options.store.replaceThreadMessageId(msg.threadId, finalizedStream.id, msg.messageId);
+      options.finalizedBgRefs.set(streamKey, msg.messageId);
+      finalizedMessageId = msg.messageId;
+    }
+    if (finalizedMessageId && msg.content !== undefined) {
+      options.store.patchThreadMessage(msg.threadId, finalizedMessageId, { content: msg.content });
+    }
     const currentStatus = options.store.getThreadState(msg.threadId).catStatuses[msg.catId];
     if (currentStatus !== 'error') {
       options.store.updateThreadCatStatus(msg.threadId, msg.catId, 'done');
@@ -3171,6 +3238,7 @@ export function handleBackgroundAgentMessage(
           fromCatId: msg.catId,
           targetCatId: msg.targetCatId,
           invocationId: msg.invocationId,
+          ...(msg.routing ? { routing: msg.routing } : {}),
         },
       });
       return;
@@ -4639,6 +4707,25 @@ export function useAgentMessages() {
       // Reset timeout on any message (keeps timer alive during streaming)
       resetTimeout();
 
+      if (msg.semanticEvent) {
+        if (msg.semanticEvent.kind === 'subexecution' && msg.metadata?.subexecutionEvents?.length) {
+          const rootMessageId = ensureActiveAssistantMessage(msg.catId, msg.metadata, {
+            ...(msg.invocationId ? { invocationId: msg.invocationId } : {}),
+            ...(msg.turnInvocationId ? { turnInvocationId: msg.turnInvocationId } : {}),
+            currentEventTimestamp: msg.timestamp,
+            currentEventSeq: msg.seq,
+          });
+          patchMessage(rootMessageId, { metadata: msg.metadata });
+        }
+        const semantic = resolveSemanticSystemMessage(msg as BackgroundAgentMessage);
+        if (semantic.action === 'replace') {
+          const exists = useChatStore.getState().messages.some((message) => message.id === semantic.message.id);
+          if (exists) patchMessage(semantic.message.id, semantic.message);
+          else addMessage(semantic.message);
+        }
+        if (semantic.action !== 'augment') return;
+      }
+
       if (msg.type === 'status') {
         const lifecycle = appServerLifecycleFromStatus(msg.metadata);
         if (lifecycle) {
@@ -5267,6 +5354,13 @@ export function useAgentMessages() {
             }
           }
           if (messageId) {
+            if (msg.messageId && msg.messageId !== messageId) {
+              replaceMessageId(messageId, msg.messageId);
+              messageId = msg.messageId;
+            }
+            if (msg.content !== undefined) {
+              patchMessage(messageId, { content: msg.content });
+            }
             setStreaming(messageId, false);
             // Bug-G: back-fill invocationId on bubbles that somehow missed the
             // invocation_created binding path (the primary handler at :789-802
@@ -5312,9 +5406,13 @@ export function useAgentMessages() {
           // co-existence: tool_or_cli / thinking) per ADR-033.
           if (!isStaleDone && msg.invocationId) {
             const threadId = msg.threadId ?? useChatStore.getState().currentThreadId;
-            const event = adaptIncomingToBubbleEvent({ ...msg, threadId } as BackgroundAgentMessage, {
-              sourcePath: 'active',
-            });
+            // The terminal messageId is an identity handoff for the already-visible
+            // assistant bubble, not the identity of a new system_status bubble.
+            // Rekey above, then let the done reducer match only by invocation.
+            const event = adaptIncomingToBubbleEvent(
+              { ...msg, threadId, messageId: undefined } as BackgroundAgentMessage,
+              { sourcePath: 'active' },
+            );
             if (event) {
               const storeSnapshot = useChatStore.getState();
               const result = applyBubbleEventWithRecovery({
@@ -5480,7 +5578,14 @@ export function useAgentMessages() {
         const handoffInvocationId = msg.targetCatId
           ? resolveSequentialHandoffInvocationId(msg.catId, msg.invocationId)
           : undefined;
-        if (msg.targetCatId && handoffInvocationId) {
+        // F086/F216: a serial dispatch announces every queued leg up front, but only 第 1 棒
+        // actually starts. Migrating the sequential ownership slot on every announced leg made
+        // the UI show the LAST target as active while the runtime was still running the FIRST
+        // (#1291: two identical arrows, one invocation). Only the leg that starts now migrates;
+        // parallel fan-out has no single sequential successor, and legacy events (no `routing`)
+        // keep the previous behaviour.
+        const migratesOwnership = !msg.routing || (msg.routing.mode === 'serial' && msg.routing.index <= 1);
+        if (msg.targetCatId && handoffInvocationId && migratesOwnership) {
           maybeMigrateSequentialInvocationOwnership(msg.targetCatId, handoffInvocationId);
         }
         // F173 bug fix: use server timestamp + marker so chatStore inserts
@@ -5502,6 +5607,7 @@ export function useAgentMessages() {
               fromCatId: msg.catId,
               targetCatId: msg.targetCatId,
               invocationId: msg.invocationId,
+              ...(msg.routing ? { routing: msg.routing } : {}),
             },
           },
         });
@@ -5539,8 +5645,10 @@ export function useAgentMessages() {
         let sysVariant: 'info' | 'a2a_followup' = 'info';
         let consumed = false;
         let systemInfo: SystemInfoProjection | undefined;
+        let protocolPayload = false;
         try {
           const parsed = JSON.parse(sysContent);
+          protocolPayload = isSystemInfoProtocolPayload(parsed);
           const providerRecovery = projectProviderRecoveryMessage(parsed, {
             catId: msg.catId,
             invocationId: msg.invocationId,
@@ -6064,9 +6172,6 @@ export function useAgentMessages() {
               },
             });
             consumed = true;
-          } else if (isInternalSystemInfoTelemetry(parsed)) {
-            // Internal telemetry — suppress to avoid raw JSON bubbles
-            consumed = true;
           } else if (parsed?.type === 'silent_completion') {
             // Bugfix: silent-exit — cat ran tools but produced no text response
             const detail = typeof parsed.detail === 'string' ? parsed.detail : '';
@@ -6152,6 +6257,9 @@ export function useAgentMessages() {
             }
           }
         } catch (error) {
+          // A projector failure cannot turn a protocol envelope into a visible raw
+          // fallback. Suppress first; report only bounded coordinates below.
+          if (protocolPayload) consumed = true;
           if (consumed) {
             console.warn('[system_info] active internal projection failed; payload suppressed', {
               catId: msg.catId,
@@ -6159,8 +6267,11 @@ export function useAgentMessages() {
               error,
             });
           }
-          /* Parse failures use raw content; known internal telemetry fails closed. */
+          /* Parse failures use raw content; structured protocol envelopes fail closed. */
         }
+        // Typed envelopes need either an explicit readable formatter (`systemInfo`) or
+        // an internal projector (`consumed`). Unknown future protocol is silent by default.
+        if (protocolPayload && !systemInfo) consumed = true;
         if (!consumed) {
           const sysCliDiag = msg.metadata?.cliDiagnostics;
           const extra =
@@ -6171,7 +6282,10 @@ export function useAgentMessages() {
                 }
               : undefined;
           addMessage({
-            id: `sysinfo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            id:
+              systemInfo?.payload.type === 'routing_preflight' && msg.messageId
+                ? msg.messageId
+                : `sysinfo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             type: 'system',
             variant: sysVariant,
             content: sysContent,
@@ -6488,11 +6602,9 @@ export function useAgentMessages() {
       intent: ExplicitStopIntent,
     ) => {
       const store = useChatStore.getState();
-      // When exactly one cat is active, cancel only that cat to avoid
-      // thread-level cancelAll accidentally killing other cats.
-      const activeSlots = Object.values(store.getThreadState(threadId).activeInvocations ?? {});
-      const singleCatId = activeSlots.length === 1 ? activeSlots[0]?.catId : undefined;
-      if (!cancelFn(threadId, singleCatId, intent)) return;
+      // Composer Stop is the thread-wide emergency brake. Exact per-member
+      // cancellation belongs to ThreadExecutionBar, even when only one cat is active.
+      if (!cancelFn(threadId, undefined, intent)) return;
       clearPendingCallbacksForThread(threadId);
       const isActiveThreadStop = threadId === store.currentThreadId;
 

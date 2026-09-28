@@ -60,7 +60,19 @@ export type McpOperationContract =
       }>;
     };
 
-export type McpRuntimeProfile = 'full' | 'readonly' | 'agent-key' | 'desktop:fable-phase0' | 'desktop:cloud-pro-phase0';
+export type McpRuntimeProfile =
+  | 'full'
+  | 'readonly'
+  | 'agent-key'
+  | 'desktop:fable-phase0'
+  | 'desktop:cloud-pro-phase0'
+  | 'collective-participation';
+
+export type McpSchemaDeliveryPolicy = {
+  policy: 'host-default' | 'always-visible' | 'discoverable';
+  candidate?: 'always-visible' | 'discoverable';
+  evidenceRef: EvidenceRef;
+};
 
 export type McpStandaloneReason =
   | {
@@ -99,9 +111,14 @@ export type ResolvedEvidenceCatalog = Readonly<{
 
 export const implementationBindingBrand: unique symbol = Symbol('McpImplementationBinding');
 
+export type McpToolCallExtra = {
+  signal?: AbortSignal;
+};
+
 export type McpImplementationBinding = {
   ref: `module:${string}#${string}`;
   run: (args: never) => Promise<unknown>;
+  runWithExtra?: (args: never, extra: McpToolCallExtra) => Promise<unknown>;
   readonly [implementationBindingBrand]: true;
 };
 
@@ -112,11 +129,7 @@ export type ResolvedImplementationCatalog = ReadonlyMap<
 
 export type McpToolPolicy = {
   resourceFamily: string;
-  exposureTier: {
-    current: 'eager-core' | 'profile-gated' | 'lazy-discoverable';
-    target?: 'eager-core' | 'profile-gated' | 'lazy-discoverable';
-    evidenceRef: EvidenceRef;
-  };
+  schemaDelivery: McpSchemaDeliveryPolicy;
   runtimeProfiles: NonEmptyReadonlyArray<McpRuntimeProfile>;
   owner: { domainCell: `architecture-cell:${string}`; surface: 'mcp-surface-governance' };
   standaloneReason: McpStandaloneReason;
@@ -151,7 +164,7 @@ export type McpMigrationCandidateInput = {
     boundary: McpActionBoundary;
     customDiscriminators?: readonly string[];
     runtimeProfiles: NonEmptyReadonlyArray<McpRuntimeProfile>;
-    targetExposure?: 'profile-gated' | 'lazy-discoverable';
+    targetExposure?: 'lazy-discoverable';
   };
 };
 
@@ -198,4 +211,9 @@ export type ToolRegistryDelta = {
     removed: readonly string[];
   }[];
   profileChanges: readonly { name: string; added: readonly string[]; removed: readonly string[] }[];
+  schemaDeliveryChanges: readonly {
+    name: string;
+    before?: McpSchemaDeliveryPolicy;
+    after?: McpSchemaDeliveryPolicy;
+  }[];
 };

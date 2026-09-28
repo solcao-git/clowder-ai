@@ -1,30 +1,23 @@
 'use client';
 
+import type { ActiveExecutionProjection } from '@cat-cafe/shared';
 import { useMemo } from 'react';
 import { useCatData } from '@/hooks/useCatData';
 import { resolveCatDisplayName } from '@/lib/cat-display-name';
 import { useActiveExecutionStore } from '@/stores/activeExecutionStore';
-import { ExecutionCancelButton } from '../ExecutionCancelButton';
+import { WorkspaceRunningWork } from './WorkspaceRunningWork';
+import { groupRunningWork } from './workspace-running-work';
 
 interface WorkspaceNowSurfaceProps {
   repository?: { name: string; branch: string };
+  onSelectExecution?: (execution: ActiveExecutionProjection) => void;
 }
 
-function runningLabel(kind: 'live_invocation' | 'managed_command'): string {
-  return kind === 'managed_command' ? '托管命令' : '实时回合';
-}
-
-export function WorkspaceNowSurface({ repository }: WorkspaceNowSurfaceProps) {
+export function WorkspaceNowSurface({ repository, onSelectExecution }: WorkspaceNowSurfaceProps) {
   const { getCatById } = useCatData();
   const executionsByKey = useActiveExecutionStore((state) => state.executionsByKey);
   const hydration = useActiveExecutionStore((state) => state.hydration);
-  const running = useMemo(
-    () =>
-      Object.values(executionsByKey).sort(
-        (left, right) => left.startedAt - right.startedAt || left.executionId.localeCompare(right.executionId),
-      ),
-    [executionsByKey],
-  );
+  const running = useMemo(() => groupRunningWork(Object.values(executionsByKey)), [executionsByKey]);
 
   if (running.length === 0) {
     if (hydration === 'loading') {
@@ -66,36 +59,13 @@ export function WorkspaceNowSurface({ repository }: WorkspaceNowSurfaceProps) {
         </div>
 
         <div className="divide-y divide-cafe-subtle/60 border-y border-cafe-subtle/60">
-          {running.map((execution) => (
-            <article
-              key={`${execution.kind}:${execution.executionId}`}
-              className="group flex items-center gap-3 py-3.5"
-              data-testid="workspace-running-object"
-            >
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-cafe-accent/10 text-cafe-accent">
-                <svg
-                  aria-hidden="true"
-                  className="h-3.5 w-3.5"
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="m5.5 3 6 5-6 5V3Z" />
-                </svg>
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-xs font-semibold text-cafe-black">
-                  {resolveCatDisplayName(execution.catId, getCatById)}
-                </div>
-                <div className="mt-0.5 truncate text-micro text-cafe-secondary">
-                  {execution.threadTitle ?? execution.threadId} · {runningLabel(execution.kind)}
-                </div>
-              </div>
-              <ExecutionCancelButton execution={execution} label="停止" />
-            </article>
+          {running.map((work) => (
+            <WorkspaceRunningWork
+              key={work.key}
+              work={work}
+              catName={resolveCatDisplayName(work.catId, getCatById)}
+              onSelectExecution={onSelectExecution}
+            />
           ))}
         </div>
         {hydration === 'error' && (

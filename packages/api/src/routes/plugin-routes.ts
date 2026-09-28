@@ -5,13 +5,8 @@
  */
 
 import type { PluginInfo } from '@cat-cafe/shared';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { readCapabilitiesConfig } from '../config/capabilities/capability-orchestrator.js';
-import {
-  requireCapabilityWriteOwner,
-  requireLocalCapabilityWriteRequest,
-  resolveCapabilityWriteSessionUserId,
-} from '../config/capabilities/capability-write-guards.js';
 import { AuditEventTypes, getEventAuditLog } from '../domains/cats/services/orchestration/EventAuditLog.js';
 import type { LimbRegistry } from '../domains/limb/LimbRegistry.js';
 import { loadLimbDeclaration } from '../domains/limb/limb-yaml-loader.js';
@@ -19,9 +14,15 @@ import type { PluginRegistry } from '../domains/plugin/PluginRegistry.js';
 import { normalizeCapId, resolvePluginResourcePath, resourceCapId } from '../domains/plugin/PluginRegistry.js';
 import type { PluginResourceActivator as PluginResourceActivatorType } from '../domains/plugin/PluginResourceActivator.js';
 import { assertPluginResourceInsideRoot } from '../domains/plugin/PluginResourceActivator.js';
-import { loadAllPluginConfigs, resolvePluginEnv, writePluginConfig } from '../domains/plugin/plugin-config-store.js';
+import {
+  loadAllPluginConfigs,
+  readPluginEnvSnapshot,
+  resolvePluginEnv,
+  writePluginConfig,
+} from '../domains/plugin/plugin-config-store.js';
 import { validateEnvSafety } from '../domains/plugin/plugin-manifest.js';
 import { resolveActiveProjectRoot } from '../utils/active-project-root.js';
+import { pluginAccessError, requirePluginReadAccess, requirePluginWriteAccess } from './plugin-access-guards.js';
 
 interface PluginRoutesOpts {
   pluginRegistry: PluginRegistry;
@@ -37,48 +38,6 @@ function refreshPluginRegistry(pluginRegistry: PluginRegistry) {
   return manifests;
 }
 
-interface PluginWriteAccess {
-  operator: string;
-}
-
-interface PluginWriteAccessError {
-  status: number;
-  error: string;
-}
-
-export function requirePluginReadAccess(request: FastifyRequest): PluginWriteAccess | PluginWriteAccessError {
-  const operator = resolveCapabilityWriteSessionUserId(request);
-  if (!operator) {
-    return { status: 401, error: 'Plugin read endpoint requires an authenticated session' };
-  }
-
-  return { operator };
-}
-
-export function requirePluginWriteAccess(request: FastifyRequest): PluginWriteAccess | PluginWriteAccessError {
-  const localError = requireLocalCapabilityWriteRequest(request);
-  if (localError) {
-    return { status: localError.status, error: localError.error };
-  }
-
-  const operator = resolveCapabilityWriteSessionUserId(request);
-  if (!operator) {
-    return { status: 401, error: 'Plugin write endpoint requires an authenticated owner session' };
-  }
-
-  const ownerError = requireCapabilityWriteOwner(operator, { allowMissingOwner: true });
-  if (ownerError) {
-    return { status: ownerError.status, error: 'Plugin write endpoint requires configured owner authorization' };
-  }
-
-  return { operator };
-}
-
-export function pluginAccessError(reply: FastifyReply, error: PluginWriteAccessError): { error: string } {
-  reply.status(error.status);
-  return { error: error.error };
-}
-
 export function registerPluginRoutes(app: FastifyInstance, opts: PluginRoutesOpts): void {
   const { pluginRegistry, pluginActivator, limbRegistry, pluginsDir } = opts;
 
@@ -88,11 +47,11 @@ export function registerPluginRoutes(app: FastifyInstance, opts: PluginRoutesOpt
       return pluginAccessError(reply, access);
     }
 
-    const manifests = refreshPluginRegistry(pluginRegistry);
+    const manifests = pluginRegistry.scan();
     const projectRoot = resolveActiveProjectRoot();
     const capabilities = await readCapabilitiesConfig(projectRoot);
 
-    const envSnapshot = resolvePluginEnv(manifests);
+    const envSnapshot = readPluginEnvSnapshot(projectRoot, manifests);
     const plugins: PluginInfo[] = manifests.map((m) => pluginRegistry.getPluginInfo(m, capabilities, envSnapshot));
 
     return { plugins };
@@ -105,7 +64,7 @@ export function registerPluginRoutes(app: FastifyInstance, opts: PluginRoutesOpt
     }
 
     const { id } = request.params;
-    refreshPluginRegistry(pluginRegistry);
+    pluginRegistry.scan();
     const manifest = pluginRegistry.getManifest(id);
     if (!manifest) {
       reply.status(404);
@@ -114,7 +73,7 @@ export function registerPluginRoutes(app: FastifyInstance, opts: PluginRoutesOpt
 
     const projectRoot = resolveActiveProjectRoot();
     const capabilities = await readCapabilitiesConfig(projectRoot);
-    const envSnapshot = resolvePluginEnv([manifest]);
+    const envSnapshot = readPluginEnvSnapshot(projectRoot, [manifest]);
     return pluginRegistry.getPluginInfo(manifest, capabilities, envSnapshot);
   });
 

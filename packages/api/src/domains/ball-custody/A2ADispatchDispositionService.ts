@@ -23,6 +23,8 @@ export interface A2ADispatchDispositionResult {
   readonly invocationId: string;
   readonly sourceMessageId: string;
   readonly fromCatId: string;
+  /** The exact dispatch ended without advancing an unrelated thread-level holder. */
+  readonly retired: boolean;
 }
 
 export type { A2ADispatchHandoffInspection, A2ADispatchReplacement } from './A2ADispatchReplacementResolver.js';
@@ -67,8 +69,89 @@ export class A2ADispatchDispositionService {
     auth: A2ADispatchDispositionAuth,
     disposition: A2ADispatchDisposition,
   ): Promise<A2ADispatchDispositionResult> {
+    try {
+      return await this.completeLatestInvocation(auth, disposition);
+    } catch (error) {
+      if (!(error instanceof A2ADispatchDispositionError) || error.code !== 'a2a_dispatch_disposition_fence_conflict') {
+        throw error;
+      }
+      // Heartbeats share the subject log. Retry once from fresh authority and
+      // lineage, never by appending the previously inspected disposition.
+      return this.completeLatestInvocation(auth, disposition);
+    }
+  }
+
+  private async completeLatestInvocation(
+    auth: A2ADispatchDispositionAuth,
+    disposition: A2ADispatchDisposition,
+  ): Promise<A2ADispatchDispositionResult> {
     await this.assertLatestInvocation(auth.invocationId);
     const source = await this.resolveSource(auth);
+    return this.completeResolved(auth, source, disposition);
+  }
+
+  /**
+   * A consumed coordination terminal is the exact completion witness for the
+   * ordinary dispatch that invoked its author. It shares the existing
+   * disposition event/fence; no second terminal lifecycle is created.
+   */
+  async completeFromCoordinationTerminal(terminalMessageId: string): Promise<A2ADispatchDispositionResult> {
+    const terminal = await this.deps.messageStore.getById(terminalMessageId);
+    const coordination = terminal?.extra?.coordination;
+    const provenance = terminal?.extra?.crossPost;
+    const causal = terminal?.extra?.causal;
+    const turnInvocationId = terminal?.extra?.stream?.turnInvocationId;
+    if (
+      !terminal ||
+      !terminal.catId ||
+      coordination?.phase !== 'terminal' ||
+      !provenance?.sourceThreadId ||
+      !provenance.sourceInvocationId ||
+      !causal?.triggerMessageId ||
+      !turnInvocationId
+    ) {
+      throw new A2ADispatchDispositionError('a2a_dispatch_coordination_terminal_identity_missing');
+    }
+
+    const auth: A2ADispatchDispositionAuth = {
+      invocationId: provenance.sourceInvocationId,
+      catId: terminal.catId,
+      threadId: provenance.sourceThreadId,
+      a2aTriggerMessageId: causal.triggerMessageId,
+      originTriggerMessageId: causal.triggerMessageId,
+    };
+    const sourceMessage = await this.deps.messageStore.getById(causal.triggerMessageId);
+    const sourceCoordination = sourceMessage?.extra?.coordination;
+    const sourceOriginThreadId = sourceMessage?.extra?.crossPost?.sourceThreadId;
+    const terminalTargetsSource = Boolean(
+      sourceMessage?.catId && this.messageTargetsCat(terminal, sourceMessage.catId),
+    );
+    if (
+      !sourceMessage ||
+      sourceCoordination?.phase !== 'active' ||
+      coordination.id !== sourceCoordination.id ||
+      coordination.hop !== sourceCoordination.hop + 1 ||
+      !coordination.subjectRef ||
+      !sourceCoordination.subjectRef ||
+      coordination.subjectRef !== sourceCoordination.subjectRef ||
+      sourceOriginThreadId !== terminal.threadId ||
+      terminal.threadId === provenance.sourceThreadId ||
+      terminal.userId !== sourceMessage.userId ||
+      turnInvocationId !== provenance.sourceInvocationId ||
+      !terminalTargetsSource
+    ) {
+      throw new A2ADispatchDispositionError('a2a_dispatch_coordination_terminal_mismatch');
+    }
+
+    const source = await this.resolveSource(auth);
+    return this.completeResolved(auth, source, 'completed');
+  }
+
+  private async completeResolved(
+    auth: A2ADispatchDispositionAuth,
+    source: DispatchSource,
+    disposition: A2ADispatchDisposition,
+  ): Promise<A2ADispatchDispositionResult> {
     const subjectKey = `ball:thread:${auth.threadId}`;
     const events = await this.deps.ballCustodyEventLog.read(subjectKey);
     const eventSourceId = dispatchDispositionEventSourceId({
@@ -85,6 +168,7 @@ export class A2ADispatchDispositionService {
         invocationId: auth.invocationId,
         sourceMessageId: source.sourceMessageId,
         fromCatId: source.fromCatId,
+        retired: prior.payload.retired === true,
       };
     }
 
@@ -92,8 +176,8 @@ export class A2ADispatchDispositionService {
     if (inspection.outcome === 'replaced') {
       throw new A2ADispatchDispositionError('a2a_dispatch_disposition_replaced', inspection.replacement);
     }
-    await this.assertCurrentHolder(subjectKey, auth.catId);
-    await this.recordDisposition(auth, source, disposition, subjectKey, eventSourceId, events.length);
+    const retired = await this.resolveRetired(subjectKey, auth.catId, source.handoffSourceEventId, events);
+    await this.recordDisposition(auth, source, disposition, subjectKey, eventSourceId, events.length, retired);
     const committed = (await this.deps.ballCustodyEventLog.read(subjectKey)).find(
       (event) => event.sourceEventId === eventSourceId,
     );
@@ -104,6 +188,7 @@ export class A2ADispatchDispositionService {
       invocationId: auth.invocationId,
       sourceMessageId: source.sourceMessageId,
       fromCatId: source.fromCatId,
+      retired,
     };
   }
 
@@ -159,16 +244,38 @@ export class A2ADispatchDispositionService {
         message.catId &&
         (message.catId !== auth.catId ||
           isCrossThreadProvenance(message.extra?.crossPost?.sourceThreadId, message.threadId)) &&
-        (message.mentions.some((candidate) => candidate === auth.catId) ||
-          message.extra?.targetCats?.includes(auth.catId)),
+        this.messageTargetsCat(message, auth.catId),
     );
   }
 
-  private async assertCurrentHolder(subjectKey: string, catId: string): Promise<void> {
-    const projection = await this.deps.ballCustodyProjectionStore.get(subjectKey);
-    if ((projection?.state !== 'active' && projection?.state !== 'blocked') || projection.holder !== catId) {
+  private messageTargetsCat(message: StoredMessage, catId: string): boolean {
+    if (message.mentions.some((candidate) => candidate === catId)) return true;
+    return Boolean(message.extra?.targetCats?.includes(catId));
+  }
+
+  private async resolveRetired(
+    subjectKey: string,
+    catId: string,
+    handoffSourceEventId: string,
+    events: readonly BallCustodyEvent[],
+  ): Promise<boolean> {
+    let projection = await this.deps.ballCustodyProjectionStore.get(subjectKey);
+    if (!projection && this.deps.repairProjection) {
+      await this.deps.repairProjection(subjectKey);
+      projection = await this.deps.ballCustodyProjectionStore.get(subjectKey);
+    }
+    if (!projection) {
       throw new A2ADispatchDispositionError('a2a_dispatch_disposition_holder_mismatch');
     }
+    const handoffIndex = events.findIndex((event) => event.sourceEventId === handoffSourceEventId);
+    const acquiredAfterDispatch = events
+      .slice(handoffIndex + 1)
+      .some((event) => event.kind === 'ball.handed' || event.kind === 'ball.held');
+    return (
+      acquiredAfterDispatch ||
+      (projection.state !== 'active' && projection.state !== 'blocked') ||
+      projection.holder !== catId
+    );
   }
 
   private async inspectResolvedHandoff(
@@ -217,7 +324,9 @@ export class A2ADispatchDispositionService {
     subjectKey: string,
     eventSourceId: string,
     expectedSequence: number,
+    retired: boolean,
   ): Promise<void> {
+    let conflictSequence: number | undefined;
     try {
       const result = await this.deps.ballCustody.recordFenced(
         buildDispatchDispositionEvent({
@@ -227,17 +336,34 @@ export class A2ADispatchDispositionService {
           invocationId: auth.invocationId,
           sourceMessageId: source.sourceMessageId,
           disposition,
+          retired,
           at: this.now(),
         }),
         expectedSequence,
       );
       if (result.outcome === 'conflict') {
+        conflictSequence = result.actualSequence;
         throw new A2ADispatchDispositionError('a2a_dispatch_disposition_fence_conflict');
       }
     } catch (error) {
-      const appended = (await this.deps.ballCustodyEventLog.read(subjectKey)).find(
-        (event) => event.sourceEventId === eventSourceId,
-      );
+      const events = await this.deps.ballCustodyEventLog.read(subjectKey);
+      if (conflictSequence !== undefined) {
+        this.deps.log?.warn(
+          {
+            threadId: auth.threadId,
+            invocationId: auth.invocationId,
+            sourceMessageId: source.sourceMessageId,
+            expectedSequence,
+            actualSequence: conflictSequence,
+            interveningEvents: events
+              .slice(expectedSequence, Math.min(conflictSequence, expectedSequence + 8))
+              .map(({ sourceEventId, kind, at }) => ({ sourceEventId, kind, at })),
+            omittedEventCount: Math.max(0, conflictSequence - expectedSequence - 8),
+          },
+          '[F167] A2A dispatch disposition CAS conflict',
+        );
+      }
+      const appended = events.find((event) => event.sourceEventId === eventSourceId);
       if (!appended || !this.deps.repairProjection) throw error;
       await this.deps.repairProjection(subjectKey);
     }
@@ -254,7 +380,14 @@ export class A2ADispatchDispositionService {
       .slice(dispositionIndex + 1)
       .some((event) => event.kind === 'ball.handed' || event.kind === 'ball.held');
     const projection = await this.deps.ballCustodyProjectionStore.get(subjectKey);
-    if (!reopenedAfterDisposition && projection?.state !== 'resolved') {
+    // An inert retirement never promises a resolved thread. Rebuilding a healthy
+    // active/parked projection on every recovery pass would rewrite unrelated work.
+    const rejectedDisposition = projection?.lastRejectedEvent?.sourceEventId === dispositionEvent.sourceEventId;
+    if (
+      !projection ||
+      rejectedDisposition ||
+      (dispositionEvent.payload.retired !== true && !reopenedAfterDisposition && projection.state !== 'resolved')
+    ) {
       await this.deps.repairProjection(subjectKey);
     }
   }

@@ -8,8 +8,8 @@
  * 不含任何 presence 字段；presence 的 fold（idle/working/done/error）只存在于浏览器
  * （packages/web/src/components/ThreadCatStatus.tsx）。这两条测试锁住该缺口。
  *
- * C10 的判定优先级（Design Gate 决议）：active execution 优先；
- * active 消失**不得**被推断为 done —— done/error 只能来自 participant activity 的终态证据。
+ * C10 的判定优先级：active execution 优先；active 消失**不得**被推断为 done。
+ * done/error 只能来自 InvocationRecord terminal transition，聊天 activity 不是 lifecycle 证据。
  */
 
 import assert from 'node:assert/strict';
@@ -49,6 +49,17 @@ describe('F297 Sidebar canonical projection', () => {
     return JSON.parse(res.body).threads;
   }
 
+  async function fetchSidebar({ user = 'alice', etag } = {}) {
+    return app.inject({
+      method: 'GET',
+      url: '/api/threads?view=sidebar',
+      headers: {
+        'x-cat-cafe-user': user,
+        ...(etag ? { 'if-none-match': etag } : {}),
+      },
+    });
+  }
+
   it('AC-B4: every sidebar row carries a presentation-ready presence (C10)', async () => {
     threadStore.create('alice', 'Idle thread', '/projects/cat-cafe');
     threadStore.create('alice', 'Another thread', '/projects/cat-cafe');
@@ -83,7 +94,7 @@ describe('F297 Sidebar canonical projection', () => {
     const askedFor = [];
     const presenceSource = {
       // OQ-1 决议：只对 active candidate 稀疏对账，不对全表逐 thread 调用
-      async getActivePresence(threadIds) {
+      async getPresence(threadIds) {
         askedFor.push([...threadIds]);
         return new Map([[working.id, { status: 'working', cats: ['opus5'] }]]);
       },
@@ -100,5 +111,61 @@ describe('F297 Sidebar canonical projection', () => {
       'a thread with no active execution and no terminal evidence must be idle, never done',
     );
     assert.equal(askedFor.length, 1, 'presence must be resolved in one batched call, not per-thread');
+  });
+
+  it('OQ-2: validates the exact full Sidebar representation with an opaque ETag', async () => {
+    const thread = threadStore.create('alice', 'Snapshot identity', '/projects/cat-cafe');
+    threadStore.addParticipants(thread.id, ['codex-sol']);
+
+    let unreadCount = 0;
+    let hasUserMention = false;
+    let presence = { status: 'idle' };
+    const readStateStore = {
+      async getUnreadSummaries() {
+        return [{ threadId: thread.id, unreadCount, hasUserMention }];
+      },
+    };
+    const presenceSource = {
+      async getPresence() {
+        return new Map([[thread.id, presence]]);
+      },
+    };
+    await bootSidebar({ readStateStore, messageStore: {}, presenceSource });
+
+    const first = await fetchSidebar();
+    assert.equal(first.statusCode, 200);
+    assert.match(first.headers.etag, /^"[^"]+"$/, 'ETag must be an opaque quoted validator');
+    assert.equal(first.headers['cache-control'], 'private, no-cache');
+    assert.match(first.headers['server-timing'], /sidebar-compose;dur=/);
+    assert.match(first.headers['server-timing'], /sidebar-serialize;dur=/);
+    const firstBody = JSON.parse(first.body);
+    assert.equal(firstBody.threads[0].title, 'Snapshot identity');
+
+    let etag = first.headers.etag;
+    const unchanged = await fetchSidebar({ etag });
+    assert.equal(unchanged.statusCode, 304);
+    assert.equal(unchanged.body, '');
+    assert.equal(unchanged.headers.etag, etag);
+
+    const representationChanges = [
+      ['participants', () => threadStore.addParticipants(thread.id, ['opus5'])],
+      ['unread', () => (unreadCount = 2)],
+      ['mention', () => (hasUserMention = true)],
+      ['working', () => (presence = { status: 'working', cats: ['opus5'], activeSince: 10 })],
+      ['done', () => (presence = { status: 'done', cats: ['opus5'] })],
+      ['error', () => (presence = { status: 'error', cats: ['opus5'] })],
+      ['pin', () => threadStore.updatePin(thread.id, true)],
+      ['title', () => threadStore.updateTitle(thread.id, 'Renamed snapshot')],
+      ['label', () => threadStore.updateLabels(thread.id, ['needs-me'])],
+      ['preferred cats', () => threadStore.updatePreferredCats(thread.id, ['codex-sol', 'opus5'])],
+    ];
+
+    for (const [field, mutate] of representationChanges) {
+      mutate();
+      const changed = await fetchSidebar({ etag });
+      assert.equal(changed.statusCode, 200, `${field} must invalidate the prior full-snapshot ETag`);
+      assert.notEqual(changed.headers.etag, etag, `${field} must produce a new representation identity`);
+      etag = changed.headers.etag;
+    }
   });
 });

@@ -1,6 +1,7 @@
 /** F295 canonical read projection shared by API and every running-work UI surface. */
 
 export type ActiveExecutionKind = 'live_invocation' | 'managed_command';
+export type ManagedCommandActivity = 'full_gate' | 'test' | 'build' | 'lint' | 'check' | 'command';
 
 export interface LiveInvocationCancelTarget {
   readonly kind: 'live_invocation';
@@ -29,10 +30,14 @@ export type ActiveExecutionCancelability =
 
 export interface ActiveExecutionProjection {
   readonly executionId: string;
+  /** Canonical per-cat child for trajectory navigation; never substitute the parent/control identity. */
+  readonly turnInvocationId?: string;
   readonly threadId: string;
   readonly threadTitle: string | null;
   readonly catId: string;
   readonly kind: ActiveExecutionKind;
+  /** Allowlisted category only; raw managed-command text never crosses this boundary. */
+  readonly activity?: ManagedCommandActivity;
   readonly startedAt: number;
   readonly cancelability: ActiveExecutionCancelability;
 }

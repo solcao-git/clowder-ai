@@ -1,22 +1,34 @@
 'use client';
 
+import type { ProviderSemanticEvent } from '@cat-cafe/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { collectExactLiveInvocationIds } from '@/components/queue-receipt-projection';
 import {
   bootstrapDebugFromStorage,
   ensureWindowDebugApi,
   isDebugEnabled,
   recordDebugEvent,
 } from '@/debug/invocationEventDebug';
+import { previewVisiblePageAdmissionController } from '@/lib/preview-visible-page-admission-controller';
+import { resolveProviderSemanticMessage } from '@/lib/provider-semantic-registry';
 import { useBrakeStore } from '@/stores/brakeStore';
 import { useChatStore } from '@/stores/chatStore';
 import { useGuideStore } from '@/stores/guideStore';
 import { useToastStore } from '@/stores/toastStore';
 import { API_URL, apiFetch } from '@/utils/api-client';
-import { saveThreadActiveState } from '@/utils/offline-store';
-import { refreshSidebarThreadSnapshot } from '@/utils/sidebar-thread-snapshot';
+import { invalidateSidebarProjection } from '@/utils/sidebar-thread-snapshot';
 import { getUserId } from '@/utils/userId';
-import { hydrateQueueActiveInvocationSlots, type QueueActiveInvocationSlot } from './queue-active-invocation-hydration';
+import {
+  deliverPreviewAutoOpenEvent,
+  type PreviewAutoOpenEvent,
+  type PreviewAutoOpenReceipt,
+} from './preview-auto-open-delivery';
+import { type QueueActiveInvocationSlot } from './queue-active-invocation-hydration';
+import {
+  hasStaleActiveThreadPresentation,
+  reconcileQueueActiveInvocationProjection,
+} from './queue-active-invocation-reconciliation';
 import { normalizeQueueMessageReceiptProjections } from './queue-message-receipt-normalizer';
 // F173 Phase E: isInvocationReplaced 检查已下沉到 useAgentMessages.handleAgentMessage
 // dispatch entry，useSocket 不再做 active path drop guard。
@@ -31,6 +43,7 @@ import { handleVoiceChunk, handleVoiceStreamEnd, handleVoiceStreamStart } from '
 
 interface AgentMessage {
   type: string;
+  semanticEvent?: ProviderSemanticEvent;
   catId: string;
   threadId?: string;
   content?: string;
@@ -108,17 +121,8 @@ export interface SocketCallbacks {
   onMessageRestored?: (data: { messageId: string; threadId: string }) => void;
   onMessageRecalled?: (data: { messageId: string; threadId: string; verdict: 'zero_exposure' | 'exposed' }) => void;
   onMessageReceiptUpdated?: (data: { messageId: string; threadId: string }) => void;
+  onCustodyOfferUpdated?: (data: { messageId: string; threadId: string }) => void;
   onThreadBranched?: (data: { sourceThreadId: string; newThreadId: string; fromMessageId: string }) => void;
-  onAuthorizationRequest?: (data: {
-    requestId: string;
-    catId: string;
-    threadId: string;
-    action: string;
-    reason: string;
-    context?: string;
-    createdAt: number;
-  }) => void;
-  onAuthorizationResponse?: (data: { requestId: string; status: string; scope?: string; reason?: string }) => void;
   /** F101: Game state update */
   onGameStateUpdate?: (data: { gameId: string; view: unknown; timestamp: number }) => void;
   /** F101 Phase D: Independent game thread created */
@@ -150,6 +154,7 @@ export interface SocketCallbacks {
 const RECONNECT_RECONCILE_DELAY_MS = 2000;
 /** Watchdog: how often to scan threadStates for silent active invocations. */
 const STALE_WATCHDOG_INTERVAL_MS = 30_000;
+const SOCKET_RECONCILE_INTERVAL_MS = 5_000;
 /** A thread is suspect if hasActiveInvocation but lastActivity is older than this. */
 const STALE_IDLE_THRESHOLD_MS = 3 * 60_000;
 /** Don't re-probe the same thread more often than this (protects server + avoids loop). */
@@ -160,7 +165,7 @@ const STALE_RECENT_ENGAGEMENT_MS = 5 * 60_000;
 let reconcileGeneration = 0;
 /** Per-thread last-probe timestamp used by the watchdog cooldown. */
 const staleProbeCooldown = new Map<string, number>();
-/** Per-thread epoch used to invalidate stale live queue-processing hydrates. */
+/** Per-thread epoch orders queue events and reconciliation requests. */
 const liveQueueHydrateEpoch = new Map<string, number>();
 
 function bumpLiveQueueHydrateEpoch(threadId: string): number {
@@ -171,6 +176,24 @@ function bumpLiveQueueHydrateEpoch(threadId: string): number {
 
 function getLiveQueueHydrateEpoch(threadId: string): number {
   return liveQueueHydrateEpoch.get(threadId) ?? 0;
+}
+
+const isQueueEntryObject = (entry: unknown): entry is import('../stores/chat-types').QueueEntry =>
+  entry !== null && typeof entry === 'object' && !Array.isArray(entry);
+const normalizeQueueEntries = (queue: unknown): import('../stores/chat-types').QueueEntry[] =>
+  Array.isArray(queue) ? queue.filter(isQueueEntryObject) : [];
+
+function hasUnsettledQueueReceipt(
+  state: Pick<ReturnType<typeof useChatStore.getState>, 'queue' | 'activeInvocations' | 'catInvocations'>,
+): boolean {
+  const liveIds = collectExactLiveInvocationIds(state.activeInvocations ?? {}, state.catInvocations ?? {});
+  return (state.queue ?? []).some((entry) =>
+    entry.queueReceipt?.targets.some(
+      (target) =>
+        (target.state === 'seen' || target.state === 'awakened') &&
+        (!target.invocationId || !liveIds.has(target.invocationId)),
+    ),
+  );
 }
 
 async function hydrateFreshnessClosureProjections(
@@ -207,34 +230,6 @@ async function hydrateFreshnessClosureProjections(
   }
 }
 
-function hasStaleActiveThreadPresentation(state: ReturnType<typeof useChatStore.getState>, threadId: string): boolean {
-  if (state.currentThreadId !== threadId) return false;
-  if (state.messages.some((msg) => msg.type === 'assistant' && msg.isStreaming)) return true;
-  if (state.intentMode === 'execute' && state.targetCats.length > 0) return true;
-  return Object.values(state.catStatuses ?? {}).some((status) =>
-    ['spawning', 'pending', 'streaming', 'alive_but_silent', 'suspected_stall'].includes(status),
-  );
-}
-
-function finalizeStreamingBubblesAbsentFromServerSlots(threadId: string, activeCats: Set<string>): boolean {
-  const store = useChatStore.getState();
-  const isActiveThread = store.currentThreadId === threadId;
-  const messagesToCheck = isActiveThread ? store.messages : store.getThreadState(threadId).messages;
-  let finalizedAny = false;
-
-  for (const msg of messagesToCheck) {
-    if (msg.type !== 'assistant' || msg.isStreaming !== true) continue;
-    if (msg.catId && activeCats.has(msg.catId)) continue;
-    store.setThreadMessageStreaming(threadId, msg.id, false);
-    finalizedAny = true;
-  }
-
-  if (finalizedAny) {
-    store.requestStreamCatchUp(threadId);
-  }
-  return finalizedAny;
-}
-
 /**
  * Query /queue for one thread and reconcile local state against server truth.
  * Shared by reconnect reconciliation and the stale-watchdog probe.
@@ -247,105 +242,31 @@ export async function reconcileThreadWithServer(
   shouldAbort: () => boolean,
   source: string,
 ): Promise<void> {
+  const epoch = bumpLiveQueueHydrateEpoch(threadId);
+  const isStale = () => shouldAbort() || getLiveQueueHydrateEpoch(threadId) !== epoch;
   try {
     const res = await apiFetch(`/api/threads/${threadId}/queue`);
-    if (shouldAbort()) return;
+    if (isStale()) return;
     if (!res.ok) return;
     const data = (await res.json()) as {
+      queue?: unknown;
+      paused?: boolean;
+      pauseReason?: 'canceled' | 'failed';
       activeInvocations?: QueueActiveInvocationSlot[];
     };
-    if (shouldAbort()) return;
+    if (isStale()) return;
     const store = useChatStore.getState();
-    const serverSlots = data.activeInvocations && data.activeInvocations.length > 0 ? data.activeInvocations : null;
-    const isActiveThread = store.currentThreadId === threadId;
-
-    if (serverSlots) {
-      // Server still processing — re-hydrate local slots to match server truth.
-      // Stale hydrated/mismatched invocationIds get replaced so done(isFinal)
-      // cleanup works correctly when the response finishes.
-      // F173 PR-C Task 10: thread-scoped writers throughout — flat is mirror, no
-      // active vs background branch needed.
-      const serverActiveCats = serverSlots.map((s) => s.catId);
-      const activeInvocations = hydrateQueueActiveInvocationSlots({ threadId, slots: serverSlots });
-      persistThreadActiveSnapshot(threadId, { hasActiveInvocation: true, activeInvocations });
-      finalizeStreamingBubblesAbsentFromServerSlots(threadId, new Set(serverActiveCats));
-      console.log(`[ws] ${source} reconciliation: re-hydrated active slots from server`, {
-        threadId,
-        cats: serverActiveCats,
-      });
-      return;
+    if (Array.isArray(data.queue)) {
+      const queue = normalizeQueueEntries(data.queue);
+      const priorQueue = store.getThreadState(threadId).queue;
+      store.setQueue(threadId, queue);
+      if (queue.length < priorQueue.length) store.requestStreamCatchUp(threadId);
     }
-
-    // F173 PR-C Task 10: server-no-slots clear path also goes through thread-scoped
-    // writers. Active-thread staleness check still uses flat (`hasActiveInvocation`
-    // + `hasStaleActiveThreadPresentation`) since stream/loading lingering is the
-    // active-only Direction 2/3 condition; background only checks ThreadState.
-    const ts = store.getThreadState(threadId);
-    const shouldClear = isActiveThread
-      ? store.hasActiveInvocation || hasStaleActiveThreadPresentation(store, threadId)
-      : ts.hasActiveInvocation;
-    // `/queue` is the canonical liveness source. Persist idle even when memory
-    // already agrees, otherwise an older IndexedDB active snapshot can return
-    // on the next F5 before queue hydration completes.
-    persistThreadActiveSnapshot(threadId, { hasActiveInvocation: false, activeInvocations: {} });
-    if (!shouldClear) return;
-
-    const terminalSource = isActiveThread ? store : ts;
-    const { catStatuses = {}, catInvocations = {} } = terminalSource;
-    const terminalStatuses = new Map<string, 'done' | 'error'>();
-    for (const [catId, status] of Object.entries(catStatuses)) {
-      switch (status) {
-        case 'done':
-        case 'error':
-          terminalStatuses.set(catId, status);
-      }
-    }
-    for (const [catId, info] of Object.entries(catInvocations)) {
-      switch (info.appServerLifecycle?.stage) {
-        case 'failed':
-          terminalStatuses.set(catId, 'error');
-          break;
-        case 'completed':
-        case 'interrupted':
-        case 'closing':
-        case 'closed':
-          terminalStatuses.set(catId, 'done');
-          break;
-      }
-    }
-
-    store.clearThreadActiveInvocation(threadId);
-    store.setThreadLoading(threadId, false);
-    store.setThreadIntentMode(threadId, null);
-    store.clearThreadCatStatuses(threadId);
-    for (const [catId, status] of terminalStatuses) {
-      store.updateThreadCatStatus(threadId, catId, status);
-    }
-    const messagesToCheck = isActiveThread ? store.messages : ts.messages;
-    for (const msg of messagesToCheck) {
-      if (msg.type === 'assistant' && msg.isStreaming) {
-        store.setThreadMessageStreaming(threadId, msg.id, false);
-      }
-    }
-    if (isActiveThread) {
-      // Server finished but done(isFinal) was lost — or local stream UI lingered
-      // after the slot ended. Fetch missed messages so user doesn't need F5.
-      store.requestStreamCatchUp(threadId);
-    }
-    console.log(
-      `[ws] ${source} reconciliation: cleared stale ${isActiveThread ? 'active-thread' : 'background-thread'} invocation state`,
-      { threadId },
-    );
+    if (typeof data.paused === 'boolean') store.setQueuePaused(threadId, data.paused, data.pauseReason);
+    reconcileQueueActiveInvocationProjection({ threadId, slots: data.activeInvocations, source });
   } catch {
     // Non-critical — don't break the caller
   }
-}
-
-function persistThreadActiveSnapshot(threadId: string, state: Parameters<typeof saveThreadActiveState>[1]): void {
-  void saveThreadActiveState(threadId, state).catch(() => {
-    // IndexedDB is a first-paint cache. Canonical in-memory reconciliation
-    // remains authoritative when storage is unavailable.
-  });
 }
 
 /**
@@ -367,7 +288,7 @@ function reconcileInvocationStateOnReconnect(activeThreadId: string | null): voi
     threadsToCheck.push(activeThreadId);
   }
   for (const [threadId, ts] of Object.entries(state.threadStates ?? {})) {
-    if (ts.hasActiveInvocation && threadId !== activeThreadId) {
+    if ((ts.hasActiveInvocation || hasUnsettledQueueReceipt(ts)) && threadId !== activeThreadId) {
       threadsToCheck.push(threadId);
     }
   }
@@ -408,13 +329,17 @@ function checkForStaleActiveInvocations(): void {
   // Background threads: iterate threadStates (skip current — flat state is the truth there).
   for (const [threadId, ts] of Object.entries(state.threadStates ?? {})) {
     if (threadId === currentThreadId) continue;
-    if (!ts.hasActiveInvocation) continue;
-    if (now - (ts.lastActivity ?? 0) < STALE_IDLE_THRESHOLD_MS) continue;
+    if (
+      !hasUnsettledQueueReceipt(ts) &&
+      (!ts.hasActiveInvocation || now - (ts.lastActivity ?? 0) < STALE_IDLE_THRESHOLD_MS)
+    )
+      continue;
     if (!canProbe(threadId)) continue;
     toProbe.add(threadId);
   }
 
   if (currentThreadId && canProbe(currentThreadId)) {
+    if (hasUnsettledQueueReceipt(state)) toProbe.add(currentThreadId);
     // Active thread: read directly from flat state.
     if (state.hasActiveInvocation) {
       // Direction 1 on active: derive staleness from oldest invocation.startedAt, since
@@ -467,6 +392,8 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
   }
   const threadIdRef = useRef(threadId);
   threadIdRef.current = threadId;
+  const foregroundThreadIdsRef = useRef(foregroundThreadIds);
+  foregroundThreadIdsRef.current = foregroundThreadIds;
 
   // F183 follow-up (R2/R4/R5 reconnect-window catch-up): distinguish initial
   // connect vs reconnect. Phase C gap detection only fires on next live event;
@@ -485,6 +412,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
   // events from the old thread can leak into the new thread's state.
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+  const lastPreviewAutoOpenEventIdRef = useRef<string | null>(null);
 
   // clowder-ai#789: coalesce synchronous agent_message bursts into one microtask flush.
   // callbacksRef.current is always live (updated above on every render), so the closure
@@ -503,6 +431,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
   const {
     forgetRoom,
     reconcileDesiredRoomMembership,
+    reconcileNeverAttemptedRoomMembership,
     reconcileUnconfirmedRoomMembership,
     requestRoomJoin,
     resetConfirmedRoomMembership,
@@ -611,7 +540,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
       // useChatHistory's Phase C subscription (debounce + retry + ack +
       // Phase D merge filter); see useChatHistory.ts:872 catchUpVersion.
       if (hasConnectedOnceRef.current) {
-        void refreshSidebarThreadSnapshot();
+        void invalidateSidebarProjection();
         const store = useChatStore.getState();
         const bumped = new Set<string>();
         // Active thread always covered.
@@ -657,7 +586,76 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
       // clowder-ai#789: buffer into microtask coalescer — prevents React "Maximum update
       // depth exceeded" when 200+ events arrive synchronously in one macrotask.
       agentMessageCoalescerRef.current?.push(msg);
+      if (msg.isFinal === true || msg.type === 'done' || msg.type === 'error') {
+        void invalidateSidebarProjection();
+      }
     });
+
+    // Preview delivery shares the long-lived authenticated chat socket. The
+    // previous dedicated socket was recreated on every thread/worktree change,
+    // leaving an ack/listener gap exactly while users navigated between threads.
+    socket.on(
+      'preview:auto-open',
+      (data: PreviewAutoOpenEvent, acknowledge?: (receipt: PreviewAutoOpenReceipt) => void) => {
+        // A replay carrying an ack must still be answered; fire-and-forget
+        // duplicates can be dropped without repeating the UI mutation.
+        if (!acknowledge && data.eventId && data.eventId === lastPreviewAutoOpenEventIdRef.current) return;
+        if (data.eventId) lastPreviewAutoOpenEventIdRef.current = data.eventId;
+
+        const store = useChatStore.getState();
+        const admissionState: {
+          resolution: ReturnType<typeof previewVisiblePageAdmissionController.begin> | null;
+        } = { resolution: null };
+        const receipt = deliverPreviewAutoOpenEvent({
+          data,
+          activeThreadId: store.currentThreadId,
+          clientVisible: typeof document === 'undefined' || document.visibilityState === 'visible',
+          presentationLocked: store.presentationLock != null,
+          sessionWorktreeId: store.workspaceWorktreeId,
+          resolveTargetWorktreeId: (targetThreadId) => {
+            const target = useChatStore.getState().threadStates[targetThreadId];
+            return target ? (target.workspaceWorktreeId ?? null) : undefined;
+          },
+          apply: (event) => {
+            if (event.visiblePageAdmission) {
+              admissionState.resolution =
+                event.eventId && event.targetOrigin
+                  ? previewVisiblePageAdmissionController.begin({
+                      eventId: event.eventId,
+                      port: event.port,
+                      path: event.path ?? '/',
+                      targetOrigin: event.targetOrigin,
+                      admission: event.visiblePageAdmission,
+                    })
+                  : Promise.resolve({ status: 'failed' as const, reason: 'visible_page_contract_invalid' as const });
+            }
+            useChatStore.getState().setPendingPreviewAutoOpen({ port: event.port, path: event.path ?? '/' });
+          },
+          queueForThread: (targetThreadId, preview) =>
+            useChatStore.getState().queueThreadPreview(targetThreadId, preview),
+        });
+        if (receipt.status !== 'applied' || !data.visiblePageAdmission) {
+          acknowledge?.(receipt);
+          return;
+        }
+        const admissionResolution = admissionState.resolution;
+        if (!admissionResolution) {
+          acknowledge?.({
+            status: 'rejected',
+            eventId: receipt.eventId,
+            reason: 'visible_page_contract_invalid',
+          });
+          return;
+        }
+        void admissionResolution.then((resolution) => {
+          acknowledge?.(
+            resolution.status === 'attested'
+              ? { ...receipt, attestation: resolution.attestation }
+              : { status: 'rejected', eventId: receipt.eventId, reason: resolution.reason },
+          );
+        });
+      },
+    );
 
     socket.on(
       'thread_updated',
@@ -668,16 +666,13 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
         bootcampState?: Record<string, unknown>;
       }) => {
         callbacksRef.current.onThreadUpdated?.(data);
+        void invalidateSidebarProjection();
       },
     );
 
-    // F128: New thread created via MCP callback — prepend to sidebar thread list
-    socket.on('thread_created', (thread: import('../stores/chat-types').Thread) => {
-      const store = useChatStore.getState();
-      const existing = store.threads;
-      if (!existing.some((t) => t.id === thread.id)) {
-        store.setThreads([thread, ...existing]);
-      }
+    // Edge payloads are invalidation hints, never Sidebar state truth.
+    socket.on('thread_created', () => {
+      void invalidateSidebarProjection();
     });
 
     // F128: proposal status changed (approved/rejected/etc) — broadcast to interested cards.
@@ -701,10 +696,31 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
         window.dispatchEvent(new CustomEvent('cat-cafe:proposal-created', { detail: proposal }));
       }
     });
+    socket.on('runtime_interaction_updated', (interaction: { interactionId: string; status: string }) => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('cat-cafe:runtime-interaction-updated', { detail: interaction }));
+      }
+    });
+    socket.on('entrusted_work_projection_invalidated', (data: { ownerUserId: string }) => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('cat-cafe:entrusted-work-projection-invalidated', { detail: data }));
+      }
+    });
+    socket.on('artifact_review_changed', (data: { reviewId: string }) => {
+      if (typeof window !== 'undefined')
+        window.dispatchEvent(new CustomEvent('cat-cafe:artifact-review-changed', { detail: data }));
+    });
+    socket.on('custody_offer_updated', (data: { messageId: string; threadId: string }) => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('cat-cafe:custody-offer-updated', { detail: data }));
+      }
+      callbacksRef.current.onCustodyOfferUpdated?.(data);
+    });
 
     socket.on(
       'intent_mode',
       (data: { threadId: string; mode: string; targetCats: string[]; invocationId?: string }) => {
+        void invalidateSidebarProjection();
         const storeThread = useChatStore.getState().currentThreadId;
         recordInvocationEvent({
           event: 'intent_mode',
@@ -777,6 +793,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
 
     // F118 D2: spawn_started — earliest per-cat spawning signal (fires before intent_mode).
     socket.on('spawn_started', (data: { threadId: string; targetCats: string[]; invocationId: string }) => {
+      void invalidateSidebarProjection();
       const storeThread = useChatStore.getState().currentThreadId;
 
       // F173 KD-4 — single-pointer routing (store as truth source). See agent_message comment.
@@ -872,48 +889,48 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
       callbacksRef.current.onThreadBranched?.(data);
     });
 
-    socket.on('authorization:request', (data: Record<string, unknown>) => {
-      const currentThread = threadIdRef.current;
-      if (data.threadId && currentThread && data.threadId !== currentThread) return;
-      callbacksRef.current.onAuthorizationRequest?.(
-        data as Parameters<NonNullable<SocketCallbacks['onAuthorizationRequest']>>[0],
-      );
-    });
-    socket.on('authorization:response', (data: Record<string, unknown>) => {
-      callbacksRef.current.onAuthorizationResponse?.(
-        data as Parameters<NonNullable<SocketCallbacks['onAuthorizationResponse']>>[0],
-      );
-    });
-
     const normalizeQueueForDebug = (queue: unknown): unknown[] => (Array.isArray(queue) ? queue : []);
-    const isQueueEntryObject = (entry: unknown): entry is import('../stores/chat-types').QueueEntry =>
-      entry !== null && typeof entry === 'object' && !Array.isArray(entry);
-    const normalizeQueueEntries = (queue: unknown): import('../stores/chat-types').QueueEntry[] =>
-      Array.isArray(queue) ? queue.filter(isQueueEntryObject) : [];
     const getQueueStatusesForDebug = (queue: unknown) =>
       normalizeQueueForDebug(queue).map((entry) => {
         if (!entry || typeof entry !== 'object') return 'unknown';
         const status = (entry as { status?: unknown }).status;
         return typeof status === 'string' ? status : 'unknown';
       });
+    const hasReceiptAwaitingExactLiveness = (queue: import('../stores/chat-types').QueueEntry[]) =>
+      queue.some((entry) =>
+        entry.queueReceipt?.targets.some(
+          (target) =>
+            (target.state === 'seen' || target.state === 'awakened') &&
+            typeof target.invocationId === 'string' &&
+            target.invocationId.length > 0,
+        ),
+      );
 
     // F39: Queue events — always write via store (no dual-pointer guard needed, queue is thread-scoped)
     socket.on(
       'queue_updated',
       (data: { threadId: string; queue: unknown[]; action: string; messageReceipts?: unknown }) => {
+        bumpLiveQueueHydrateEpoch(data.threadId);
+        void invalidateSidebarProjection();
         const store = useChatStore.getState();
         const queue = normalizeQueueEntries(data.queue);
         const messageReceipts = normalizeQueueMessageReceiptProjections(data.messageReceipts);
+        const receiptNeedsExactLiveness = hasReceiptAwaitingExactLiveness(queue);
         if (messageReceipts.length > 0) {
           store.setQueue(data.threadId, queue, messageReceipts);
         } else {
           store.setQueue(data.threadId, queue);
         }
-        // F264: every durable user queue entry is owner-visible from admission.
+        // F264/F292: every durable user or Host-connector queue entry is
+        // owner-visible from admission.
         // Hydrate the authoritative message so its receipt stays live and the
-        // same projection is recovered after F5. Connector/agent work remains
-        // queue-only and must not trigger a browser history read.
-        if (queue.some((entry) => entry.source === 'user' && typeof entry.messageId === 'string')) {
+        // same projection is recovered after F5. Agent work remains queue-only;
+        // the server visibility gate filters internal system connectors.
+        if (
+          queue.some(
+            (entry) => (entry.source === 'user' || entry.source === 'connector') && typeof entry.messageId === 'string',
+          )
+        ) {
           store.requestStreamCatchUp(data.threadId);
         }
         // Queue processor started executing an entry: restore the coarse "active"
@@ -927,28 +944,32 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
           // stale slots before raising the coarse marker; preserve uncorrelated
           // slots until canonical `/queue` supplies the new exact identity.
           store.setThreadHasActiveInvocation(data.threadId, true);
-          const epoch = bumpLiveQueueHydrateEpoch(data.threadId);
           if (data.threadId === store.currentThreadId) {
             void reconcileThreadWithServer(
               data.threadId,
-              () =>
-                useChatStore.getState().currentThreadId !== data.threadId ||
-                getLiveQueueHydrateEpoch(data.threadId) !== epoch,
+              () => useChatStore.getState().currentThreadId !== data.threadId,
               'QueueProcessing',
             );
           }
         }
-        if (data.action === 'completed') {
-          const epoch = bumpLiveQueueHydrateEpoch(data.threadId);
-          // Queue `completed` is terminal for the event's own thread regardless
-          // of which thread is currently visible. Reconcile that thread in place;
-          // a later processing/completed event advances the epoch and invalidates
-          // this request without coupling correctness to navigation timing.
-          void reconcileThreadWithServer(
-            data.threadId,
-            () => getLiveQueueHydrateEpoch(data.threadId) !== epoch,
-            'QueueCompleted',
-          );
+        // A receipt can advance to seen/awakened after the processing event that
+        // originally hydrated its parent control slot. Re-read the canonical
+        // `/queue` liveness pair for that same event so QueuePanel can bridge
+        // receipt.child -> active.parent without treating the already-live turn
+        // as an orphan recoverable entry. If the child ended meanwhile, the
+        // canonical response leaves the receipt actionable (fail-closed).
+        //
+        // Unlike a bare processing marker, an exact receipt is user-actionable
+        // on background threads too, so reconcile it in-place rather than
+        // waiting for that thread to be revisited or refreshed.
+        if ((data.action === 'queued_seen' || data.action === 'queued_awakened') && receiptNeedsExactLiveness) {
+          void reconcileThreadWithServer(data.threadId, () => false, 'QueueReceiptLiveness');
+        }
+        if (data.action === 'completed' || data.action === 'cleared') {
+          // Clearing queued siblings does not end a live invocation. Refresh the
+          // complete snapshot after either boundary; the older queue response
+          // must not restore the removed siblings even if its slot was still live.
+          void reconcileThreadWithServer(data.threadId, () => false, 'QueueCompleted');
         }
         // P1 fix: 'processing' means continue/auto-dequeue resumed the queue — clear paused state
         if (data.action === 'processing' || data.action === 'cleared') {
@@ -985,20 +1006,23 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
           timestamp: number;
           contentBlocks?: readonly unknown[];
           extra?: Record<string, unknown>;
+          source?: import('../stores/chat-types').ConnectorSourceData;
           origin?: 'stream' | 'callback' | 'briefing';
           replyTo?: string;
           replyPreview?: { senderCatId: string | null; content: string; deleted?: boolean; kind?: string };
           mentionsUser?: boolean;
         }>;
       }) => {
+        void invalidateSidebarProjection();
         const store = useChatStore.getState();
         for (const message of data.messages) {
           store.addMessageToThread(data.threadId, {
             id: message.id,
-            type: message.catId ? 'assistant' : 'user',
+            type: message.source ? 'connector' : message.catId ? 'assistant' : 'user',
             content: message.content,
             timestamp: message.timestamp,
             ...(message.catId ? { catId: message.catId } : {}),
+            ...(message.source ? { source: message.source } : {}),
             ...(message.contentBlocks
               ? { contentBlocks: message.contentBlocks as import('../stores/chat-types').ChatMessage['contentBlocks'] }
               : {}),
@@ -1036,11 +1060,13 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
           mentionsUser?: boolean;
         }>;
       }) => {
+        void invalidateSidebarProjection();
         useChatStore.getState().markMessagesDelivered(data.threadId, data.messageIds, data.deliveredAt, data.messages);
       },
     );
 
     socket.on('queue_paused', (data: { threadId: string; reason: 'canceled' | 'failed'; queue: unknown[] }) => {
+      void invalidateSidebarProjection();
       const store = useChatStore.getState();
       store.setQueue(data.threadId, data.queue as import('../stores/chat-types').QueueEntry[]);
       store.setQueuePaused(data.threadId, true, data.reason);
@@ -1056,6 +1082,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
       }
     });
     socket.on('queue_full_warning', (data: { threadId: string; source: 'user' | 'connector'; queue: unknown[] }) => {
+      bumpLiveQueueHydrateEpoch(data.threadId);
       const store = useChatStore.getState();
       store.setQueue(data.threadId, data.queue as import('../stores/chat-types').QueueEntry[]);
       store.setQueueFull(data.threadId, data.source);
@@ -1084,10 +1111,13 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
         return;
       }
       const store = useChatStore.getState();
+      const semanticEvent = data.message.extra?.semanticEvent;
+      const semantic = semanticEvent ? resolveProviderSemanticMessage(semanticEvent) : null;
+      if (semantic?.action === 'suppress') return;
       store.addMessageToThread(data.threadId, {
         id: data.message.id,
         type: 'connector',
-        content: data.message.content ?? '',
+        content: semantic?.action === 'replace' ? semantic.projection.content : (data.message.content ?? ''),
         ...(data.message.source ? { source: data.message.source } : {}),
         ...(data.message.extra ? { extra: data.message.extra } : {}),
         timestamp: data.message.timestamp ?? Date.now(),
@@ -1250,12 +1280,33 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
     // Stale-invocation watchdog: periodic probe to catch missed done(isFinal) events
     // on a still-connected socket (won't trigger reconcile-on-reconnect).
     const watchdogTimer = setInterval(checkForStaleActiveInvocations, STALE_WATCHDOG_INTERVAL_MS);
+    // Reconcile the connection before its rooms. Socket.IO can remain active
+    // without a retry after a synchronous disconnect listener throws. Its
+    // public connect() resumes that state and leaves an ongoing retry alone;
+    // inactive sockets (explicit disconnect / namespace rejection) stay closed.
+    const resumeActiveConnection = () => {
+      if (!socket.connected && socket.active) socket.connect();
+    };
+    const connectionWatchdogTimer = setInterval(() => {
+      resumeActiveConnection();
+      // Confirmed rooms and exhausted/rejected joins remain a no-op.
+      reconcileNeverAttemptedRoomMembership();
+    }, SOCKET_RECONCILE_INTERVAL_MS);
     const visibilityHandler =
       typeof document !== 'undefined'
         ? () => {
             if (document.visibilityState === 'visible') {
+              void invalidateSidebarProjection();
               checkForStaleActiveInvocations();
+              resumeActiveConnection();
               reconcileUnconfirmedRoomMembership();
+              // A quiet missed tail has no later event to expose a sequence
+              // gap. Recover visible panes even if no reconnect event arrives.
+              const visibleThreads = new Set(foregroundThreadIdsRef.current);
+              if (threadIdRef.current) visibleThreads.add(threadIdRef.current);
+              for (const visibleThreadId of visibleThreads) {
+                useChatStore.getState().requestStreamCatchUp(visibleThreadId);
+              }
             }
           }
         : null;
@@ -1265,6 +1316,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
 
     return () => {
       clearInterval(watchdogTimer);
+      clearInterval(connectionWatchdogTimer);
       if (visibilityHandler) {
         document.removeEventListener('visibilitychange', visibilityHandler);
       }
@@ -1277,6 +1329,7 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
   }, [
     persistJoinedRooms,
     reconcileDesiredRoomMembership,
+    reconcileNeverAttemptedRoomMembership,
     reconcileUnconfirmedRoomMembership,
     resetConfirmedRoomMembership,
   ]);
@@ -1337,8 +1390,6 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string, foregro
     [forgetRoom, persistJoinedRooms, requestRoomJoin],
   );
 
-  const foregroundThreadIdsRef = useRef(foregroundThreadIds);
-  foregroundThreadIdsRef.current = foregroundThreadIds;
   const foregroundRoomsKey = (foregroundThreadIds ?? (threadId ? [threadId] : [])).join('\u0000');
   const previousForegroundRoomsKeyRef = useRef<string | null>(null);
 

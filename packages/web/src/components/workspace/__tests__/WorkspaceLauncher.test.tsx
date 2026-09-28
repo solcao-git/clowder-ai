@@ -6,6 +6,9 @@ import { WORKSPACE_MODES } from '@/lib/workspace-modes';
 const mocks = vi.hoisted(() => ({
   workspaceMode: 'dev',
   setWorkspaceMode: vi.fn(),
+  setRightPanelOpen: vi.fn(),
+  apiFetch: vi.fn(),
+  openInvocationTrajectory: vi.fn(),
 }));
 
 vi.mock('../../ChatVoiceFeatureControls', () => ({
@@ -13,13 +16,40 @@ vi.mock('../../ChatVoiceFeatureControls', () => ({
 }));
 
 vi.mock('@/stores/chatStore', () => ({
-  useChatStore: (selector: (state: Record<string, unknown>) => unknown) =>
-    selector({
-      workspaceMode: mocks.workspaceMode,
-      setWorkspaceMode: mocks.setWorkspaceMode,
-    }),
+  useChatStore: Object.assign(
+    (selector: (state: Record<string, unknown>) => unknown) =>
+      selector({
+        workspaceMode: mocks.workspaceMode,
+        setWorkspaceMode: mocks.setWorkspaceMode,
+        setRightPanelOpen: mocks.setRightPanelOpen,
+        threads: [{ id: 'thread-launcher', title: 'Launcher thread' }],
+      }),
+    {
+      getState: () => ({
+        workspaceMode: mocks.workspaceMode,
+        setWorkspaceMode: mocks.setWorkspaceMode,
+        setRightPanelOpen: mocks.setRightPanelOpen,
+        threads: [{ id: 'thread-launcher', title: 'Launcher thread' }],
+      }),
+    },
+  ),
 }));
 
+vi.mock('@/utils/api-client', () => ({
+  apiFetch: (...args: unknown[]) => mocks.apiFetch(...args),
+}));
+
+vi.mock('../trajectory/trajectory-navigation', () => ({
+  openInvocationTrajectory: (...args: unknown[]) => mocks.openInvocationTrajectory(...args),
+}));
+
+vi.mock('@/components/story-player/TheaterReplayContent', () => ({
+  TheaterReplayContent: ({ threadId }: { threadId: string }) => (
+    <div data-testid="theater-replay-content">Replay {threadId}</div>
+  ),
+}));
+
+import { TheaterReplayHost } from '../../story-player/TheaterReplayHost';
 import { WorkspaceLauncher } from '../WorkspaceLauncher';
 
 describe('F284 WorkspaceLauncher', () => {
@@ -34,6 +64,11 @@ describe('F284 WorkspaceLauncher', () => {
   beforeEach(() => {
     mocks.workspaceMode = 'dev';
     mocks.setWorkspaceMode.mockReset();
+    mocks.setRightPanelOpen.mockReset();
+    mocks.apiFetch.mockReset();
+    mocks.openInvocationTrajectory.mockReset();
+    mocks.apiFetch.mockResolvedValue({ ok: true, json: async () => ({ invocations: [] }) });
+    window.history.replaceState({}, '', '/thread/thread-launcher');
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -53,6 +88,33 @@ describe('F284 WorkspaceLauncher', () => {
     await act(async () => {
       root.render(<WorkspaceLauncher />);
     });
+  }
+
+  function summary(
+    invocationId: string,
+    status: 'done' | 'error' | 'timeout',
+    startedAt: number,
+    threadId = 'thread-launcher',
+  ) {
+    return {
+      invocationId,
+      status,
+      startedAt,
+      threadId,
+      sessionId: `session-${invocationId}`,
+      sessionSeq: 0,
+      sessionStatus: 'sealed',
+      catId: 'codex-sol',
+      durationMs: 10,
+      eventCount: 1,
+      statusEventCount: 0,
+      toolUseCount: 0,
+      toolResultCount: 0,
+      messageCount: 1,
+      errorCount: status === 'done' ? 0 : 1,
+      toolNames: [],
+      keyMessages: [],
+    };
   }
 
   it('is the always-visible first screen rather than a second-step popover', async () => {
@@ -79,6 +141,67 @@ describe('F284 WorkspaceLauncher', () => {
     expect(container.querySelector('[data-testid="workspace-launcher-dev-browser"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="workspace-launcher-status"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="workspace-companion-controls"]')).not.toBeNull();
+  });
+
+  it('locks the F315 audit census to the exact destinations rendered by the canonical launcher', async () => {
+    await renderLauncher();
+
+    const renderedDestinations = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-workspace-destination]'),
+      (element) => element.dataset.workspaceDestination,
+    );
+
+    expect(renderedDestinations).toEqual([
+      'surface:files',
+      'surface:changes',
+      'surface:git',
+      'surface:terminal',
+      'workspace:capability-evolution',
+      'surface:browser',
+      'host:status',
+      'action:theater',
+      'mode:team',
+      'mode:needs-me',
+      'mode:product-schedule',
+      'mode:tasks',
+      'mode:schedule',
+      'mode:approval',
+      'mode:recall',
+      'mode:trajectory',
+      'mode:artifacts',
+      'mode:community',
+      'mode:eval',
+    ]);
+  });
+
+  it('keeps product Schedule distinct from background scheduler management', async () => {
+    await renderLauncher();
+
+    const productSchedule = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workspace-launcher-product-schedule"]',
+    );
+    const scheduler = container.querySelector<HTMLButtonElement>('[data-testid="workspace-launcher-schedule"]');
+    expect(productSchedule?.textContent).toContain('Schedule');
+    expect(scheduler?.textContent).toContain('调度');
+
+    await act(async () => {
+      productSchedule?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(mocks.setWorkspaceMode).toHaveBeenCalledWith('product-schedule');
+  });
+
+  it('exposes global Needs Me as a sibling of product Schedule and Approval Hub', async () => {
+    await renderLauncher();
+
+    const needsMe = container.querySelector<HTMLButtonElement>('[data-testid="workspace-launcher-needs-me"]');
+    expect(needsMe?.textContent).toContain('Needs Me');
+    expect(container.querySelector('[data-testid="workspace-launcher-product-schedule"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="workspace-launcher-approval"]')).not.toBeNull();
+
+    await act(async () => {
+      needsMe?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(mocks.setWorkspaceMode).toHaveBeenCalledWith('needs-me');
   });
 
   it('opens status and session diagnostics from the Launcher instead of permanent header chrome', async () => {
@@ -121,6 +244,101 @@ describe('F284 WorkspaceLauncher', () => {
     expect(container.querySelector('[data-testid="workspace-launcher-dev"]')).toBeNull();
   });
 
+  it('searches workspace filenames and content from the home field and opens a matching file', async () => {
+    vi.useFakeTimers();
+    const onSearch = vi.fn().mockResolvedValue(undefined);
+    const onReset = vi.fn();
+    const onOpenResult = vi.fn();
+
+    try {
+      await act(async () => {
+        root.render(
+          <WorkspaceLauncher
+            workspaceSearch={{
+              enabled: true,
+              results: [
+                {
+                  path: 'docs/features/F063-hub-workspace-explorer.md',
+                  line: 37,
+                  content: '全文搜索：输关键词 → 搜遍仓库',
+                  contextBefore: '',
+                  contextAfter: '',
+                  matchType: 'content',
+                },
+              ],
+              loading: false,
+              error: null,
+              onSearch,
+              onReset,
+              onOpenResult,
+              onViewAll: vi.fn(),
+            }}
+          />,
+        );
+      });
+
+      const search = container.querySelector<HTMLInputElement>('[data-testid="workspace-launcher-search"]');
+      await act(async () => {
+        if (!search) return;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(search, '全文搜索');
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+
+      expect(onReset).toHaveBeenCalled();
+      expect(onSearch).toHaveBeenCalledWith('全文搜索');
+      expect(container.textContent).toContain('F063-hub-workspace-explorer.md');
+      expect(container.textContent).toContain('全文搜索：输关键词 → 搜遍仓库');
+
+      const result = container.querySelector('[data-testid="workspace-launcher-file-result"]');
+      await act(async () => {
+        result?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      expect(onOpenResult).toHaveBeenCalledWith('docs/features/F063-hub-workspace-explorer.md', 37);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps matching capability entrances available when workspace file search fails', async () => {
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.render(
+          <WorkspaceLauncher
+            workspaceSearch={{
+              enabled: true,
+              results: [],
+              loading: false,
+              error: 'Failed to search workspace',
+              onSearch: vi.fn().mockResolvedValue(undefined),
+              onReset: vi.fn(),
+              onOpenResult: vi.fn(),
+              onViewAll: vi.fn(),
+            }}
+          />,
+        );
+      });
+
+      const search = container.querySelector<HTMLInputElement>('[data-testid="workspace-launcher-search"]');
+      await act(async () => {
+        if (!search) return;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(search, '评估');
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(250);
+      });
+
+      expect(container.textContent).toContain('暂时没能搜索当前工作区，请重试');
+      expect(container.querySelector('[data-testid="workspace-launcher-eval"]')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('routes selection through the canonical store action', async () => {
     await renderLauncher();
     const item = container.querySelector('[data-testid="workspace-launcher-recall"]');
@@ -130,6 +348,26 @@ describe('F284 WorkspaceLauncher', () => {
     });
 
     expect(mocks.setWorkspaceMode).toHaveBeenCalledWith('recall');
+  });
+
+  it('reports the canonical destination after preserving its existing domain action', async () => {
+    const onSelectDestination = vi.fn();
+    await act(async () => {
+      root.render(<WorkspaceLauncher onSelectDestination={onSelectDestination} />);
+    });
+
+    const item = container.querySelector('[data-testid="workspace-launcher-tasks"]');
+    await act(async () => {
+      item?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(mocks.setWorkspaceMode).toHaveBeenCalledWith('tasks');
+    expect(onSelectDestination).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'mode', id: 'tasks', label: '任务' }),
+    );
+    expect(mocks.setWorkspaceMode.mock.invocationCallOrder[0]).toBeLessThan(
+      onSelectDestination.mock.invocationCallOrder[0],
+    );
   });
 
   it('routes development tools without restoring the permanent mode tab row', async () => {
@@ -146,5 +384,85 @@ describe('F284 WorkspaceLauncher', () => {
     expect(mocks.setWorkspaceMode).toHaveBeenCalledWith('dev');
     expect(onSelectDevSurface).toHaveBeenCalledWith('browser');
     expect(container.querySelector('[data-testid="workspace-dev-mode-tabs"]')).toBeNull();
+  });
+
+  it('recalls the latest three invocations with abnormal ones first', async () => {
+    mocks.apiFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        invocations: [
+          summary('done-new', 'done', 400),
+          summary('timeout-old', 'timeout', 100),
+          summary('error-new', 'error', 300),
+          summary('done-old', 'done', 50),
+        ],
+      }),
+    });
+    await act(async () => {
+      root.render(<WorkspaceLauncher threadId="thread-launcher" />);
+    });
+    await act(async () => {});
+
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('[data-recent-invocation]'));
+    expect(rows.map((row) => row.dataset.recentInvocation)).toEqual(['error-new', 'timeout-old', 'done-new']);
+  });
+
+  it('drops prior-thread recall cards while the next thread is still loading', async () => {
+    let resolveThreadB: ((value: { ok: boolean; json: () => Promise<{ invocations: never[] }> }) => void) | undefined;
+    const threadBResponse = new Promise<{ ok: boolean; json: () => Promise<{ invocations: never[] }> }>((resolve) => {
+      resolveThreadB = resolve;
+    });
+    mocks.apiFetch.mockImplementation((input: unknown) => {
+      const url = String(input);
+      if (url.includes('/thread-a/')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ invocations: [summary('invocation-a', 'done', 100, 'thread-a')] }),
+        });
+      }
+      if (url.includes('/thread-b/')) return threadBResponse;
+      return Promise.resolve({ ok: true, json: async () => ({ invocations: [] }) });
+    });
+
+    await act(async () => {
+      root.render(<WorkspaceLauncher threadId="thread-a" />);
+    });
+    await act(async () => {});
+    const staleCard = container.querySelector<HTMLElement>('[data-recent-invocation="invocation-a"]');
+    expect(staleCard).not.toBeNull();
+
+    await act(async () => {
+      root.render(<WorkspaceLauncher threadId="thread-b" />);
+    });
+
+    expect(container.querySelector('[data-recent-invocation="invocation-a"]')).toBeNull();
+    await act(async () => {
+      staleCard?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(mocks.openInvocationTrajectory).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveThreadB?.({ ok: true, json: async () => ({ invocations: [] }) });
+      await threadBResponse;
+    });
+  });
+
+  it('opens the actual Theater host when the sidebar is not mounted', async () => {
+    await act(async () => {
+      root.render(
+        <>
+          <WorkspaceLauncher threadId="thread-launcher" />
+          <TheaterReplayHost />
+        </>,
+      );
+    });
+    const theater = container.querySelector('[data-testid="workspace-launcher-theater"]');
+    await act(async () => {
+      theater?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-testid="theater-replay-content"]')?.textContent).toContain(
+      'thread-launcher',
+    );
   });
 });

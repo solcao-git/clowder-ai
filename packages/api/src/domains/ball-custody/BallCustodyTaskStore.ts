@@ -7,7 +7,15 @@ import type {
   UpdateTaskInput,
 } from '@cat-cafe/shared';
 import type { ITaskStore } from '../cats/services/stores/ports/TaskStore.js';
-import type { ReplaceAutomationStateIfGenerationInput } from '../cats/services/stores/ports/TaskStoreContract.js';
+import type {
+  AdmitEntrustedWorkStoreInput,
+  AdmitEntrustedWorkStoreResult,
+  CloseEntrustedWorkStoreInput,
+  CloseEntrustedWorkStoreResult,
+  ReplaceAutomationStateIfGenerationInput,
+  UpdateEntrustedWorkStoreInput,
+  UpdateEntrustedWorkStoreResult,
+} from '../cats/services/stores/ports/TaskStoreContract.js';
 import type { IBallCustodyIngest } from './BallCustodyIngest.js';
 import { buildTaskBlockedEvent, buildTaskDoneEvent, buildTaskUnblockedEvent } from './ball-custody-events.js';
 import type { TaskActionSuccessorLifecycle } from './TaskActionSuccessorLifecycle.js';
@@ -42,6 +50,10 @@ class BallCustodyTaskStore implements ITaskStore {
 
   get(taskId: string): MaybePromise<TaskItem | null> {
     return this.inner.get(taskId);
+  }
+
+  getWaitRegistration(taskId: string): ReturnType<ITaskStore['getWaitRegistration']> {
+    return this.inner.getWaitRegistration(taskId);
   }
 
   update(taskId: string, input: UpdateTaskInput): MaybePromise<TaskItem | null> {
@@ -134,6 +146,41 @@ class BallCustodyTaskStore implements ITaskStore {
     return this.inner.getManagedWorkBinding(taskId);
   }
 
+  admitEntrustedWork(input: AdmitEntrustedWorkStoreInput): MaybePromise<AdmitEntrustedWorkStoreResult> {
+    return this.inner.admitEntrustedWork(input);
+  }
+
+  closeEntrustedWork(taskId: string, input: CloseEntrustedWorkStoreInput): MaybePromise<CloseEntrustedWorkStoreResult> {
+    const beforeResult = this.inner.get(taskId);
+    const closeAfterBefore = (before: TaskItem | null): MaybePromise<CloseEntrustedWorkStoreResult> => {
+      const closedResult = this.inner.closeEntrustedWork(taskId, input);
+      const finish = (result: CloseEntrustedWorkStoreResult): MaybePromise<CloseEntrustedWorkStoreResult> => {
+        if (!before || result.kind !== 'closed') return result;
+        this.recordStatusTransition(before, result.task);
+        const completion = this.actionLifecycle?.completeStatusTransition(before, result.task);
+        return completion ? completion.then(() => result) : result;
+      };
+      return isPromiseLike(closedResult) ? closedResult.then(finish) : finish(closedResult);
+    };
+    return isPromiseLike(beforeResult) ? beforeResult.then(closeAfterBefore) : closeAfterBefore(beforeResult);
+  }
+
+  updateEntrustedWork(
+    taskId: string,
+    input: UpdateEntrustedWorkStoreInput,
+  ): MaybePromise<UpdateEntrustedWorkStoreResult> {
+    const beforeResult = this.inner.get(taskId);
+    const updateAfterBefore = (before: TaskItem | null): MaybePromise<UpdateEntrustedWorkStoreResult> => {
+      const updatedResult = this.inner.updateEntrustedWork(taskId, input);
+      const finish = (result: UpdateEntrustedWorkStoreResult): UpdateEntrustedWorkStoreResult => {
+        if (before && result.kind === 'updated') this.recordStatusTransition(before, result.task);
+        return result;
+      };
+      return isPromiseLike(updatedResult) ? updatedResult.then(finish) : finish(updatedResult);
+    };
+    return isPromiseLike(beforeResult) ? beforeResult.then(updateAfterBefore) : updateAfterBefore(beforeResult);
+  }
+
   replaceAutomationStateIfGeneration(
     taskId: string,
     input: ReplaceAutomationStateIfGenerationInput,
@@ -151,12 +198,17 @@ class BallCustodyTaskStore implements ITaskStore {
             threadId: updated.threadId,
             ownerCatId: updated.ownerCatId,
             blockedSinceAt: updated.updatedAt,
+            entrustedWorkRevision: updated.entrustedWork?.revision,
             resolveMode: updated.resolveMode,
           })
         : updated.status === 'done'
           ? buildTaskDoneEvent({ taskId: updated.id, at: updated.updatedAt })
           : before.status === 'blocked'
-            ? buildTaskUnblockedEvent({ taskId: updated.id, at: updated.updatedAt })
+            ? buildTaskUnblockedEvent({
+                taskId: updated.id,
+                at: updated.updatedAt,
+                entrustedWorkRevision: updated.entrustedWork?.revision,
+              })
             : null;
 
     if (!event) return;

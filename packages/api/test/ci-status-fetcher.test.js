@@ -6,6 +6,7 @@
 
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
+import { fetchPrCiStatuses } from '../dist/infrastructure/email/ci-status-batch-fetcher.js';
 import {
   classifyGitHubExecutionFailure,
   computeAggregateBucket,
@@ -13,6 +14,84 @@ import {
   normalizeBucket,
   normalizePrState,
 } from '../dist/infrastructure/email/ci-status-fetcher.js';
+
+describe('fetchPrCiStatuses', () => {
+  it('loads many tracked PR rollups with one GraphQL process', async () => {
+    const commands = [];
+    const results = await fetchPrCiStatuses(
+      [
+        { repoFullName: 'owner/repo', prNumber: 7 },
+        { repoFullName: 'owner/repo', prNumber: 8 },
+      ],
+      { warn() {} },
+      {
+        async execFileAsync(file, args) {
+          assert.equal(file, 'gh');
+          commands.push([...args]);
+          assert.equal(args[0], 'api');
+          assert.equal(args[1], 'graphql');
+          return {
+            stdout: JSON.stringify({
+              data: {
+                r0: {
+                  p0: {
+                    headRefOid: 'a'.repeat(40),
+                    state: 'OPEN',
+                    mergedAt: null,
+                    mergedBy: null,
+                    commits: {
+                      nodes: [
+                        {
+                          commit: {
+                            statusCheckRollup: {
+                              contexts: {
+                                nodes: [
+                                  {
+                                    __typename: 'CheckRun',
+                                    name: 'gate',
+                                    status: 'COMPLETED',
+                                    conclusion: 'SUCCESS',
+                                    detailsUrl: 'https://example.test/gate',
+                                    checkSuite: { workflowRun: { workflow: { name: 'CI' } } },
+                                  },
+                                ],
+                                pageInfo: { hasNextPage: false },
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                  p1: {
+                    headRefOid: 'b'.repeat(40),
+                    state: 'MERGED',
+                    mergedAt: '2026-08-21T00:00:00Z',
+                    mergedBy: { login: 'maintainer' },
+                    commits: { nodes: [] },
+                  },
+                },
+              },
+            }),
+          };
+        },
+      },
+    );
+
+    assert.equal(commands.length, 1);
+    assert.equal(results.get('owner/repo#7').aggregateBucket, 'pass');
+    assert.deepEqual(results.get('owner/repo#7').checks, [
+      {
+        name: 'gate',
+        bucket: 'pass',
+        link: 'https://example.test/gate',
+        workflow: 'CI',
+      },
+    ]);
+    assert.equal(results.get('owner/repo#8').prState, 'merged');
+    assert.equal(results.get('owner/repo#8').mergedByLogin, 'maintainer');
+  });
+});
 
 function rawGitHubFixture(annotationTexts, jobCheckRunId = 91) {
   const commands = [];
@@ -114,7 +193,7 @@ describe('classifyGitHubExecutionFailure', () => {
     assert.ok(fixture.commands.some((args) => args[0] === 'api' && args[1].includes('/annotations?')));
   });
 
-  it('marks an empty GitHub rollup without prematurely classifying it as pass', async () => {
+  it('marks an empty GitHub rollup as pending, never as pass', async () => {
     const commands = [];
     const result = await fetchPrCiStatus(
       'zts212653/clowder-ai',
@@ -202,9 +281,10 @@ describe('normalizeBucket', () => {
 });
 
 describe('computeAggregateBucket', () => {
-  it('keeps an empty rollup pending until the poller proves it is stable', () => {
-    // A single empty statusCheckRollup is ambiguous: the repository may have no
-    // checks, or GitHub may not have created the check runs yet for a fresh HEAD.
+  it('keeps an empty rollup pending however long it stays empty', () => {
+    // An empty statusCheckRollup is ambiguous: the repository may have no checks,
+    // or GitHub may not have created the check runs yet for a fresh HEAD. Neither
+    // is evidence that CI passed, so it stays pending no matter how many polls see it.
     assert.strictEqual(computeAggregateBucket([]), 'pending');
   });
 

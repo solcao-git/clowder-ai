@@ -41,6 +41,8 @@ test('item.started command_execution → tool_use', () => {
   );
   assert.equal(msg?.type, 'tool_use');
   assert.equal(msg?.toolName, 'command_execution');
+  assert.equal(msg?.toolSource, 'host_cli');
+  assert.equal(msg?.toolChannel, 'unknown');
   assert.deepEqual(msg?.toolInput, { command: 'ls -la' });
 });
 
@@ -59,6 +61,10 @@ test('item.completed command_execution → tool_result', () => {
     CAT,
   );
   assert.equal(msg?.type, 'tool_result');
+  assert.equal(msg?.toolName, 'command_execution');
+  assert.equal(msg?.toolSource, 'host_cli');
+  assert.equal(msg?.toolChannel, 'unknown');
+  assert.equal(msg?.toolResultStatus, 'ok');
   assert.ok(msg?.content?.includes('file.txt'));
 });
 
@@ -76,7 +82,189 @@ test('item.completed file_change → tool_use', () => {
   );
   assert.equal(msg?.type, 'tool_use');
   assert.equal(msg?.toolName, 'file_change');
+  assert.equal(msg?.toolSource, 'host_cli');
   assert.deepEqual(msg?.toolInput, { status: 'completed', changes: ['a', { path: 'b' }] });
+  assert.equal(msg?.semanticEvent?.v, 1);
+  assert.match(msg?.semanticEvent?.id ?? '', /^diff:codex:/);
+  assert.equal(msg?.semanticEvent?.kind, 'diff');
+  assert.equal(typeof msg?.semanticEvent?.occurredAt, 'number');
+  assert.equal(msg?.semanticEvent?.stage, 'completed');
+  assert.equal(msg?.semanticEvent?.summary, '2 个文件变更');
+  assert.deepEqual(msg?.semanticEvent?.provenance, {
+    provider: 'codex',
+    carrier: 'app_server',
+    nativeType: 'item/completed:fileChange',
+  });
+});
+
+test('app-server plan is semantic while private reasoning stays in the thinking channel', () => {
+  const plan = transformCodexEvent(
+    {
+      type: 'turn.plan.updated',
+      explanation: '先验证再实现',
+      plan: [{ step: '写红测' }, { step: '实现' }],
+    },
+    CAT,
+  );
+  assert.equal(plan?.type, 'provider_signal');
+  assert.equal(plan?.semanticEvent?.kind, 'plan');
+  assert.equal(plan?.semanticEvent?.text, '先验证再实现');
+  assert.equal(plan?.semanticEvent?.provenance?.nativeType, 'turn/plan/updated');
+
+  const reasoning = transformCodexEvent(
+    {
+      type: 'item.completed',
+      item: { id: 'reason-1', type: 'reasoning', summary: [{ text: '需要保留 ThreadStore 真相。' }] },
+    },
+    CAT,
+  );
+  assert.equal(reasoning?.type, 'system_info');
+  assert.deepEqual(JSON.parse(reasoning?.content ?? '{}'), {
+    type: 'thinking',
+    catId: CAT,
+    text: '需要保留 ThreadStore 真相。',
+  });
+  assert.equal(reasoning?.semanticEvent, undefined);
+});
+
+test('app-server subexecution stays typed instead of becoming root text', () => {
+  const msg = transformCodexEvent(
+    {
+      type: 'app_server.subexecution',
+      event_id: 'subexecution:codex:child-1:message:msg-1',
+      occurred_at: 123,
+      stage: 'message',
+      subexecution_id: 'child-1',
+      root_execution_id: 'root-1',
+      parent_execution_id: 'root-1',
+      root_turn_id: 'root-turn-1',
+      parent_turn_id: 'root-turn-1',
+      turn_id: 'child-turn-1',
+      agent_path: '/root/reviewer',
+      nickname: 'Bohr',
+      depth: 1,
+      content: 'Approve from the child only',
+      message_phase: 'final_answer',
+    },
+    CAT,
+  );
+
+  assert.equal(msg?.type, 'provider_signal');
+  assert.deepEqual(msg?.semanticEvent, {
+    v: 1,
+    id: 'subexecution:codex:child-1:message:msg-1',
+    kind: 'subexecution',
+    occurredAt: 123,
+    stage: 'message',
+    subexecutionId: 'child-1',
+    rootExecutionId: 'root-1',
+    parentExecutionId: 'root-1',
+    rootTurnId: 'root-turn-1',
+    parentTurnId: 'root-turn-1',
+    turnId: 'child-turn-1',
+    agentPath: '/root/reviewer',
+    nickname: 'Bohr',
+    depth: 1,
+    content: 'Approve from the child only',
+    messagePhase: 'final_answer',
+    provenance: { provider: 'codex', carrier: 'app_server', nativeType: 'subAgentActivity' },
+  });
+});
+
+test('app-server mapper preserves envelope identity for downstream scope fences', () => {
+  assert.deepEqual(
+    mapCodexAppServerNotification({
+      method: 'item/completed',
+      params: {
+        threadId: 'child-1',
+        turnId: 'child-turn-1',
+        item: { id: 'msg-1', type: 'agentMessage', text: 'child result' },
+      },
+    }),
+    {
+      type: 'item.completed',
+      thread_id: 'child-1',
+      turn_id: 'child-turn-1',
+      item: { id: 'msg-1', type: 'agent_message', text: 'child result' },
+    },
+  );
+});
+
+test('Codex app-server ends goal notification wire types at the adapter boundary', () => {
+  const mappedUpdate = mapCodexAppServerNotification({
+    method: 'thread/goal/updated',
+    params: {
+      threadId: 'native-thread-1',
+      goal: {
+        threadId: 'native-thread-1',
+        objective: 'Ship Phase C',
+        status: 'paused',
+        tokenBudget: 20_000,
+        tokensUsed: 12,
+        timeUsedSeconds: 3,
+        createdAt: 100,
+        updatedAt: 102,
+      },
+    },
+  });
+  const updated = transformCodexEvent(mappedUpdate, CAT);
+  assert.equal(mappedUpdate?.type, 'thread.goal.updated');
+  assert.equal(updated?.type, 'provider_signal');
+  assert.deepEqual(updated?.nativeGoalObservation, {
+    state: 'updated',
+    runtimeSessionId: 'native-thread-1',
+    objective: 'Ship Phase C',
+    status: 'paused',
+    tokenBudget: 20_000,
+    providerUpdatedAt: 102,
+    source: 'codex_app_server',
+  });
+  assert.equal(updated?.semanticEvent, undefined);
+
+  const mappedClear = mapCodexAppServerNotification({
+    method: 'thread/goal/cleared',
+    params: { threadId: 'native-thread-1' },
+  });
+  const cleared = transformCodexEvent(mappedClear, CAT);
+  assert.deepEqual(cleared?.nativeGoalObservation, {
+    state: 'cleared',
+    runtimeSessionId: 'native-thread-1',
+    source: 'codex_app_server',
+  });
+  assert.equal(
+    mapCodexAppServerNotification({
+      method: 'thread/goal/updated',
+      params: { threadId: 'native-thread-1', goal: { threadId: 'other-thread' } },
+    }),
+    null,
+  );
+});
+
+test('Codex goal projection rejects adapter-bypassing malformed events', () => {
+  const updated = transformCodexEvent(
+    {
+      type: 'thread.goal.updated',
+      thread_id: 'native-thread-1',
+      goal: {
+        objective: 'Ship Phase C',
+        status: 'mystery',
+        updatedAt: 102,
+      },
+    },
+    CAT,
+  );
+  assert.equal(updated, null);
+  assert.equal(
+    transformCodexEvent(
+      {
+        type: 'thread.goal.updated',
+        thread_id: 'native-thread-1',
+        goal: { objective: '   ', status: 'active', updatedAt: 103 },
+      },
+      CAT,
+    ),
+    null,
+  );
 });
 
 test('Reconnecting error → system_info', () => {
@@ -191,7 +379,7 @@ test('todo_list with empty items → system_info with tasks:[] (clears UI)', () 
   assert.deepEqual(payload.tasks, []);
 });
 
-// ── F045: reasoning → system_info(thinking) ──
+// ── F306/F045: reasoning remains private thinking ──
 
 test('item.completed reasoning → system_info(thinking)', () => {
   const event = {
@@ -203,9 +391,12 @@ test('item.completed reasoning → system_info(thinking)', () => {
   };
   const msg = transformCodexEvent(event, CAT);
   assert.equal(msg?.type, 'system_info');
-  const payload = JSON.parse(msg?.content ?? '{}');
-  assert.equal(payload.type, 'thinking');
-  assert.equal(payload.text, 'Let me think about this...\nThe user wants X.');
+  assert.deepEqual(JSON.parse(msg?.content ?? '{}'), {
+    type: 'thinking',
+    catId: CAT,
+    text: 'Let me think about this...\nThe user wants X.',
+  });
+  assert.equal(msg?.semanticEvent, undefined);
 });
 
 test('reasoning with empty text → null', () => {
@@ -231,6 +422,8 @@ test('item.started mcp_tool_call → tool_use', () => {
   const msg = transformCodexEvent(event, CAT);
   assert.equal(msg?.type, 'tool_use');
   assert.equal(msg?.toolName, 'mcp:cat-cafe/post_message');
+  assert.equal(msg?.toolSource, 'mcp');
+  assert.equal(msg?.toolChannel, 'unknown');
   assert.deepEqual(msg?.toolInput, { text: 'hello' });
 });
 
@@ -247,6 +440,8 @@ test('item.completed mcp_tool_call → tool_result', () => {
   };
   const msg = transformCodexEvent(event, CAT);
   assert.equal(msg?.type, 'tool_result');
+  assert.equal(msg?.toolSource, 'mcp');
+  assert.equal(msg?.toolChannel, 'unknown');
   assert.ok(msg?.content?.includes('mcp:cat-cafe/post_message'));
 });
 

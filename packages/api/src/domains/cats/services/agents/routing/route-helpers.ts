@@ -4,7 +4,7 @@
  */
 
 import type { CatId, MessageContent, RichBlock, RichBlockBase } from '@cat-cafe/shared';
-import { isCrossThreadProvenance } from '@cat-cafe/shared';
+import { catRegistry, isCrossThreadProvenance } from '@cat-cafe/shared';
 import { resolveUnboundHistoryContextTokenCeiling } from '../../../../../config/context-capacity.js';
 import { DEFAULT_HIERARCHICAL_CONTEXT } from '../../../../../config/hierarchical-context-config.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
@@ -14,24 +14,39 @@ import {
   type CanonicalVisibilityCursor,
   compareCursors,
 } from '../../stores/cursor.js';
+import {
+  type AgentRegistrationFailure,
+  AgentServiceUnavailableError,
+} from '../registry/AgentServiceUnavailableError.js';
 
 const log = createModuleLogger('context-transport');
 const PROMPT_MESSAGE_SAFETY_CHAR_LIMIT = 100_000;
 
 import { estimateTokens } from '../../../../../utils/token-counter.js';
+import { matchExplicitApprovedTasteTrigger } from '../../../../memory/cue/ExplicitApprovedTasteTriggerCatalog.js';
 import type { MemoryCueOpportunitySeed } from '../../../../memory/cue/MemoryCueInvocationPromptService.js';
 import type { NudgeProcessResult } from '../../../../memory/EntityNudgeService.js';
+import type { CloudDispatchProvenance } from '../../cloud-bridge/types.js';
 import { buildMessageMap, formatMessage } from '../../context/ContextAssembler.js';
 import { BRIEFING_TIMEZONE } from '../../duty-briefing/constants.js';
 import { formatPromptTime } from '../../format-time.js';
+import { isSameUserWaveSiblingReply } from '../../freshness/FreshnessRelevancePolicy.js';
 import type { DegradationResult } from '../../orchestration/DegradationPolicy.js';
+import { mapToPresentation } from '../../session/context-presentation.js';
+import {
+  type ContextModeProjection,
+  type ContextSurfaceProjection,
+  countPresentedTiers,
+  projectContextMode,
+  withSurfaceShape,
+} from '../../session/context-surface-projection.js';
 import { cursorFor } from '../../stores/cursor.js';
 import { DeliveryCursorStore } from '../../stores/ports/DeliveryCursorStore.js';
 import type { IDraftStore } from '../../stores/ports/DraftStore.js';
 import type { IMessageStore, StoredMessage, StoredToolEvent } from '../../stores/ports/MessageStore.js';
 import type { Thread } from '../../stores/ports/ThreadStore.js';
 import { canViewMessage, isTimelinePublished, resolveVisibleReplyParent } from '../../stores/visibility.js';
-import type { AgentMessage, AgentService, ToolExecutionPolicy } from '../../types.js';
+import type { AgentMessage, AgentRouteIntent, AgentService, ToolExecutionPolicy } from '../../types.js';
 import type { InvocationTracker } from '../invocation/InvocationTracker.js';
 import type { InvocationDeps } from '../invocation/invoke-single-cat.js';
 import type { OwnerAuthProvenance } from '../invocation/owner-auth-provenance.js';
@@ -50,9 +65,10 @@ import {
   selectAnchors,
   stripStructuralEnvelope,
 } from './context-transport.js';
+import { legacyBatonHasSucceededReply, recoverableDeliveryBoundary } from './delivery-boundary-recovery.js';
 import type { HumanDispositionInvocationOrigin } from './human-disposition-invocation-origin.js';
 import { extractBatonContext, formatNavigationHeader, summarizeActiveTasks } from './navigation-context.js';
-import { rankArtifactSources, selectDirectiveSources } from './source-ranking.js';
+import { projectRankedSource, rankArtifactSources, selectDirectiveSources } from './source-ranking.js';
 import { resolveReachableArtifactRefs } from './source-reachability.js';
 
 /**
@@ -90,7 +106,10 @@ export interface RouteBroadcaster {
 /** Dependencies shared across route strategies */
 export interface RouteStrategyDeps {
   services: Record<string, AgentService>;
+  unavailableServices?: ReadonlyMap<string, AgentRegistrationFailure>;
   invocationDeps: InvocationDeps;
+  /** F293: fresh advisory/rejection decision at each actual child boundary. */
+  routingDispatchPreflight?: import('../../../../routing-context/RoutingDispatchPreflightPort.js').RoutingDispatchPreflightPort;
   messageStore: IMessageStore;
   deliveryCursorStore?: DeliveryCursorStore;
   /** #80: Streaming draft persistence store */
@@ -115,8 +134,6 @@ export interface RouteStrategyDeps {
   taskStore?: import('../../stores/ports/TaskStore.js').ITaskStore;
   /** F222: Frustration auto-issue store (optional, fail-open) */
   frustrationIssueStore?: import('../../stores/ports/FrustrationIssueStore.js').IFrustrationIssueStore;
-  /** F222: Pending request store — used for cancel burst detection (listRecentDenied) */
-  pendingRequestStore?: import('../../stores/ports/PendingRequestStore.js').IPendingRequestStore;
   /** F093: World context provider for world-building mode (optional, fail-open) */
   worldContextProvider?: import('../../../../world/WorldContextProvider.js').WorldContextProvider;
   /** F093: World store for thread→world lookup (optional, fail-open) */
@@ -224,10 +241,16 @@ export function mergePersistedPromptMessages(
 
 /** Common options for both strategies */
 export interface RouteOptions {
+  /** Route-owned intent plus whether the user explicitly selected it. */
+  routeIntent?: AgentRouteIntent;
+  /** F293: deterministic scope used to resolve sparse routing cognition. */
+  routingContextIntent?: 'review' | 'architecture';
   /** Authentication-grade owner provenance propagated unchanged to every child invocation. */
   ownerAuthProvenance?: OwnerAuthProvenance;
   /** F281 Phase C: explicit first-party ingress provenance; omitted legacy callers fail closed. */
   humanDispositionInvocationOrigin?: HumanDispositionInvocationOrigin;
+  /** F293: server-owned durable queue source; queue replay alone does not prove a human request. */
+  routingQueueSource?: import('../invocation/InvocationQueue.js').QueueEntry['source'];
   /** F167 Phase T: exact protocol wake carrier for this route, never inferred from response prose. */
   turnCustodyWake?: import('../../../../ball-custody/TurnCustodyProjectionService.js').TurnCustodyWakeProvenance;
   /** Per-cat carrier resolver for multi-holder routes. Takes precedence over turnCustodyWake. */
@@ -261,6 +284,10 @@ export interface RouteOptions {
   a2aTriggerMessageId?: string | undefined;
   /** Server-owned caller identity paired with a2aTriggerMessageId. Never infer from display text. */
   a2aCallerCatId?: string | undefined;
+  /** Exact per-target cloud source carrier; route layers forward it unchanged. */
+  cloudDispatchProvenance?: CloudDispatchProvenance | undefined;
+  /** Cloud targets must reject reconstructed Queue/direct provenance when the carrier is absent. */
+  requiresExactCloudDispatchProvenance?: boolean | undefined;
   /** Max A2A chain depth for routeSerial (default: MAX_A2A_DEPTH env or 2) */
   maxA2ADepth?: number | undefined;
   /** Queue fairness hook: when true for current thread, routeSerial must stop extending A2A chain.
@@ -350,6 +377,7 @@ export interface RouteOptions {
   freshnessSupplementRequiredMessageIds?: readonly string[] | undefined;
   /** ADR-042 provider/callback hard boundary for an automatic supplement. */
   toolExecutionPolicy?: ToolExecutionPolicy | undefined;
+  executionScope?: 'collective-participation' | 'collective-work' | undefined;
   /** Parent invocation controller used to keep A2A worklist slots tied to the same cancel signal. */
   invocationController?: AbortController | undefined;
   /**
@@ -417,7 +445,7 @@ export function subjectSeenCueSeeds(input: {
   const sourceMessageId = input.sourceMessageId;
   if (!sourceMessageId) return [];
   return input.result.nudges.flatMap((nudge) =>
-    nudge.entityId?.startsWith('person:')
+    nudge.entityId?.startsWith('person:') && nudge.sourceRevision
       ? [
           {
             kind: 'subject_seen' as const,
@@ -427,6 +455,7 @@ export function subjectSeenCueSeeds(input: {
               entityId: nudge.entityId,
               matchedAlias: nudge.matchedAlias,
               sourceMessageId,
+              sourceRevision: nudge.sourceRevision,
             },
           },
         ]
@@ -472,6 +501,78 @@ export function judgmentSurfaceCueSeeds(input: {
   ];
 }
 
+export function explicitApprovedTasteCueSeeds(input: {
+  message: string;
+  sourceMessageId: string | undefined;
+  ownerOriginEligible: boolean;
+  occurredAt: number;
+}): Array<Extract<MemoryCueOpportunitySeed, { kind: 'approved_taste_invoked' }>> {
+  if (!input.ownerOriginEligible || !input.sourceMessageId) return [];
+  const trigger = matchExplicitApprovedTasteTrigger(stripStructuralEnvelope(input.message));
+  if (!trigger) return [];
+  return [
+    {
+      kind: 'approved_taste_invoked',
+      producer: 'owner_message',
+      occurredAt: input.occurredAt,
+      payload: {
+        triggerKey: trigger.triggerKey,
+        sourceMessageId: input.sourceMessageId,
+      },
+    },
+  ];
+}
+
+function oneExactRef(message: string, pattern: RegExp): string | null {
+  const refs = [...new Set([...message.matchAll(pattern)].map((match) => match[0].toUpperCase()))];
+  return refs.length === 1 ? refs[0] : null;
+}
+
+/**
+ * F312 Phase D: lane-owned, bounded task predicates for operational knowledge.
+ * The producer carries only one exact canonical coordinate; source resolution and
+ * authority checks remain in the Decision and Project Knowledge lanes.
+ */
+export function operationalKnowledgeCueSeeds(input: {
+  message: string;
+  sourceMessageId: string | undefined;
+  ownerOriginEligible: boolean;
+  sopStageHint?: { stage: string; suggestedSkill: string; suggestedSkillSource: string; featureId: string };
+  occurredAt: number;
+}): MemoryCueOpportunitySeed[] {
+  if (!input.sourceMessageId) return [];
+  const currentMessage = stripStructuralEnvelope(input.message);
+  const seeds: MemoryCueOpportunitySeed[] = [];
+  if (input.ownerOriginEligible) {
+    const decisionAnchor = oneExactRef(currentMessage, /\bADR-\d{3}\b/giu);
+    if (decisionAnchor) {
+      seeds.push({
+        kind: 'accepted_decision_required',
+        producer: 'owner_message',
+        occurredAt: input.occurredAt,
+        payload: { decisionAnchor, sourceMessageId: input.sourceMessageId },
+      });
+    }
+  }
+
+  const workflowFeature = input.sopStageHint?.featureId;
+  const explicitFeature = input.ownerOriginEligible ? oneExactRef(currentMessage, /\bF\d{3,}\b/giu) : null;
+  const featureId = workflowFeature && /^F\d{3,}$/.test(workflowFeature) ? workflowFeature : explicitFeature;
+  if (featureId) {
+    seeds.push({
+      kind: 'project_source_required',
+      producer: 'task_context',
+      occurredAt: input.occurredAt,
+      payload: {
+        featureId,
+        selectionSource: workflowFeature === featureId ? 'workflow_feature' : 'explicit_owner_reference',
+        sourceMessageId: input.sourceMessageId,
+      },
+    });
+  }
+  return seeds;
+}
+
 /**
  * Bind every routeExecution ingress to the same atomic A2A slot-admission contract.
  * The returned controller is the parent batch gate; trackExternalSlot creates an
@@ -487,7 +588,7 @@ export function createA2ASlotTrackingBridge(
   invocationTracker:
     | {
         trackExternalSlot?: InvocationTracker['trackExternalSlot'];
-        completeSlot?: InvocationTracker['completeSlot'];
+        completeAll?: InvocationTracker['completeAll'];
       }
     | undefined,
   invocationController: AbortController,
@@ -496,16 +597,16 @@ export function createA2ASlotTrackingBridge(
   return {
     invocationController,
     trackA2ASlot: (threadId, catId, userId, controller) => {
-      if (!invocationTracker?.trackExternalSlot || !invocationTracker.completeSlot) {
+      if (!invocationTracker?.trackExternalSlot || !invocationTracker.completeAll) {
         throw new Error('A2A slot admission unavailable: InvocationTracker bridge missing');
       }
       return invocationTracker.trackExternalSlot(threadId, catId, controller, userId, [catId], executionId);
     },
     completeA2ASlots: (threadId, catIds, controller) => {
-      if (!invocationTracker?.completeSlot) {
+      if (!invocationTracker?.completeAll) {
         throw new Error('A2A slot cleanup unavailable: InvocationTracker bridge missing');
       }
-      for (const catId of catIds) invocationTracker.completeSlot(threadId, catId, controller);
+      invocationTracker.completeAll(threadId, [...catIds], controller);
     },
   };
 }
@@ -529,6 +630,8 @@ function canonicalDeferredBoundary(
 
 export interface IncrementalContextResult {
   contextText: string;
+  /** F296 B3b-4: one typed projection shared by prompt, bootstrap, briefing, and receipt surfaces. */
+  surfaceProjection?: ContextSurfaceProjection;
   boundaryId?: CanonicalVisibilityCursor;
   /** Message ids with a retained per-message safe projection in the final prompt. */
   projectedMessageIds: string[];
@@ -556,6 +659,88 @@ export interface IncrementalContextResult {
   navigationHeader?: string;
   /** F263: only cold-context evidence lines that survived final token trimming. */
   pushRecallPresentations?: import('../../../../memory/f200-types.js').PushRecallPresentation[];
+  /** F153/F296: bounded refs-only explanation of the final message window. */
+  projectionAudit?: IncrementalProjectionAudit;
+}
+
+export type IncrementalProjectionReason =
+  | 'projected'
+  | 'system_display_only'
+  | 'briefing'
+  | 'same_route_output_isolation'
+  | 'same_user_wave_sibling_deferred'
+  | 'visibility'
+  | 'self_output'
+  | 'smart_window_omitted'
+  | 'token_budget';
+
+export interface IncrementalProjectionAudit {
+  candidateCount: number;
+  sampledCount: number;
+  truncatedCount: number;
+  messageRefs: Array<{ messageRef: string; reason: IncrementalProjectionReason }>;
+}
+
+/**
+ * A continuity verdict may force a cold packet even for a small unread delta.
+ * The persisted briefing is a volume-shaping surface, not a per-cold-turn
+ * receipt, so epoch-aware callers keep the original large-delta admission.
+ * Legacy smart-window callers have no typed mode/size and remain admitted.
+ */
+export function shouldPersistContextBriefing(
+  result: IncrementalContextResult,
+): result is IncrementalContextResult & { coverageMap: CoverageMap } {
+  if (!result.coverageMap) return false;
+  return (
+    result.surfaceProjection === undefined ||
+    (result.surfaceProjection.contextMode === 'cold' && result.surfaceProjection.deltaSize === 'large')
+  );
+}
+
+/**
+ * Provider replacement can rebuild a projection after an earlier generation
+ * has already emitted its pre-provider notices. Reset replaces notifications
+ * that are still pending; emitted keys are never yielded twice.
+ */
+export function createIdempotentPendingProjectionQueue<T>(): {
+  readonly length: number;
+  reset(): void;
+  enqueue(key: string, value: T): void;
+  shift(): T | undefined;
+} {
+  const pending: Array<{ key: string; value: T }> = [];
+  const emittedKeys = new Set<string>();
+  return {
+    get length() {
+      return pending.length;
+    },
+    reset() {
+      pending.length = 0;
+    },
+    enqueue(key, value) {
+      if (!emittedKeys.has(key)) pending.push({ key, value });
+    },
+    shift() {
+      const entry = pending.shift();
+      if (!entry) return undefined;
+      emittedKeys.add(entry.key);
+      return entry.value;
+    },
+  };
+}
+
+/**
+ * Internal retry/replacement events never escape invokeSingleCat. The first
+ * substantive output (or the final done) is therefore the earliest route seam
+ * that can safely persist a final-generation briefing.
+ */
+export function isFinalGenerationBriefingBoundary(message: Pick<AgentMessage, 'type' | 'content'>): boolean {
+  return (
+    message.type === 'done' ||
+    message.type === 'tool_use' ||
+    message.type === 'tool_result' ||
+    (message.type === 'text' && Boolean(message.content))
+  );
 }
 
 /**
@@ -696,10 +881,22 @@ export function upsertMaxBoundary(cursorBoundaries: Map<string, string>, catId: 
 }
 
 /** Get the agent service for a given cat ID */
-export function getService(services: Record<string, AgentService>, catId: CatId): AgentService {
-  const service = services[catId];
-  if (!service) throw new Error(`Unknown cat ID: ${catId as string}`);
-  return service;
+export function getService(
+  services: Record<string, AgentService>,
+  catId: CatId,
+  unavailableServices?: ReadonlyMap<string, AgentRegistrationFailure>,
+): AgentService {
+  const service = Object.hasOwn(services, catId) ? services[catId] : undefined;
+  if (service) return service;
+  const reason = unavailableServices?.get(catId);
+  if (reason) throw new AgentServiceUnavailableError(catId, reason);
+  if (catRegistry.has(catId)) {
+    throw new AgentServiceUnavailableError(catId, {
+      code: 'not-registered',
+      message: 'This member is configured but its service is not registered; check runtime registration diagnostics.',
+    });
+  }
+  throw new Error(`Unknown cat ID: ${catId as string}`);
 }
 
 export function getThreadBootcampMemberCount(thread: Thread | null | undefined): number | undefined {
@@ -816,6 +1013,9 @@ export function toStoredToolEvent(msg: AgentMessage): StoredToolEvent | null {
 
 const USER_FACING_SYSTEM_INFO_TYPES = new Set([
   'a2a_followup_available',
+  // F086/F216: "your N line-start @ were scheduled SERIALLY" — the whole point is that the cat
+  // and the reader both see it, so it must survive refresh like any other user-facing notice.
+  'a2a_multi_target_serialized',
   'cloud_bridge_status',
   'governance_blocked',
   'invocation_preempted',
@@ -823,6 +1023,7 @@ const USER_FACING_SYSTEM_INFO_TYPES = new Set([
   // so marking it user-facing prevents route-serial from appending a misleading silent_completion.
   'malformed_toolcall_relay_46',
   'mode_switch_proposal',
+  'session_rollover_lifecycle',
   'session_seal_requested',
   'silent_completion',
   'warning',
@@ -1168,30 +1369,139 @@ export interface IncrementalContextOptions {
   cursorOverlay?: string;
   /** Outputs persisted earlier in this same serial route; keep first-pass reasoning independent. */
   sameRouteOutputMessageIds?: ReadonlySet<string>;
+  /**
+   * User trigger that owns the active parallel wave. A sibling reply rooted in
+   * this trigger may be ignored for same-wave freshness, but that is not read
+   * evidence: defer it and keep the delivery boundary before it so a later
+   * directed turn can receive the body.
+   */
+  sameUserWaveTriggerMessageId?: string;
   /** A directly addressed same-route A2A trigger remains visible despite that isolation. */
   exactA2ATriggerMessageId?: string;
+  /**
+   * F296 B3b-1: provider/epoch-owned continuity decision. Production routes
+   * pass this only from InvocationParams.contextPromptFactory, after preflight.
+   */
+  contextProjection?: ContextModeProjection;
+}
+
+/** One mapper for every route surface consuming an epoch-owner decision. */
+export function contextProjectionFromEpochDecision(
+  decision: Parameters<typeof projectContextMode>[0]['decision'],
+  coordinate: Parameters<typeof projectContextMode>[0]['coordinate'],
+): ContextModeProjection {
+  return projectContextMode({ decision, coordinate });
+}
+
+function formatContextProjection(
+  projection: NonNullable<IncrementalContextOptions['contextProjection']>,
+  deltaSize: 'small' | 'large',
+): string {
+  return [
+    '[Context Continuity]',
+    JSON.stringify({
+      contextEpoch: projection.contextEpoch,
+      contextMode: projection.contextMode,
+      transition: projection.transition,
+      reason: projection.reason,
+      deltaSize,
+    }),
+    '[/Context Continuity]',
+  ].join('\n');
+}
+
+function projectSurfaceShape(
+  projection: ContextModeProjection | undefined,
+  deltaSize: 'small' | 'large',
+  presentations: Parameters<typeof countPresentedTiers>[0] = [],
+): Pick<IncrementalContextResult, 'surfaceProjection'> {
+  return projection
+    ? { surfaceProjection: withSurfaceShape(projection, deltaSize, countPresentedTiers(presentations)) }
+    : {};
+}
+
+function projectVisibleMessages(messages: readonly StoredMessage[]) {
+  return messages.map((message) =>
+    mapToPresentation({
+      subjectKey: `message:${message.id}`,
+      asOf: { kind: 'as_of' as const, value: message.timestamp },
+      sourceTier: 'T0' as const,
+      requested: 'state' as const,
+    }),
+  );
 }
 
 type SameRouteBoundaryCap = { active: false } | { active: true; boundary: CanonicalVisibilityCursor | undefined };
+
+interface SameRouteIsolationContext {
+  readonly laterUserTurnBoundary?: CanonicalVisibilityCursor;
+  readonly directedReplyMessageIds: ReadonlySet<string>;
+  readonly sameUserWaveTriggerMessageIds: ReadonlySet<string>;
+}
 
 function isSameRouteOutputWithheld(
   message: StoredMessage,
   playMode: boolean,
   options: IncrementalContextOptions | undefined,
+  isolation: SameRouteIsolationContext,
 ): boolean {
-  return Boolean(
-    playMode && options?.sameRouteOutputMessageIds?.has(message.id) && message.id !== options.exactA2ATriggerMessageId,
-  );
+  if (!playMode || !options?.sameRouteOutputMessageIds?.has(message.id)) return false;
+  if (message.id === options.exactA2ATriggerMessageId || isolation.directedReplyMessageIds.has(message.id))
+    return false;
+  if (isolation.laterUserTurnBoundary) {
+    try {
+      if (compareCursors(cursorFor(message), isolation.laterUserTurnBoundary) < 0) return false;
+    } catch {
+      // Unresolved ordering cannot widen visibility; keep the route-local output isolated.
+    }
+  }
+  return true;
+}
+
+function isSameUserWaveSiblingDeferred(
+  message: StoredMessage,
+  catId: CatId,
+  playMode: boolean,
+  options: IncrementalContextOptions | undefined,
+  isolation: SameRouteIsolationContext,
+): boolean {
+  if (!playMode || !options?.sameUserWaveTriggerMessageId || message.catId === null || message.catId === catId) {
+    return false;
+  }
+  return isSameUserWaveSiblingReply(message, {
+    catId,
+    coveredTriggerMessageIds: isolation.sameUserWaveTriggerMessageIds,
+  });
+}
+
+function incrementalDeferralReason(
+  message: StoredMessage,
+  catId: CatId,
+  playMode: boolean,
+  options: IncrementalContextOptions | undefined,
+  isolation: SameRouteIsolationContext,
+): Extract<IncrementalProjectionReason, 'same_route_output_isolation' | 'same_user_wave_sibling_deferred'> | undefined {
+  if (isSameRouteOutputWithheld(message, playMode, options, isolation)) return 'same_route_output_isolation';
+  if (isSameUserWaveSiblingDeferred(message, catId, playMode, options, isolation)) {
+    return 'same_user_wave_sibling_deferred';
+  }
+  return undefined;
 }
 
 function resolveSameRouteBoundaryCap(
   unseen: StoredMessage[],
   cursor: string | undefined,
+  catId: CatId,
   playMode: boolean,
   options: IncrementalContextOptions | undefined,
+  isolation: SameRouteIsolationContext,
 ): SameRouteBoundaryCap {
-  if (!playMode || !options?.sameRouteOutputMessageIds?.size) return { active: false };
-  const firstWithheldIndex = unseen.findIndex((message) => isSameRouteOutputWithheld(message, playMode, options));
+  if (!playMode || (!options?.sameRouteOutputMessageIds?.size && !options?.sameUserWaveTriggerMessageId)) {
+    return { active: false };
+  }
+  const firstWithheldIndex = unseen.findIndex(
+    (message) => incrementalDeferralReason(message, catId, playMode, options, isolation) !== undefined,
+  );
   if (firstWithheldIndex < 0) return { active: false };
 
   const precedingCursor =
@@ -1200,6 +1510,89 @@ function resolveSameRouteBoundaryCap(
     active: true,
     boundary: canonicalDeferredBoundary(precedingCursor, 'same-route-withheld-predecessor'),
   };
+}
+
+function resolveLaterUserTurnBoundary(
+  unseen: readonly StoredMessage[],
+  currentUserMessageId: string | undefined,
+  viewer: { type: 'cat'; catId: CatId } | { type: 'user' },
+): CanonicalVisibilityCursor | undefined {
+  if (!currentUserMessageId) return undefined;
+  const current = unseen.find((message) => message.id === currentUserMessageId);
+  if (
+    !current ||
+    current.catId !== null ||
+    current.userId === 'system' ||
+    current.origin === 'briefing' ||
+    current.deletedAt ||
+    current._tombstone ||
+    !isTimelinePublished(current) ||
+    !canViewMessage(current, viewer)
+  ) {
+    return undefined;
+  }
+  return canonicalDeferredBoundary(cursorFor(current), 'same-route-later-user-turn');
+}
+
+async function resolveDirectedSameRouteReplies(input: {
+  readonly deps: RouteStrategyDeps;
+  readonly unseen: readonly StoredMessage[];
+  readonly threadId: string;
+  readonly catId: CatId;
+  readonly playMode: boolean;
+  readonly sameRouteOutputMessageIds: ReadonlySet<string> | undefined;
+}): Promise<ReadonlySet<string>> {
+  if (!input.playMode || !input.sameRouteOutputMessageIds?.size) return new Set();
+  const visibleById = new Map(input.unseen.map((message) => [message.id, message]));
+  const directed = new Set<string>();
+  for (const message of input.unseen) {
+    if (!input.sameRouteOutputMessageIds.has(message.id)) continue;
+    const triggerMessageId = exactCausalReplyTrigger(message);
+    if (!triggerMessageId) continue;
+    const trigger = await readDirectedReplyTrigger(input, visibleById, message.id, triggerMessageId);
+    if (isVisibleTargetTrigger(trigger, input.threadId, input.catId)) directed.add(message.id);
+  }
+  return directed;
+}
+
+function exactCausalReplyTrigger(message: StoredMessage): string | undefined {
+  if (message.catId === null) return undefined;
+  const triggerMessageId = message.extra?.causal?.triggerMessageId;
+  return triggerMessageId && message.replyTo === triggerMessageId ? triggerMessageId : undefined;
+}
+
+async function readDirectedReplyTrigger(
+  input: {
+    readonly deps: RouteStrategyDeps;
+    readonly threadId: string;
+    readonly catId: CatId;
+  },
+  visibleById: ReadonlyMap<string, StoredMessage>,
+  messageRef: string,
+  triggerMessageId: string,
+): Promise<StoredMessage | null> {
+  const visible = visibleById.get(triggerMessageId);
+  if (visible) return visible;
+  try {
+    return await input.deps.messageStore.getById(triggerMessageId);
+  } catch (err) {
+    log.warn(
+      { err, threadId: input.threadId, catId: input.catId as string, messageRef, triggerMessageId },
+      '[F296] directed same-route reply source lookup failed; preserving isolation',
+    );
+    return null;
+  }
+}
+
+function isVisibleTargetTrigger(trigger: StoredMessage | null, threadId: string, catId: CatId): boolean {
+  return Boolean(
+    trigger &&
+      trigger.threadId === threadId &&
+      trigger.catId === catId &&
+      !trigger.deletedAt &&
+      !trigger._tombstone &&
+      isTimelinePublished(trigger),
+  );
 }
 
 function clampToSameRouteBoundaryCap(
@@ -1241,6 +1634,40 @@ async function resolveRecentFilesTouched(
   }
 }
 
+interface ProjectionAuditCandidate {
+  readonly messageRef: string;
+  readonly filteredReason?: Exclude<IncrementalProjectionReason, 'projected' | 'smart_window_omitted' | 'token_budget'>;
+}
+
+interface ProjectionAuditCapture {
+  candidates: ProjectionAuditCandidate[];
+}
+
+const PROJECTION_AUDIT_SAMPLE_LIMIT = 16;
+
+function buildIncrementalProjectionAudit(
+  candidates: readonly ProjectionAuditCandidate[],
+  result: IncrementalContextResult,
+): IncrementalProjectionAudit {
+  const projected = new Set(result.projectedMessageIds);
+  const omittedReason: IncrementalProjectionReason =
+    result.degradation?.includes('token') || result.degradation?.includes('预算')
+      ? 'token_budget'
+      : 'smart_window_omitted';
+  const sampled: IncrementalProjectionAudit['messageRefs'] = candidates
+    .slice(-PROJECTION_AUDIT_SAMPLE_LIMIT)
+    .map((candidate) => ({
+      messageRef: candidate.messageRef,
+      reason: projected.has(candidate.messageRef) ? 'projected' : (candidate.filteredReason ?? omittedReason),
+    }));
+  return {
+    candidateCount: candidates.length,
+    sampledCount: sampled.length,
+    truncatedCount: Math.max(0, candidates.length - sampled.length),
+    messageRefs: sampled,
+  };
+}
+
 /* @segment N2 — 对话历史增量 */
 export async function assembleIncrementalContext(
   deps: RouteStrategyDeps,
@@ -1250,6 +1677,44 @@ export async function assembleIncrementalContext(
   currentUserMessageId?: string,
   thinkingMode?: 'debug' | 'play',
   options?: IncrementalContextOptions,
+): Promise<IncrementalContextResult> {
+  const auditCapture: ProjectionAuditCapture = { candidates: [] };
+  const result = await assembleIncrementalContextInternal(
+    deps,
+    userId,
+    threadId,
+    catId,
+    currentUserMessageId,
+    thinkingMode,
+    options,
+    auditCapture,
+  );
+  const projectionAudit = buildIncrementalProjectionAudit(auditCapture.candidates, result);
+  log.info(
+    {
+      f148: 'projection-audit',
+      threadId,
+      catId,
+      candidateCount: projectionAudit.candidateCount,
+      sampledCount: projectionAudit.sampledCount,
+      truncatedCount: projectionAudit.truncatedCount,
+      messageRefs: projectionAudit.messageRefs,
+      boundaryRef: result.boundaryId ?? null,
+    },
+    '[F153] bounded content-free incremental projection audit',
+  );
+  return { ...result, projectionAudit };
+}
+
+async function assembleIncrementalContextInternal(
+  deps: RouteStrategyDeps,
+  userId: string,
+  threadId: string,
+  catId: CatId,
+  currentUserMessageId: string | undefined,
+  thinkingMode: 'debug' | 'play' | undefined,
+  options: IncrementalContextOptions | undefined,
+  auditCapture: ProjectionAuditCapture,
 ): Promise<IncrementalContextResult> {
   if (!deps.deliveryCursorStore) {
     return {
@@ -1287,29 +1752,87 @@ export async function assembleIncrementalContext(
       }
     }
   }
-  const unseen = await fetchAfterCursor(deps.messageStore, threadId, cursor, userId);
+  const loadedUnseen = await fetchAfterCursor(deps.messageStore, threadId, cursor, userId);
+  const deliveryRecovery = recoverableDeliveryBoundary(loadedUnseen, { userId, threadId, catId });
+  let unseen = loadedUnseen;
+  if (deliveryRecovery.cursor && (!cursor || compareCursors(deliveryRecovery.cursor, cursor) > 0)) {
+    try {
+      await deps.deliveryCursorStore.ackCursor(userId, catId, threadId, deliveryRecovery.cursor);
+      // ackCursor owns concurrent monotonicity; this proven prefix is safe even
+      // when another reader has already advanced the durable slot further.
+      cursor = deliveryRecovery.cursor;
+      const recoveredCursor = cursor;
+      unseen = loadedUnseen.filter(
+        (message) => message.visibilitySeq === undefined || compareCursors(cursorFor(message), recoveredCursor) > 0,
+      );
+    } catch (err) {
+      log.warn({ err, catId, threadId }, 'Delivery boundary recovery failed; retaining unread context');
+    }
+  }
 
   // Debug mode: cats see all whispers (full transparency). Play mode: cats only see their own whispers.
   const playMode = thinkingMode !== 'debug';
   const viewer = playMode ? { type: 'cat' as const, catId } : { type: 'user' as const };
-  const sameRouteBoundaryCap = resolveSameRouteBoundaryCap(unseen, cursor, playMode, options);
+  const sameRouteIsolation: SameRouteIsolationContext = {
+    laterUserTurnBoundary: resolveLaterUserTurnBoundary(unseen, currentUserMessageId, viewer),
+    sameUserWaveTriggerMessageIds: options?.sameUserWaveTriggerMessageId
+      ? new Set([options.sameUserWaveTriggerMessageId])
+      : new Set(),
+    directedReplyMessageIds: await resolveDirectedSameRouteReplies({
+      deps,
+      unseen,
+      threadId,
+      catId,
+      playMode,
+      sameRouteOutputMessageIds: options?.sameRouteOutputMessageIds,
+    }),
+  };
+  const sameRouteBoundaryCap = resolveSameRouteBoundaryCap(
+    unseen,
+    cursor,
+    catId,
+    playMode,
+    options,
+    sameRouteIsolation,
+  );
+  const filteredReasons = new Map<string, ProjectionAuditCandidate['filteredReason']>();
   const relevant = unseen.filter((m) => {
     // System-generated messages (persisted error badges) are display-only — never enter prompt
-    if (m.userId === 'system') return false;
+    if (m.userId === 'system') {
+      filteredReasons.set(m.id, 'system_display_only');
+      return false;
+    }
     // F148 Phase E: briefing messages are non-routing — never enter incremental context (AC-E2)
-    if (m.origin === 'briefing') return false;
-    if (isSameRouteOutputWithheld(m, playMode, options)) return false;
+    if (m.origin === 'briefing') {
+      filteredReasons.set(m.id, 'briefing');
+      return false;
+    }
+    const deferralReason = incrementalDeferralReason(m, catId, playMode, options, sameRouteIsolation);
+    if (deferralReason) {
+      filteredReasons.set(m.id, deferralReason);
+      return false;
+    }
     // F35: Exclude whispers not intended for this cat (play mode only)
-    if (!canViewMessage(m, viewer)) return false;
+    if (!canViewMessage(m, viewer)) {
+      filteredReasons.set(m.id, 'visibility');
+      return false;
+    }
     // Exclude own messages (only include user messages and other cats' messages).
     // F052: only distinct source/target provenance earns the same-cat cross-post exemption.
     const isActualCrossPost = isCrossThreadProvenance(m.extra?.crossPost?.sourceThreadId, m.threadId);
-    if (!isActualCrossPost && m.catId !== null && m.catId === catId) return false;
+    if (!isActualCrossPost && m.catId !== null && m.catId === catId) {
+      filteredReasons.set(m.id, 'self_output');
+      return false;
+    }
     // `origin` describes the transport that persisted a message, not whether its
     // visible body is private thinking. Persisted unread speech therefore follows
     // the same visibility contract for user and cat authors.
     return true;
   });
+  auditCapture.candidates = unseen.map((message) => ({
+    messageRef: message.id,
+    ...(filteredReasons.get(message.id) ? { filteredReason: filteredReasons.get(message.id) } : {}),
+  }));
 
   // An explicit zero means fixed prompt parts exhausted the invocation budget.
   // An absent override identifies an unbound direct consumer and uses the
@@ -1327,10 +1850,26 @@ export async function assembleIncrementalContext(
 
   // F148 Phase F (KD-7): Navigation context — injected on ALL paths (cold + warm)
   // P1 fix: extract baton from unseen (pre-stream-filter) so cat→cat @ mentions via stream are visible
-  const batonCandidates = unseen.filter(
-    (m) => (m.userId !== 'system' || m.catId !== null) && m.origin !== 'briefing' && canViewMessage(m, viewer),
+  const unseenIds = new Set(unseen.map((message) => message.id));
+  const batonCandidates = loadedUnseen.filter(
+    (m) =>
+      (m.id === currentUserMessageId || (unseenIds.has(m.id) && !deliveryRecovery.answeredSourceIds.has(m.id))) &&
+      (m.userId !== 'system' || m.catId !== null) &&
+      m.origin !== 'briefing' &&
+      canViewMessage(m, viewer),
   );
-  const baton = extractBatonContext(batonCandidates, catId);
+  let baton = extractBatonContext(batonCandidates, catId);
+  if (
+    baton &&
+    (await legacyBatonHasSucceededReply({
+      messages: loadedUnseen,
+      sourceMessageId: baton.fromMessageId,
+      explicitSourceMessageId: currentUserMessageId,
+      target: { userId, threadId, catId },
+      turnExecutionStore: deps.invocationDeps.turnExecutionStore,
+    }))
+  )
+    baton = null;
   let activeTasks: import('./navigation-context.js').TaskSummary[] = [];
   let allThreadTasks: import('./artifact-tracking.js').ArtifactExtractionInput['prTasks'] = [];
   if (deps.taskStore) {
@@ -1354,7 +1893,7 @@ export async function assembleIncrementalContext(
   // G1→G2 bridge: read stored ledger from threadMemory to merge with current-invocation artifacts
   let storedLedgerArtifacts: import('./artifact-tracking.js').RecentArtifact[] = [];
   const threadStore = deps.invocationDeps.threadStore;
-  if (threadStore) {
+  if (threadStore && !options?.contextProjection) {
     try {
       const mem = await Promise.resolve(threadStore.getThreadMemory(threadId));
       if (mem && Array.isArray(mem.recentArtifacts) && mem.recentArtifacts.length > 0) {
@@ -1382,7 +1921,9 @@ export async function assembleIncrementalContext(
     threadId,
     baton,
     tasks: activeTasks,
-    artifacts: recentArtifacts,
+    // Epoch-owned packets admit only a validated truth source. A recency-only
+    // artifact list is not canonical state and must wait for the B3b mapper.
+    artifacts: options?.contextProjection ? [] : recentArtifacts,
     truthSource: topSource ? { label: topSource.label, ref: topSource.ref, provenance: topSource.provenance } : null,
     bestNextSource,
   });
@@ -1400,7 +1941,8 @@ export async function assembleIncrementalContext(
     batonCandidateCount: batonCandidates.length,
   });
 
-  // F148: Smart window — cold mention detection
+  // F296: unread volume owns only delta shaping. It cannot prove whether the
+  // provider still holds working memory.
   // P1-review: short-circuit on count first — avoid O(n) tokenize when count already triggers
   const hcConfig = DEFAULT_HIERARCHICAL_CONTEXT;
   const countTrigger = relevant.length > hcConfig.coldMentionThreshold;
@@ -1408,7 +1950,9 @@ export async function assembleIncrementalContext(
   const tokenTrigger =
     !countTrigger &&
     relevant.reduce((sum, m) => sum + estimateTokens(m.content), 0) > hcConfig.coldMentionTokenThreshold;
-  const isColdMention = countTrigger || tokenTrigger;
+  const deltaSize: 'small' | 'large' = countTrigger || tokenTrigger ? 'large' : 'small';
+  const contextMode = options?.contextProjection?.contextMode;
+  const projectionOutput = projectSurfaceShape(options?.contextProjection, deltaSize);
 
   // F148 OQ-3 telemetry: warm/cold path decision
   log.info({
@@ -1416,13 +1960,14 @@ export async function assembleIncrementalContext(
     threadId,
     catId,
     messageCount: relevant.length,
-    isColdMention,
+    contextMode: contextMode ?? 'legacy',
+    deltaSize,
     trigger: countTrigger ? 'count' : tokenTrigger ? 'token' : 'none',
     thresholds: { count: hcConfig.coldMentionThreshold, token: hcConfig.coldMentionTokenThreshold },
   });
 
-  if (isColdMention) {
-    return assembleSmartWindowContext(
+  if (contextMode === 'cold' || deltaSize === 'large') {
+    const shaped = await assembleSmartWindowContext(
       deps,
       relevant,
       catId,
@@ -1441,7 +1986,10 @@ export async function assembleIncrementalContext(
       storedLedgerArtifacts,
       viewer,
       sameRouteBoundaryCap,
+      contextMode ?? 'cold',
+      deltaSize,
     );
+    return shaped;
   }
 
   // --- Warm path: existing behavior unchanged ---
@@ -1455,7 +2003,10 @@ export async function assembleIncrementalContext(
   if (capped.length === 0) {
     return cursor
       ? {
-          contextText: navigationHeader,
+          ...projectionOutput,
+          contextText: options?.contextProjection
+            ? `${formatContextProjection(options.contextProjection, deltaSize)}\n${navigationHeader}`
+            : navigationHeader,
           boundaryId: clampToSameRouteBoundaryCap(
             canonicalDeferredBoundary(cursor, 'warm-empty-cursor'),
             sameRouteBoundaryCap,
@@ -1467,7 +2018,10 @@ export async function assembleIncrementalContext(
           navigationHeader,
         }
       : {
-          contextText: navigationHeader,
+          ...projectionOutput,
+          contextText: options?.contextProjection
+            ? `${formatContextProjection(options.contextProjection, deltaSize)}\n${navigationHeader}`
+            : navigationHeader,
           projectedMessageIds: [],
           exposedMessageIds: [],
           includesCurrentUserMessage,
@@ -1534,7 +2088,10 @@ export async function assembleIncrementalContext(
       sameRouteBoundaryCap,
     );
     return {
-      contextText: navigationHeader,
+      ...projectionOutput,
+      contextText: options?.contextProjection
+        ? `${formatContextProjection(options.contextProjection, deltaSize)}\n${navigationHeader}`
+        : navigationHeader,
       boundaryId: zeroBoundaryId,
       projectedMessageIds: [],
       exposedMessageIds: [],
@@ -1578,7 +2135,10 @@ export async function assembleIncrementalContext(
   if (finalCapped.length === 0) {
     return cursor
       ? {
-          contextText: navigationHeader,
+          ...projectionOutput,
+          contextText: options?.contextProjection
+            ? `${formatContextProjection(options.contextProjection, deltaSize)}\n${navigationHeader}`
+            : navigationHeader,
           boundaryId: clampToSameRouteBoundaryCap(
             canonicalDeferredBoundary(cursor, 'warm-trimmed-empty-cursor'),
             sameRouteBoundaryCap,
@@ -1590,7 +2150,10 @@ export async function assembleIncrementalContext(
           navigationHeader,
         }
       : {
-          contextText: navigationHeader,
+          ...projectionOutput,
+          contextText: options?.contextProjection
+            ? `${formatContextProjection(options.contextProjection, deltaSize)}\n${navigationHeader}`
+            : navigationHeader,
           projectedMessageIds: [],
           exposedMessageIds: [],
           includesCurrentUserMessage: false,
@@ -1612,7 +2175,13 @@ export async function assembleIncrementalContext(
     sameRouteBoundaryCap,
   );
   return {
-    contextText: `${navigationHeader}\n[对话历史增量 - 未发送过 ${finalCapped.length} 条]\n${finalLines.join('\n')}\n[/对话历史]`,
+    ...projectionOutput,
+    ...projectSurfaceShape(options?.contextProjection, deltaSize, projectVisibleMessages(finalCapped)),
+    contextText: [
+      ...(options?.contextProjection ? [formatContextProjection(options.contextProjection, deltaSize)] : []),
+      navigationHeader,
+      `[对话历史增量 - 未发送过 ${finalCapped.length} 条]\n${finalLines.join('\n')}\n[/对话历史]`,
+    ].join('\n'),
     boundaryId,
     projectedMessageIds: finalCapped.map((message) => message.id),
     exposedMessageIds: exactBodyMessageIds(finalCapped, truncateLimit),
@@ -1646,8 +2215,13 @@ async function assembleSmartWindowContext(
   preReadStoredArtifacts: import('./artifact-tracking.js').RecentArtifact[],
   viewer: { type: 'cat'; catId: CatId } | { type: 'user' },
   sameRouteBoundaryCap: SameRouteBoundaryCap,
+  contextMode: 'cold' | 'hot',
+  deltaSize: 'small' | 'large',
 ): Promise<IncrementalContextResult> {
   const truncateLimit = PROMPT_MESSAGE_SAFETY_CHAR_LIMIT;
+  const hasEpochProjection = options?.contextProjection !== undefined;
+  const isCanonicalCold = hasEpochProjection && contextMode === 'cold';
+  const usesLegacyRecall = !hasEpochProjection;
 
   // 1. Burst detection
   const { burst, omitted } = detectRecentBurst(relevant, hcConfig);
@@ -1669,7 +2243,7 @@ async function assembleSmartWindowContext(
   // 2. Thread title for tombstone + evidence (fail-open like recallEvidence)
   const threadStore = deps.invocationDeps.threadStore;
   let threadTitle = '';
-  if (threadStore) {
+  if ((isCanonicalCold || usesLegacyRecall) && threadStore) {
     try {
       threadTitle = (await Promise.resolve(threadStore.get(threadId)))?.title ?? '';
     } catch {
@@ -1705,7 +2279,8 @@ async function assembleSmartWindowContext(
     .filter((w) => w.length >= 3);
   const anchors = selectAnchors(sanitizedOmitted, compositeQueryTerms, hcConfig.maxAnchors);
   const omittedById = new Map(omitted.map((message) => [message.id, message]));
-  const promptAnchors = anchors.map((anchor) => {
+  const eligibleAnchors = isCanonicalCold ? [] : anchors;
+  const promptAnchors = eligibleAnchors.map((anchor) => {
     const original = omittedById.get(anchor.message.id);
     if (!original) return anchor;
     return {
@@ -1727,7 +2302,7 @@ async function assembleSmartWindowContext(
     decisions?: string[];
     decisionRefs?: import('../../stores/ports/ThreadStore.js').ThreadMemorySourceRef[];
   } | null = null;
-  if (threadStore) {
+  if (usesLegacyRecall && threadStore) {
     try {
       const mem = await Promise.resolve(threadStore.getThreadMemory(threadId));
       if (mem) {
@@ -1768,13 +2343,15 @@ async function assembleSmartWindowContext(
   // 3.8 Evidence recall (fail-open) — must run before coverage map so hints are populated
   const currentMsg = currentUserMessageId ? burst.find((m) => m.id === currentUserMessageId) : undefined;
   const nonSystemRecent = burst.filter((m) => m.catId === null && m.userId !== 'system').slice(-2);
-  const recalledEvidence = await recallEvidenceWithProvenance(
-    deps.evidenceStore,
-    threadTitle,
-    currentMsg?.content ?? '',
-    nonSystemRecent,
-    hcConfig,
-  );
+  const recalledEvidence = usesLegacyRecall
+    ? await recallEvidenceWithProvenance(
+        deps.evidenceStore,
+        threadTitle,
+        currentMsg?.content ?? '',
+        nonSystemRecent,
+        hcConfig,
+      )
+    : { query: '', candidates: [] };
   // F296 AC-A1: recall is presented as a content-free pointer, never as
   // candidate titles/snippets. The candidates themselves stay in the F263 trace.
   const recallCandidates = recalledEvidence.candidates;
@@ -1797,8 +2374,8 @@ async function assembleSmartWindowContext(
       from: burst[0]?.timestamp ?? 0,
       to: burst[burst.length - 1]?.timestamp ?? 0,
     },
-    anchorIds: anchors.map((a) => a.message.id),
-    threadMemory: threadMemoryMeta,
+    anchorIds: eligibleAnchors.map((a) => a.message.id),
+    threadMemory: usesLegacyRecall ? threadMemoryMeta : null,
     recallPointer: { candidateCount: recallCandidates.length },
     searchSuggestions: tombstone?.retrievalHints ?? [],
     semanticSearchTerms: tombstone?.keywords.length ? [tombstone.keywords.slice(0, 2).join(' ')] : [],
@@ -1859,10 +2436,34 @@ async function assembleSmartWindowContext(
     canonicalDeferredBoundary(lastRelevantMsg ? cursorFor(lastRelevantMsg) : undefined, 'cold-visible-tail'),
     sameRouteBoundaryCap,
   );
+  const directiveSource = selectDirectiveSources(rankedSources)[0];
+  const navigationPresentations = [
+    ...(baton
+      ? [
+          mapToPresentation({
+            subjectKey: `baton:${baton.fromSpeakerDisplay}:${baton.timestamp}`,
+            asOf: { kind: 'as_of' as const, value: baton.timestamp },
+            sourceTier: 'T0' as const,
+            requested: 'directive' as const,
+          }),
+        ]
+      : []),
+    directiveSource
+      ? projectRankedSource(directiveSource)
+      : mapToPresentation({
+          subjectKey: `thread-drill:${threadId}`,
+          asOf: { kind: 'as_of' as const, value: Date.now() },
+          sourceTier: 'T2' as const,
+          requested: 'pointer' as const,
+        }),
+  ];
 
   if (effectiveTokenBudget <= 0) {
     return {
-      contextText: '',
+      ...projectSurfaceShape(options?.contextProjection, deltaSize, navigationPresentations),
+      contextText: options?.contextProjection
+        ? `${formatContextProjection(options.contextProjection, deltaSize)}\n${navigationHeader}`
+        : '',
       boundaryId,
       projectedMessageIds: [],
       exposedMessageIds: [],
@@ -1880,10 +2481,10 @@ async function assembleSmartWindowContext(
   let finalRecallCandidates = [...recallCandidates];
   const finalAnchorLines = [...anchorLines];
   const finalAnchors = [...promptAnchors];
-  const anchorScores = anchors.map((a) => a.score);
+  const anchorScores = eligibleAnchors.map((a) => a.score);
   let finalTombstoneText = tombstoneText;
-  let finalCoverageMapText = coverageMapText;
-  let finalThreadMemoryText = threadMemoryText;
+  let finalCoverageMapText = usesLegacyRecall ? coverageMapText : '';
+  let finalThreadMemoryText = usesLegacyRecall ? threadMemoryText : '';
   let tokenDegradation: string | undefined;
 
   const totalTokens = () =>
@@ -1941,6 +2542,7 @@ async function assembleSmartWindowContext(
     // Stage 4: Hard cap — if envelope + 1 burst still exceeds budget, return empty
     if (totalTokens() > effectiveTokenBudget) {
       return {
+        ...projectSurfaceShape(options?.contextProjection, deltaSize, navigationPresentations),
         contextText: '',
         boundaryId,
         projectedMessageIds: [],
@@ -1956,11 +2558,11 @@ async function assembleSmartWindowContext(
 
   // 8. Assemble context packet
   const sections: string[] = [];
-  if (finalCoverageMapText) sections.push(finalCoverageMapText);
-  if (finalThreadMemoryText) sections.push(finalThreadMemoryText);
+  if (usesLegacyRecall && finalCoverageMapText) sections.push(finalCoverageMapText);
+  if (usesLegacyRecall && finalThreadMemoryText) sections.push(finalThreadMemoryText);
   if (finalTombstoneText) sections.push(finalTombstoneText);
   if (finalAnchorLines.length > 0) sections.push(...finalAnchorLines);
-  if (finalRecallPointerText) sections.push(finalRecallPointerText);
+  if (usesLegacyRecall && finalRecallPointerText) sections.push(finalRecallPointerText);
   sections.push(...finalBurstLines);
 
   const includesCurrentUserMessage = Boolean(
@@ -1969,13 +2571,18 @@ async function assembleSmartWindowContext(
 
   const contextText =
     sections.length > 0
-      ? `${navigationHeader}\n[对话历史增量 - 智能窗口: ${omitted.length} 条已摘要, ${finalBurstMsgs.length} 条详细]\n${sections.join('\n')}\n[/对话历史]`
-      : '';
+      ? `${options?.contextProjection ? `${formatContextProjection(options.contextProjection, deltaSize)}\n` : ''}${navigationHeader}\n[对话历史增量 - 智能窗口: ${omitted.length} 条已摘要, ${finalBurstMsgs.length} 条详细]\n${sections.join('\n')}\n[/对话历史]`
+      : options?.contextProjection
+        ? `${formatContextProjection(options.contextProjection, deltaSize)}\n${navigationHeader}`
+        : '';
 
   // Final hard cap: envelope overhead may push total over budget
   if (contextText && estimateTokens(contextText) > effectiveTokenBudget) {
     return {
-      contextText: '',
+      ...projectSurfaceShape(options?.contextProjection, deltaSize, navigationPresentations),
+      contextText: options?.contextProjection
+        ? `${formatContextProjection(options.contextProjection, deltaSize)}\n${navigationHeader}`
+        : '',
       boundaryId,
       projectedMessageIds: [],
       exposedMessageIds: [],
@@ -1986,6 +2593,31 @@ async function assembleSmartWindowContext(
   }
 
   return {
+    ...projectSurfaceShape(options?.contextProjection, deltaSize, [
+      ...navigationPresentations,
+      ...(finalTombstoneText
+        ? [
+            mapToPresentation({
+              subjectKey: `omitted-range:${threadId}:${omitted[0]?.id ?? 'empty'}:${omitted.at(-1)?.id ?? 'empty'}`,
+              asOf: { kind: 'as_of' as const, value: omitted.at(-1)?.timestamp ?? 0 },
+              sourceTier: 'T0' as const,
+              requested: 'state' as const,
+            }),
+          ]
+        : []),
+      ...projectVisibleMessages(finalAnchors.map(({ message }) => message)),
+      ...projectVisibleMessages(finalBurstMsgs),
+      ...(usesLegacyRecall && finalRecallPointerText
+        ? [
+            mapToPresentation({
+              subjectKey: `evidence-drill:${threadId}`,
+              asOf: { kind: 'as_of' as const, value: Date.now() },
+              sourceTier: 'T2' as const,
+              requested: 'pointer' as const,
+            }),
+          ]
+        : []),
+    ]),
     contextText,
     boundaryId,
     projectedMessageIds: [
@@ -2000,20 +2632,21 @@ async function assembleSmartWindowContext(
     includesCurrentUserMessage,
     currentMessageFilteredOut,
     degradation: tokenDegradation,
-    coverageMap,
+    ...(isCanonicalCold || usesLegacyRecall ? { coverageMap } : {}),
     briefingContext: {
-      ...(threadMemorySummary ? { threadMemorySummary } : {}),
+      ...(usesLegacyRecall && threadMemorySummary ? { threadMemorySummary } : {}),
       ...(finalAnchorLines.length > 0 ? { anchorSummaries: finalAnchorLines } : {}),
       ...(baton ? { baton } : {}),
       ...(activeTasks.length > 0 ? { activeTasks } : {}),
       ...(() => {
+        if (hasEpochProjection) return {};
         const merged = mergeLedger(storedFileArtifacts, recentArtifacts);
         return merged.length > 0 ? { recentArtifacts: merged } : {};
       })(),
       ...(rankedSources.length > 0 ? { rankedSources } : {}),
     },
     navigationHeader,
-    ...(finalRecallCandidates.length > 0
+    ...(usesLegacyRecall && finalRecallCandidates.length > 0
       ? {
           pushRecallPresentations: [
             {

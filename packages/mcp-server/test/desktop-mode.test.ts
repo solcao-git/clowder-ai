@@ -26,6 +26,7 @@ const ALL_FAKE_NAMES = [
   'cat_cafe_cross_post_message',
   'cat_cafe_create_rich_block',
   'cat_cafe_get_thread_context',
+  'cat_cafe_get_workflow_sop',
   'cat_cafe_get_thread_cats',
   'cat_cafe_list_threads',
   'cat_cafe_list_tasks',
@@ -85,8 +86,8 @@ describe('applyReadonlyFilter — env modes', () => {
     }
   });
 
-  it('readonly=true + hasAgentKey=true → READONLY ∪ AGENT_KEY', () => {
-    const env: ToolsetEnv = { readonly: true, hasAgentKey: true };
+  it('readonly=true + hasAgentKey=true + agentKeyUnion=true → READONLY ∪ AGENT_KEY (explicit opt-in)', () => {
+    const env: ToolsetEnv = { readonly: true, hasAgentKey: true, agentKeyUnion: true };
     const out = applyReadonlyFilter(ALL_FAKE_TOOLS, env);
     const outNames = new Set(out.map((t) => t.name));
     for (const name of ALL_FAKE_NAMES) {
@@ -95,14 +96,26 @@ describe('applyReadonlyFilter — env modes', () => {
     }
   });
 
-  it('readonly=true + hasAgentKey=true exposes AGY-safe coordination and scheduler tools', () => {
-    const out = buildCollabTools({ readonly: true, hasAgentKey: true });
+  it('readonly=true + leaked agent-key env WITHOUT opt-in → strict READONLY only', () => {
+    const env: ToolsetEnv = { readonly: true, hasAgentKey: true };
+    const out = applyReadonlyFilter(ALL_FAKE_TOOLS, env);
+    const outNames = new Set(out.map((t) => t.name));
+    for (const name of ALL_FAKE_NAMES) {
+      const expected = READONLY_ALLOWED_TOOLS.has(name);
+      assert.equal(outNames.has(name), expected, `tool ${name}: expected ${expected}`);
+    }
+  });
+
+  it('readonly=true + hasAgentKey=true + agentKeyUnion=true exposes AGY-safe coordination and scheduler tools', () => {
+    const out = buildCollabTools({ readonly: true, hasAgentKey: true, agentKeyUnion: true });
     const outNames = new Set(out.map((t) => t.name));
 
     const expectedPresent = [
       'cat_cafe_post_message',
       'cat_cafe_cross_post_message',
       'cat_cafe_get_thread_context',
+      'cat_cafe_get_thread_cats',
+      'cat_cafe_get_workflow_sop',
       'cat_cafe_get_message',
       'cat_cafe_list_threads',
       'cat_cafe_list_schedule_templates',
@@ -116,7 +129,6 @@ describe('applyReadonlyFilter — env modes', () => {
     }
 
     const expectedAbsent = [
-      'cat_cafe_get_thread_cats',
       'cat_cafe_list_tasks',
       'cat_cafe_multi_mention',
       'cat_cafe_hold_ball',
@@ -157,7 +169,7 @@ describe('applyReadonlyFilter — env modes', () => {
     assert.equal(outNames.has('cat_cafe_workspace_navigate'), false, 'workspace_navigate must not leak via AGENT_KEY');
     assert.equal(outNames.has('cat_cafe_teleport'), false, 'teleport must not leak via AGENT_KEY');
     assert.equal(outNames.has('cat_cafe_create_rich_block'), false, 'create_rich_block must not leak via AGENT_KEY');
-    // 11 项白名单全在
+    // Core desktop allowlist entries are present.
     assert.equal(outNames.has('cat_cafe_post_message'), true);
     assert.equal(outNames.has('cat_cafe_search_evidence'), true);
     assert.equal(outNames.has('cat_cafe_read_profile'), true);
@@ -178,16 +190,17 @@ describe('applyReadonlyFilter — env modes', () => {
 });
 
 describe('DESKTOP_FABLE_PHASE0_ALLOWED_TOOLS — V3 + F231 profile continuity', () => {
-  it('contains exactly 11 tools', () => {
-    assert.equal(DESKTOP_FABLE_PHASE0_ALLOWED_TOOLS.size, 11, 'F231 profile continuity adds one read-only tool');
+  it('contains exactly 12 tools', () => {
+    assert.equal(DESKTOP_FABLE_PHASE0_ALLOWED_TOOLS.size, 12, 'F236 adds the workflow-SOP progressive drill');
   });
 
-  it('contains 5 collab message tools + 5 memory cold-start tools + 1 profile tool', () => {
+  it('contains 6 collab read/message tools + 5 memory cold-start tools + 1 profile tool', () => {
     const expected = [
       // collab
       'cat_cafe_post_message',
       'cat_cafe_cross_post_message',
       'cat_cafe_get_thread_context',
+      'cat_cafe_get_workflow_sop',
       'cat_cafe_list_threads',
       'cat_cafe_get_message',
       // memory
@@ -247,10 +260,36 @@ describe('parseToolsetEnv — env shape', () => {
     assert.equal(env.readonly, false);
   });
 
-  it('detects agent-key via any of the 3 env vars', () => {
+  it('hasAgentKey requires a USABLE credential, not env-var presence (#1494)', () => {
     assert.equal(parseToolsetEnv({ CAT_CAFE_AGENT_KEY_SECRET: 's' } as NodeJS.ProcessEnv).hasAgentKey, true);
-    assert.equal(parseToolsetEnv({ CAT_CAFE_AGENT_KEY_FILE: '/p' } as NodeJS.ProcessEnv).hasAgentKey, true);
-    assert.equal(parseToolsetEnv({ CAT_CAFE_AGENT_KEY_FILES: '{}' } as NodeJS.ProcessEnv).hasAgentKey, true);
+    assert.equal(
+      parseToolsetEnv({ CAT_CAFE_AGENT_KEY_FILE: '/p' } as NodeJS.ProcessEnv).hasAgentKey,
+      false,
+      'a path to a missing sidecar is not a credential',
+    );
+    assert.equal(
+      parseToolsetEnv({ CAT_CAFE_AGENT_KEY_FILES: '{}' } as NodeJS.ProcessEnv).hasAgentKey,
+      false,
+      "a '{}' variant map resolves zero keys",
+    );
+  });
+
+  it('agentKeyUnion only via explicit CAT_CAFE_READONLY_AGENT_KEY_UNION=true', () => {
+    assert.equal(parseToolsetEnv({} as NodeJS.ProcessEnv).agentKeyUnion, false);
+    assert.equal(
+      parseToolsetEnv({ CAT_CAFE_AGENT_KEY_FILE: '/p' } as NodeJS.ProcessEnv).agentKeyUnion,
+      false,
+      'agent-key vars alone must not opt into the union',
+    );
+    assert.equal(
+      parseToolsetEnv({ CAT_CAFE_READONLY_AGENT_KEY_UNION: 'true' } as NodeJS.ProcessEnv).agentKeyUnion,
+      true,
+    );
+    assert.equal(
+      parseToolsetEnv({ CAT_CAFE_READONLY_AGENT_KEY_UNION: '1' } as NodeJS.ProcessEnv).agentKeyUnion,
+      false,
+      'strict string match like CAT_CAFE_READONLY',
+    );
   });
 
   it('trims desktopMode + treats empty/whitespace as undefined', () => {
@@ -303,7 +342,7 @@ describe('buildLimbTools — F178 Phase D cloud-review P1 (limb defense-in-depth
 });
 
 describe('buildCollabTools / buildMemoryTools — real toolset assertions (codex §4)', () => {
-  it('Desktop mode collab: 5 message tools + authenticated profile reader registered', () => {
+  it('Desktop mode collab: 6 read/message tools + authenticated profile reader registered', () => {
     const env: ToolsetEnv = { desktopMode: 'fable-phase0' };
     const out = buildCollabTools(env);
     const outNames = new Set(out.map((t) => t.name));
@@ -311,6 +350,7 @@ describe('buildCollabTools / buildMemoryTools — real toolset assertions (codex
       'cat_cafe_post_message',
       'cat_cafe_cross_post_message',
       'cat_cafe_get_thread_context',
+      'cat_cafe_get_workflow_sop',
       'cat_cafe_list_threads',
       'cat_cafe_get_message',
     ];
@@ -349,8 +389,8 @@ describe('buildCollabTools / buildMemoryTools — real toolset assertions (codex
     assert.equal(outNames.has('cat_cafe_post_message'), false);
   });
 
-  it('legacy READONLY=true + AGENT_KEY: existing collab behavior unchanged (no regression)', () => {
-    const env: ToolsetEnv = { readonly: true, hasAgentKey: true };
+  it('legacy READONLY=true + AGENT_KEY + agentKeyUnion: existing collab behavior unchanged (no regression)', () => {
+    const env: ToolsetEnv = { readonly: true, hasAgentKey: true, agentKeyUnion: true };
     const out = buildCollabTools(env);
     const outNames = new Set(out.map((t) => t.name));
     // AGENT_KEY tools allowed
@@ -358,6 +398,15 @@ describe('buildCollabTools / buildMemoryTools — real toolset assertions (codex
     assert.equal(outNames.has('cat_cafe_publish_verdict'), true);
     // READONLY tools allowed
     assert.equal(outNames.has('cat_cafe_shell_exec'), true);
+  });
+
+  it('legacy READONLY=true + AGENT_KEY WITHOUT union opt-in → strict (writes blocked)', () => {
+    const env: ToolsetEnv = { readonly: true, hasAgentKey: true };
+    const out = buildCollabTools(env);
+    const outNames = new Set(out.map((t) => t.name));
+    assert.equal(outNames.has('cat_cafe_post_message'), false, 'agent-key write must not leak without opt-in');
+    assert.equal(outNames.has('cat_cafe_publish_verdict'), false, 'agent-key write must not leak without opt-in');
+    assert.equal(outNames.has('cat_cafe_shell_exec'), true, 'readonly tool still allowed');
   });
 
   it('default (no env) collab/memory build pass-through full source', () => {
@@ -381,22 +430,22 @@ describe('buildCollabTools / buildMemoryTools — real toolset assertions (codex
 // =====================================================================
 
 describe('F238 cloud-pro-phase0 mode — Phase B1a security boundary', () => {
-  it('DESKTOP_CLOUD_PRO_PHASE0_ALLOWED_TOOLS contains exactly 11 tools', () => {
+  it('DESKTOP_CLOUD_PRO_PHASE0_ALLOWED_TOOLS contains exactly 13 tools', () => {
     assert.equal(
       DESKTOP_CLOUD_PRO_PHASE0_ALLOWED_TOOLS.size,
-      11,
-      'cloud-pro-phase0 locked at 11 tools (fable-phase0 同套)',
+      13,
+      'cloud-pro-phase0 includes scoped thread-cat discovery',
     );
   });
 
-  it('contains the same 11 tools as fable-phase0 through independent profile projections', () => {
+  it('adds only scoped thread-cat discovery to the fable-phase0 surface', () => {
     assert.deepEqual(
       [...DESKTOP_CLOUD_PRO_PHASE0_ALLOWED_TOOLS].sort(),
-      [...DESKTOP_FABLE_PHASE0_ALLOWED_TOOLS].sort(),
+      [...DESKTOP_FABLE_PHASE0_ALLOWED_TOOLS, 'cat_cafe_get_thread_cats'].sort(),
     );
   });
 
-  it('applyReadonlyFilter(cloud-pro-phase0) → only 11 whitelist tools', () => {
+  it('applyReadonlyFilter(cloud-pro-phase0) → only 13 whitelist tools', () => {
     const env: ToolsetEnv = { desktopMode: 'cloud-pro-phase0' };
     const out = applyReadonlyFilter(ALL_FAKE_TOOLS, env);
     const outNames = new Set(out.map((t) => t.name));
@@ -452,7 +501,7 @@ describe('F238 cloud-pro-phase0 mode — Phase B1a security boundary', () => {
     assert.throws(() => applyReadonlyFilter(ALL_FAKE_TOOLS, env), /Unknown CAT_CAFE_DESKTOP_MODE/);
   });
 
-  it('cloud-pro-phase0 collab build: 5 message tools + authenticated profile reader registered', () => {
+  it('cloud-pro-phase0 collab build: 6 read/message tools + authenticated profile reader registered', () => {
     const env: ToolsetEnv = { desktopMode: 'cloud-pro-phase0' };
     const out = buildCollabTools(env);
     const outNames = new Set(out.map((t) => t.name));
@@ -460,6 +509,7 @@ describe('F238 cloud-pro-phase0 mode — Phase B1a security boundary', () => {
       'cat_cafe_post_message',
       'cat_cafe_cross_post_message',
       'cat_cafe_get_thread_context',
+      'cat_cafe_get_workflow_sop',
       'cat_cafe_list_threads',
       'cat_cafe_get_message',
     ];

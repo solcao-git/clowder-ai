@@ -15,11 +15,35 @@ import type {
   UpdateTaskInput,
 } from '@cat-cafe/shared';
 import { isTrackingKind } from '@cat-cafe/shared';
-import { generateSortableId } from './MessageStore.js';
+import {
+  assertTypedWaitRegistrationInstallation,
+  type TypedWaitRegistration,
+  type TypedWaitRegistrationSnapshot,
+} from '../../../../ball-custody/TypedWaitRegistration.js';
 import { automationGeneration, mergeTaskAutomationState } from './TaskAutomationState.js';
+import { TaskEntrustedWorkMutationStore } from './TaskEntrustedWorkMutationStore.js';
+import { createEntrustedTaskItem, createGenericTaskItem } from './TaskItemFactory.js';
 import { TaskManagedWorkRegistrationStore } from './TaskManagedWorkRegistrationStore.js';
-import type { ITaskStore, ReplaceAutomationStateIfGenerationInput } from './TaskStoreContract.js';
+import {
+  type AdmitEntrustedWorkStoreInput,
+  type AdmitEntrustedWorkStoreResult,
+  assertEntrustedWorkGenericDeletionAllowed,
+  assertEntrustedWorkGenericUpdateAllowed,
+  assertEntrustedWorkGenericUpsertAllowed,
+  assertEntrustedWorkReplayCompatible,
+  assertEntrustedWorkStatusUpdateAllowed,
+  assertGenericTaskSubjectNamespaceAllowed,
+  type CloseEntrustedWorkStoreInput,
+  type CloseEntrustedWorkStoreResult,
+  createTaskSubjectAlreadyExistsError,
+  type ITaskStore,
+  isEntrustedWorkSubjectKey,
+  type ReplaceAutomationStateIfGenerationInput,
+  type UpdateEntrustedWorkStoreInput,
+  type UpdateEntrustedWorkStoreResult,
+} from './TaskStoreContract.js';
 import { assertSubjectUpdateOwnership } from './TaskSubjectOwnership.js';
+import { buildTaskWaitReplacement } from './TaskWaitReplacement.js';
 
 export type { ITaskStore } from './TaskStoreContract.js';
 export {
@@ -37,9 +61,11 @@ const MAX_TASKS = 500;
  */
 export class TaskStore implements ITaskStore {
   private tasks: Map<string, TaskItem> = new Map();
+  private readonly waitRegistrations = new Map<string, TypedWaitRegistration>();
   /** subject_key → taskId reverse index */
   private subjectIndex: Map<string, string> = new Map();
   private readonly managedWorkRegistration: TaskManagedWorkRegistrationStore;
+  private readonly entrustedWorkMutations: TaskEntrustedWorkMutationStore;
   private readonly maxTasks: number;
 
   constructor(options?: { maxTasks?: number }) {
@@ -49,33 +75,25 @@ export class TaskStore implements ITaskStore {
       getById: (taskId) => this.tasks.get(taskId),
       upsertBySubject: (input) => this.upsertBySubject(input),
     });
+    this.entrustedWorkMutations = new TaskEntrustedWorkMutationStore(this.tasks);
   }
 
   create(input: CreateTaskInput): TaskItem {
+    const subjectKey = input.subjectKey;
+    if (subjectKey) {
+      assertGenericTaskSubjectNamespaceAllowed(subjectKey);
+      const existingId = this.subjectIndex.get(subjectKey);
+      if (existingId) {
+        if (this.tasks.has(existingId)) {
+          throw createTaskSubjectAlreadyExistsError(subjectKey);
+        }
+        this.subjectIndex.delete(subjectKey);
+      }
+    }
+
     this.evictDoneIfNeeded();
 
-    const now = Date.now();
-    const task: TaskItem = {
-      id: generateSortableId(now),
-      kind: input.kind ?? 'work',
-      threadId: input.threadId,
-      subjectKey: input.subjectKey ?? null,
-      title: input.title,
-      ownerCatId: input.ownerCatId ?? null,
-      status: 'todo',
-      why: input.why,
-      createdBy: input.createdBy,
-      createdAt: now,
-      updatedAt: now,
-      automationState: input.automationState,
-      userId: input.userId,
-      probe: input.probe,
-      resolveMode: input.resolveMode,
-      // F193 Phase E (dispatch gate)
-      ...(input.relatedFeatureId ? { relatedFeatureId: input.relatedFeatureId } : {}),
-      ...(input.detectedFeatureIds?.length ? { detectedFeatureIds: input.detectedFeatureIds } : {}),
-      ...(input.dispatchGate ? { dispatchGate: input.dispatchGate } : {}),
-    };
+    const task = createGenericTaskItem(input);
 
     this.tasks.set(task.id, task);
     if (task.subjectKey) {
@@ -88,6 +106,11 @@ export class TaskStore implements ITaskStore {
     return this.tasks.get(taskId) ?? null;
   }
 
+  getWaitRegistration(taskId: string): TypedWaitRegistrationSnapshot | null {
+    const task = this.tasks.get(taskId);
+    return task ? structuredClone({ task, receipt: this.waitRegistrations.get(taskId) ?? null }) : null;
+  }
+
   getBySubject(subjectKey: string): TaskItem | null {
     const taskId = this.subjectIndex.get(subjectKey);
     if (!taskId) return null;
@@ -98,32 +121,47 @@ export class TaskStore implements ITaskStore {
     const sk = input.subjectKey;
     if (!sk) return this.create(input);
 
+    this.assertGenericUpsertSubjectAllowed(sk);
+
     const existingId = this.subjectIndex.get(sk);
-    if (existingId) {
-      const existing = this.tasks.get(existingId);
-      if (existing) {
-        assertSubjectUpdateOwnership(sk, existing, input);
-        const updated: TaskItem = {
-          ...existing,
-          threadId: input.threadId,
-          title: input.title,
-          ownerCatId: input.ownerCatId ?? existing.ownerCatId,
-          status: isTrackingKind(existing.kind) && existing.status === 'done' ? 'todo' : existing.status,
-          why: input.why,
-          userId: input.userId ?? existing.userId,
-          probe: input.probe !== undefined ? input.probe : existing.probe,
-          resolveMode: input.resolveMode !== undefined ? input.resolveMode : existing.resolveMode,
-          automationState: input.automationState
-            ? mergeTaskAutomationState(existing.automationState, input.automationState)
-            : existing.automationState,
-          updatedAt: Date.now(),
-        };
-        this.tasks.set(existingId, updated);
-        return updated;
-      }
+    if (!existingId) return this.create(input);
+    const existing = this.tasks.get(existingId);
+    if (!existing) {
+      this.subjectIndex.delete(sk);
+      return this.create(input);
     }
 
-    return this.create(input);
+    return this.updateExistingSubjectTask(sk, existing, input);
+  }
+
+  private assertGenericUpsertSubjectAllowed(subjectKey: string): void {
+    if (!isEntrustedWorkSubjectKey(subjectKey)) return;
+    const existingId = this.subjectIndex.get(subjectKey);
+    const existing = existingId ? this.tasks.get(existingId) : undefined;
+    if (existing) assertEntrustedWorkGenericUpsertAllowed(existing);
+    assertGenericTaskSubjectNamespaceAllowed(subjectKey);
+  }
+
+  private updateExistingSubjectTask(subjectKey: string, existing: TaskItem, input: CreateTaskInput): TaskItem {
+    assertSubjectUpdateOwnership(subjectKey, existing, input);
+    assertEntrustedWorkGenericUpsertAllowed(existing);
+    const updated: TaskItem = {
+      ...existing,
+      threadId: input.threadId,
+      title: input.title,
+      ownerCatId: input.ownerCatId ?? existing.ownerCatId,
+      status: isTrackingKind(existing.kind) && existing.status === 'done' ? 'todo' : existing.status,
+      why: input.why,
+      userId: input.userId ?? existing.userId,
+      probe: input.probe !== undefined ? input.probe : existing.probe,
+      resolveMode: input.resolveMode !== undefined ? input.resolveMode : existing.resolveMode,
+      automationState: input.automationState
+        ? mergeTaskAutomationState(existing.automationState, input.automationState)
+        : existing.automationState,
+      updatedAt: Date.now(),
+    };
+    this.tasks.set(existing.id, updated);
+    return updated;
   }
 
   upsertBySubjectWithManagedWorkBinding(input: CreateTaskInput, binding: ManagedWorkBinding): TaskItem {
@@ -162,19 +200,48 @@ export class TaskStore implements ITaskStore {
     return this.managedWorkRegistration.get(taskId);
   }
 
+  admitEntrustedWork(input: AdmitEntrustedWorkStoreInput): AdmitEntrustedWorkStoreResult {
+    const existingId = this.subjectIndex.get(input.subjectKey);
+    if (existingId) {
+      const existing = this.tasks.get(existingId);
+      if (existing) {
+        assertEntrustedWorkReplayCompatible(input.subjectKey, existing, input.entrustedWork);
+        return { kind: 'resumed', task: existing };
+      }
+      this.subjectIndex.delete(input.subjectKey);
+    }
+
+    this.evictDoneIfNeeded();
+    const task = createEntrustedTaskItem(input);
+    this.tasks.set(task.id, task);
+    this.subjectIndex.set(input.subjectKey, task.id);
+    return { kind: 'admitted', task };
+  }
+
+  closeEntrustedWork(taskId: string, input: CloseEntrustedWorkStoreInput): CloseEntrustedWorkStoreResult {
+    return this.entrustedWorkMutations.close(taskId, input);
+  }
+
+  updateEntrustedWork(taskId: string, input: UpdateEntrustedWorkStoreInput): UpdateEntrustedWorkStoreResult {
+    return this.entrustedWorkMutations.update(taskId, input);
+  }
+
   replaceAutomationStateIfGeneration(taskId: string, input: ReplaceAutomationStateIfGenerationInput): TaskItem | null {
     const existing = this.tasks.get(taskId);
     if (!existing) return null;
+    assertEntrustedWorkStatusUpdateAllowed(existing, input);
     if (input.expectedUpdatedAt !== undefined && existing.updatedAt !== input.expectedUpdatedAt) return null;
     if (automationGeneration(existing.automationState) !== input.expectedGeneration) return null;
 
-    const updated: TaskItem = {
-      ...existing,
-      automationState: input.automationState,
-      ...(input.why !== undefined ? { why: input.why } : {}),
-      ...(input.status !== undefined ? { status: input.status } : {}),
-      updatedAt: Date.now(),
-    };
+    const updated = buildTaskWaitReplacement(existing, input, this.managedWorkRegistration.get(taskId));
+    if (input.waitRegistration) assertTypedWaitRegistrationInstallation(updated, input.waitRegistration);
+    const binding = input.trackingRegistration?.managedWorkBinding;
+    if (binding) this.managedWorkRegistration.bind(taskId, binding);
+    if (input.waitRegistration) {
+      this.waitRegistrations.set(taskId, structuredClone(input.waitRegistration));
+    } else if (automationGeneration(existing.automationState) !== automationGeneration(updated.automationState)) {
+      this.waitRegistrations.delete(taskId);
+    }
     this.tasks.set(taskId, updated);
     return updated;
   }
@@ -182,6 +249,7 @@ export class TaskStore implements ITaskStore {
   update(taskId: string, input: UpdateTaskInput): TaskItem | null {
     const existing = this.tasks.get(taskId);
     if (!existing) return null;
+    assertEntrustedWorkGenericUpdateAllowed(existing);
 
     const updated: TaskItem = {
       ...existing,
@@ -224,11 +292,14 @@ export class TaskStore implements ITaskStore {
   delete(taskId: string): boolean {
     const task = this.tasks.get(taskId);
     if (!task) return false;
+    assertEntrustedWorkGenericDeletionAllowed(task);
     this.deleteTask(taskId, task);
     return true;
   }
 
   deleteByThread(threadId: string): number {
+    const owned = [...this.tasks.values()].filter((task) => task.threadId === threadId);
+    owned.forEach(assertEntrustedWorkGenericDeletionAllowed);
     let count = 0;
     for (const [id, task] of this.tasks) {
       if (task.threadId === threadId) {
@@ -246,14 +317,16 @@ export class TaskStore implements ITaskStore {
   private evictDoneIfNeeded(): void {
     if (this.tasks.size < this.maxTasks) return;
 
-    if (this.evictOldestTask((task) => task.status === 'done')) return;
-    if (this.evictOldestTask((task) => !this.isProtectedFromFallbackEviction(task))) return;
-    this.evictOldestTask(() => true);
+    if (this.evictOldestTask((task) => !task.entrustedWork && task.status === 'done')) return;
+    if (this.evictOldestTask((task) => !task.entrustedWork && !this.isProtectedFromFallbackEviction(task))) return;
+    if (this.evictOldestTask((task) => !task.entrustedWork)) return;
+    throw new Error('TaskStore capacity reached with only non-evictable entrusted work');
   }
 
   private deleteTask(taskId: string, task?: TaskItem): void {
     if (task?.subjectKey) this.subjectIndex.delete(task.subjectKey);
     this.managedWorkRegistration.delete(taskId);
+    this.waitRegistrations.delete(taskId);
     this.tasks.delete(taskId);
   }
 

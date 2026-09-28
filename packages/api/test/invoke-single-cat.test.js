@@ -18,7 +18,8 @@ const hasSourceStagingContent = existsSync(
 
 import { afterEach, before, beforeEach, describe, it, mock } from 'node:test';
 import { catRegistry } from '@cat-cafe/shared';
-import { GovernanceBootstrapService } from '../dist/config/governance/governance-bootstrap.js';
+import { ContextEpochOwner } from '../dist/domains/cats/services/session/ContextEpochOwner.js';
+import { InMemoryContextEpochStore } from '../dist/domains/cats/services/stores/ports/ContextEpochStore.js';
 
 function assertStagingPromptContract(prompt, mode) {
   if (hasSourceStagingContent) {
@@ -284,6 +285,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       },
       threadStore: null,
       apiUrl: 'http://127.0.0.1:3004',
+      contextEpochOwner: new ContextEpochOwner(new InMemoryContextEpochStore()),
     };
   }
 
@@ -2584,6 +2586,611 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.doesNotMatch(prompt, /threshold|manual|handoff/i);
   });
 
+  it('oversized native replacement blocks provider progress until old SessionRecord is sealed and successor is bound', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const { buildCapsuleFromRouteState } = await import(
+      '../dist/domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js'
+    );
+    const sessionChainStore = new SessionChainStore();
+    const oldRecord = sessionChainStore.create({
+      cliSessionId: 'native-oversized',
+      threadId: 'thread-oversized-rollover',
+      catId: 'codex',
+      userId: 'user1',
+    });
+    let providerAdvanced = false;
+    let resolveFinalizeStarted;
+    let resolveFinalize;
+    const finalizeStarted = new Promise((resolve) => {
+      resolveFinalizeStarted = resolve;
+    });
+    const finalizeGate = new Promise((resolve) => {
+      resolveFinalize = resolve;
+    });
+    const sessionSealer = {
+      requestSeal: async ({ sessionId, reason }) => {
+        sessionChainStore.transitionToSealing(sessionId, reason);
+        return { accepted: true, status: 'sealing', sessionId };
+      },
+      finalize: async ({ sessionId }) => {
+        resolveFinalizeStarted();
+        await finalizeGate;
+        sessionChainStore.update(sessionId, { status: 'sealed', sealedAt: Date.now(), updatedAt: Date.now() });
+        return { sealed: true, clean: true };
+      },
+      reconcileStuck: async () => 0,
+      reconcileAllStuck: async () => 0,
+    };
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield {
+          type: 'session_init',
+          catId: 'codex',
+          sessionId: 'native-cold',
+          sessionReplacement: {
+            cause: 'native_resume_rejected',
+            previousNativeThreadId: 'native-oversized',
+            detectedAt: 1_787_642_000_000,
+            rejection: 'max_payload_size_exceeded',
+          },
+          timestamp: Date.now(),
+        };
+        providerAdvanced = true;
+        yield { type: 'done', catId: 'codex', timestamp: Date.now() };
+      },
+    };
+
+    const collecting = collect(
+      invokeSingleCat(
+        { ...makeDeps(), sessionChainStore, sessionSealer },
+        {
+          catId: 'codex',
+          service,
+          prompt: 'continue',
+          userId: 'user1',
+          threadId: 'thread-oversized-rollover',
+          isLastCat: true,
+          continuityCapsule: buildCapsuleFromRouteState({
+            threadId: 'thread-oversized-rollover',
+            catId: 'codex',
+            mode: 'independent',
+            a2aEnabled: true,
+          }),
+        },
+      ),
+    );
+
+    await finalizeStarted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(providerAdvanced, false, 'provider generator must remain paused before final seal commits');
+    assert.equal(sessionChainStore.get(oldRecord.id).status, 'sealing');
+
+    resolveFinalize();
+    const msgs = await collecting;
+    assert.equal(providerAdvanced, true);
+    assert.equal(sessionChainStore.get(oldRecord.id).status, 'sealed');
+    assert.equal(sessionChainStore.getActive('codex', 'thread-oversized-rollover').cliSessionId, 'native-cold');
+    const lifecycle = msgs
+      .filter((message) => message.type === 'system_info')
+      .map((message) => JSON.parse(message.content))
+      .filter((payload) => payload.type === 'session_rollover_lifecycle');
+    assert.deepEqual(
+      lifecycle.map(({ status, reason }) => ({ status, reason })),
+      [
+        { status: 'pending', reason: 'oversized_retire' },
+        { status: 'succeeded', reason: 'oversized_retire' },
+      ],
+    );
+  });
+
+  it('oversized native replacement fails before provider progress when the old SessionRecord cannot finalize', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+    const oldRecord = sessionChainStore.create({
+      cliSessionId: 'native-oversized-fail',
+      threadId: 'thread-oversized-rollover-fail',
+      catId: 'codex',
+      userId: 'user1',
+    });
+    let providerAdvanced = false;
+    const sessionSealer = {
+      requestSeal: async ({ sessionId, reason }) => {
+        sessionChainStore.transitionToSealing(sessionId, reason);
+        return { accepted: true, status: 'sealing', sessionId };
+      },
+      finalize: async () => ({ sealed: false, clean: false }),
+      reconcileStuck: async () => 0,
+      reconcileAllStuck: async () => 0,
+    };
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield {
+          type: 'session_init',
+          catId: 'codex',
+          sessionId: 'native-cold-never-bound',
+          sessionReplacement: {
+            cause: 'native_resume_rejected',
+            previousNativeThreadId: 'native-oversized-fail',
+            detectedAt: 1_787_642_000_001,
+            rejection: 'max_payload_size_exceeded',
+          },
+          timestamp: Date.now(),
+        };
+        providerAdvanced = true;
+        yield { type: 'done', catId: 'codex', timestamp: Date.now() };
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(
+        { ...makeDeps(), sessionChainStore, sessionSealer },
+        {
+          catId: 'codex',
+          service,
+          prompt: 'continue',
+          userId: 'user1',
+          threadId: 'thread-oversized-rollover-fail',
+          isLastCat: true,
+        },
+      ),
+    );
+
+    assert.equal(providerAdvanced, false, 'failed finalize must close the provider iterator before its turn');
+    assert.equal(sessionChainStore.get(oldRecord.id).status, 'sealing');
+    assert.equal(sessionChainStore.getChain('codex', 'thread-oversized-rollover-fail').length, 1);
+    const lifecycle = msgs
+      .filter((message) => message.type === 'system_info')
+      .map((message) => JSON.parse(message.content))
+      .filter((payload) => payload.type === 'session_rollover_lifecycle');
+    assert.equal(lifecycle.at(-1)?.status, 'failed');
+    assert.equal(lifecycle.at(-1)?.failureStage, 'seal_finalize');
+    assert.equal(
+      msgs.some((message) => message.type === 'error'),
+      true,
+    );
+  });
+
+  it('oversized native replacement commits epoch+1 cold before the replacement prompt is built', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const { buildCapsuleFromRouteState } = await import(
+      '../dist/domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js'
+    );
+    const sessionChainStore = new SessionChainStore();
+    const oldRecord = sessionChainStore.create({
+      cliSessionId: 'native-oversized-epoch',
+      threadId: 'thread-oversized-epoch',
+      catId: 'codex',
+      userId: 'user1',
+    });
+    const contextEpochOwner = new ContextEpochOwner(new InMemoryContextEpochStore());
+    const seeded = await contextEpochOwner.resolve({
+      userId: 'user1',
+      catId: 'codex',
+      threadId: 'thread-oversized-epoch',
+      disposition: {
+        state: 'fresh',
+        reason: 'no_prior_session',
+        evidenceRef: 'seed:native-oversized-epoch',
+        runtimeSessionId: 'native-oversized-epoch',
+      },
+    });
+    await contextEpochOwner.confirmColdConsumed({
+      userId: 'user1',
+      catId: 'codex',
+      threadId: 'thread-oversized-epoch',
+      contextEpoch: seeded.contextEpoch,
+    });
+    const sessionSealer = {
+      requestSeal: async ({ sessionId, reason }) => {
+        sessionChainStore.transitionToSealing(sessionId, reason);
+        return { accepted: true, status: 'sealing', sessionId };
+      },
+      finalize: async ({ sessionId }) => {
+        sessionChainStore.update(sessionId, { status: 'sealed', sealedAt: Date.now(), updatedAt: Date.now() });
+        return { sealed: true, clean: true };
+      },
+      reconcileStuck: async () => 0,
+      reconcileAllStuck: async () => 0,
+    };
+    const decisions = [];
+    const prompts = [];
+    const exposed = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      contextCapability: () => ({
+        provider: 'openai',
+        carrier: 'app_server',
+        reportsRuntimeWindow: false,
+        authoritativeUsage: false,
+        usageTelemetry: 'unavailable',
+        nativeWindowControl: false,
+        nativeCompressionControl: false,
+        observesCompression: true,
+        reason: 'test',
+      }),
+      async *invoke() {
+        throw new Error('app_server must use continuity preflight');
+      },
+      async *invokeWithContinuityPreflight(preflight) {
+        yield {
+          type: 'session_init',
+          catId: 'codex',
+          sessionId: 'native-cold-epoch',
+          sessionReplacement: {
+            cause: 'native_resume_rejected',
+            previousNativeThreadId: 'native-oversized-epoch',
+            detectedAt: 1_787_642_000_002,
+            rejection: 'max_payload_size_exceeded',
+          },
+          timestamp: Date.now(),
+        };
+        assert.equal(sessionChainStore.get(oldRecord.id).status, 'sealed');
+        assert.equal(
+          sessionChainStore.getActive('codex', 'thread-oversized-epoch', 'user1').cliSessionId,
+          'native-cold-epoch',
+        );
+        const settled = await preflight.settle({
+          evidence: {
+            kind: 'replaced',
+            requestedRuntimeSessionId: 'native-oversized-epoch',
+            runtimeSessionId: 'native-cold-epoch',
+          },
+        });
+        prompts.push(settled.prompt);
+        yield { type: 'text', catId: 'codex', content: 'continued from cold navigation', timestamp: Date.now() };
+        yield { type: 'done', catId: 'codex', timestamp: Date.now() };
+      },
+    };
+
+    await collect(
+      invokeSingleCat(
+        { ...makeDeps(), sessionChainStore, sessionSealer, contextEpochOwner },
+        {
+          catId: 'codex',
+          service,
+          prompt: 'route prompt must be replaced',
+          userId: 'user1',
+          threadId: 'thread-oversized-epoch',
+          isLastCat: true,
+          contextPromptFactory: async ({ decision }) => {
+            decisions.push(decision);
+            return {
+              prompt: `cold-navigation-epoch-${decision.contextEpoch}`,
+              promptMessageIds: [`msg-cold-${decision.contextEpoch}`],
+            };
+          },
+          onPromptMessagesExposed: async ({ messageIds }) => {
+            exposed.push(...messageIds);
+          },
+          continuityCapsule: buildCapsuleFromRouteState({
+            threadId: 'thread-oversized-epoch',
+            catId: 'codex',
+            mode: 'independent',
+            a2aEnabled: true,
+          }),
+        },
+      ),
+    );
+
+    assert.equal(decisions.length, 1);
+    assert.equal(decisions[0].transition, 'replaced');
+    assert.equal(decisions[0].contextEpoch, 2);
+    assert.equal(decisions[0].contextMode, 'cold');
+    assert.match(prompts[0], /cold-navigation-epoch-2/);
+    assert.doesNotMatch(prompts[0], /route prompt must be replaced/);
+    assert.deepEqual(exposed, ['msg-cold-2']);
+    const resumed = await contextEpochOwner.resolve({
+      userId: 'user1',
+      catId: 'codex',
+      threadId: 'thread-oversized-epoch',
+      disposition: {
+        state: 'resumed',
+        reason: 'resume_confirmed',
+        evidenceRef: 'verify:native-cold-epoch',
+        runtimeSessionId: 'native-cold-epoch',
+      },
+    });
+    assert.equal(resumed.contextEpoch, 2);
+    assert.equal(resumed.contextMode, 'hot');
+  });
+
+  it('oversized native replacement rolls back an unbound successor and stops before provider progress', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+    const claimedRuntime = sessionChainStore.create({
+      cliSessionId: 'native-cold-conflict',
+      threadId: 'thread-other-owner',
+      catId: 'codex',
+      userId: 'user1',
+    });
+    const oldRecord = sessionChainStore.create({
+      cliSessionId: 'native-oversized-conflict',
+      threadId: 'thread-oversized-conflict',
+      catId: 'codex',
+      userId: 'user1',
+    });
+    let providerAdvanced = false;
+    const sessionSealer = {
+      requestSeal: async ({ sessionId, reason }) => {
+        sessionChainStore.transitionToSealing(sessionId, reason);
+        return { accepted: true, status: 'sealing', sessionId };
+      },
+      finalize: async ({ sessionId }) => {
+        sessionChainStore.update(sessionId, { status: 'sealed', sealedAt: Date.now(), updatedAt: Date.now() });
+        return { sealed: true, clean: true };
+      },
+      reconcileStuck: async () => 0,
+      reconcileAllStuck: async () => 0,
+    };
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield {
+          type: 'session_init',
+          catId: 'codex',
+          sessionId: 'native-cold-conflict',
+          sessionReplacement: {
+            cause: 'native_resume_rejected',
+            previousNativeThreadId: 'native-oversized-conflict',
+            detectedAt: 1_787_642_000_003,
+            rejection: 'max_payload_size_exceeded',
+          },
+          timestamp: Date.now(),
+        };
+        providerAdvanced = true;
+        yield { type: 'done', catId: 'codex', timestamp: Date.now() };
+      },
+    };
+
+    const messages = await collect(
+      invokeSingleCat(
+        { ...makeDeps(), sessionChainStore, sessionSealer },
+        {
+          catId: 'codex',
+          service,
+          prompt: 'continue',
+          userId: 'user1',
+          threadId: 'thread-oversized-conflict',
+          isLastCat: true,
+        },
+      ),
+    );
+
+    assert.equal(providerAdvanced, false);
+    assert.equal(sessionChainStore.get(oldRecord.id).status, 'sealed');
+    assert.equal(sessionChainStore.get(claimedRuntime.id).status, 'active');
+    assert.equal(sessionChainStore.getActive('codex', 'thread-oversized-conflict', 'user1'), null);
+    const targetChain = sessionChainStore.getChain('codex', 'thread-oversized-conflict', 'user1');
+    assert.deepEqual(
+      targetChain.map(({ status }) => status),
+      ['sealed', 'sealed'],
+    );
+    const lifecycle = messages
+      .filter((message) => message.type === 'system_info')
+      .map((message) => JSON.parse(message.content))
+      .filter((payload) => payload.type === 'session_rollover_lifecycle');
+    assert.equal(lifecycle.at(-1)?.status, 'failed');
+    assert.equal(lifecycle.at(-1)?.failureStage, 'replacement_bind');
+  });
+
+  it('a stale concurrent oversized replacement cannot retire the already-committed successor', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+    const oldRecord = sessionChainStore.create({
+      cliSessionId: 'native-oversized-race',
+      threadId: 'thread-oversized-race',
+      catId: 'codex',
+      userId: 'user1',
+    });
+    const sessionSealer = {
+      requestSeal: async ({ sessionId, reason }) => {
+        sessionChainStore.transitionToSealing(sessionId, reason);
+        return { accepted: true, status: 'sealing', sessionId };
+      },
+      finalize: async ({ sessionId }) => {
+        sessionChainStore.update(sessionId, { status: 'sealed', sealedAt: Date.now(), updatedAt: Date.now() });
+        return { sealed: true, clean: true };
+      },
+      reconcileStuck: async () => 0,
+      reconcileAllStuck: async () => 0,
+    };
+    const replacement = (sessionId, onAdvance = () => {}) => ({
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield {
+          type: 'session_init',
+          catId: 'codex',
+          sessionId,
+          sessionReplacement: {
+            cause: 'native_resume_rejected',
+            previousNativeThreadId: 'native-oversized-race',
+            detectedAt: 1_787_642_000_004,
+            rejection: 'max_payload_size_exceeded',
+          },
+          timestamp: Date.now(),
+        };
+        onAdvance();
+        yield { type: 'done', catId: 'codex', timestamp: Date.now() };
+      },
+    });
+    const params = {
+      catId: 'codex',
+      prompt: 'continue',
+      userId: 'user1',
+      threadId: 'thread-oversized-race',
+      isLastCat: true,
+    };
+
+    await collect(
+      invokeSingleCat(
+        { ...makeDeps(), sessionChainStore, sessionSealer },
+        { ...params, service: replacement('native-cold-winner') },
+      ),
+    );
+    assert.equal(sessionChainStore.get(oldRecord.id).status, 'sealed');
+    assert.equal(
+      sessionChainStore.getActive('codex', 'thread-oversized-race', 'user1').cliSessionId,
+      'native-cold-winner',
+    );
+
+    let staleProviderAdvanced = false;
+    const staleMessages = await collect(
+      invokeSingleCat(
+        { ...makeDeps(), sessionChainStore, sessionSealer },
+        {
+          ...params,
+          service: replacement('native-cold-stale-loser', () => {
+            staleProviderAdvanced = true;
+          }),
+        },
+      ),
+    );
+
+    assert.equal(staleProviderAdvanced, false);
+    assert.equal(
+      sessionChainStore.getActive('codex', 'thread-oversized-race', 'user1').cliSessionId,
+      'native-cold-winner',
+    );
+    assert.equal(
+      sessionChainStore
+        .getChain('codex', 'thread-oversized-race', 'user1')
+        .some(({ cliSessionId }) => cliSessionId === 'native-cold-stale-loser'),
+      false,
+    );
+    const lifecycle = staleMessages
+      .filter((message) => message.type === 'system_info')
+      .map((message) => JSON.parse(message.content))
+      .filter((payload) => payload.type === 'session_rollover_lifecycle');
+    assert.equal(lifecycle.at(-1)?.status, 'failed');
+    assert.equal(lifecycle.at(-1)?.failureStage, 'seal_request');
+  });
+
+  it('oversized native replacement fails closed across seal and successor creation failures', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const cases = [
+      { name: 'missing sealer', expectedStage: 'seal_request', buildSealer: () => undefined },
+      {
+        name: 'rejected seal request',
+        expectedStage: 'seal_request',
+        buildSealer: () => ({
+          requestSeal: async ({ sessionId }) => ({ accepted: false, status: 'active', sessionId }),
+          finalize: async () => ({ sealed: false, clean: false }),
+          reconcileStuck: async () => 0,
+          reconcileAllStuck: async () => 0,
+        }),
+      },
+      {
+        name: 'thrown seal request',
+        expectedStage: 'seal_request',
+        buildSealer: () => ({
+          requestSeal: async () => {
+            throw new Error('seal request unavailable');
+          },
+          finalize: async () => ({ sealed: false, clean: false }),
+          reconcileStuck: async () => 0,
+          reconcileAllStuck: async () => 0,
+        }),
+      },
+      {
+        name: 'thrown seal finalize',
+        expectedStage: 'seal_finalize',
+        buildSealer: (store) => ({
+          requestSeal: async ({ sessionId, reason }) => {
+            store.transitionToSealing(sessionId, reason);
+            return { accepted: true, status: 'sealing', sessionId };
+          },
+          finalize: async () => {
+            throw new Error('seal finalize unavailable');
+          },
+          reconcileStuck: async () => 0,
+          reconcileAllStuck: async () => 0,
+        }),
+      },
+      {
+        name: 'successor creation failure',
+        expectedStage: 'replacement_create',
+        failCreate: true,
+        buildSealer: (store) => ({
+          requestSeal: async ({ sessionId, reason }) => {
+            store.transitionToSealing(sessionId, reason);
+            return { accepted: true, status: 'sealing', sessionId };
+          },
+          finalize: async ({ sessionId }) => {
+            store.update(sessionId, { status: 'sealed', sealedAt: Date.now(), updatedAt: Date.now() });
+            return { sealed: true, clean: true };
+          },
+          reconcileStuck: async () => 0,
+          reconcileAllStuck: async () => 0,
+        }),
+      },
+    ];
+
+    for (const failureCase of cases) {
+      const sessionChainStore = new SessionChainStore();
+      const suffix = failureCase.name.replaceAll(' ', '-');
+      sessionChainStore.create({
+        cliSessionId: `native-oversized-${suffix}`,
+        threadId: `thread-oversized-${suffix}`,
+        catId: 'codex',
+        userId: 'user1',
+      });
+      if (failureCase.failCreate) {
+        sessionChainStore.create = () => {
+          throw new Error('successor create unavailable');
+        };
+      }
+      let providerAdvanced = false;
+      const service = {
+        l0CompilerFn: dummyL0CompilerFn,
+        async *invoke() {
+          yield {
+            type: 'session_init',
+            catId: 'codex',
+            sessionId: `native-cold-${suffix}`,
+            sessionReplacement: {
+              cause: 'native_resume_rejected',
+              previousNativeThreadId: `native-oversized-${suffix}`,
+              detectedAt: 1_787_642_000_005,
+              rejection: 'max_payload_size_exceeded',
+            },
+            timestamp: Date.now(),
+          };
+          providerAdvanced = true;
+          yield { type: 'done', catId: 'codex', timestamp: Date.now() };
+        },
+      };
+      const sessionSealer = failureCase.buildSealer(sessionChainStore);
+      const deps = { ...makeDeps(), sessionChainStore, ...(sessionSealer ? { sessionSealer } : {}) };
+      const messages = await collect(
+        invokeSingleCat(deps, {
+          catId: 'codex',
+          service,
+          prompt: 'continue',
+          userId: 'user1',
+          threadId: `thread-oversized-${suffix}`,
+          isLastCat: true,
+        }),
+      );
+
+      assert.equal(providerAdvanced, false, failureCase.name);
+      assert.equal(
+        sessionChainStore
+          .getChain('codex', `thread-oversized-${suffix}`, 'user1')
+          .some(({ cliSessionId }) => cliSessionId === `native-cold-${suffix}`),
+        false,
+        failureCase.name,
+      );
+      const lifecycle = messages
+        .filter((message) => message.type === 'system_info')
+        .map((message) => JSON.parse(message.content))
+        .filter((payload) => payload.type === 'session_rollover_lifecycle');
+      assert.equal(lifecycle.at(-1)?.status, 'failed', failureCase.name);
+      assert.equal(lifecycle.at(-1)?.failureStage, failureCase.expectedStage, failureCase.name);
+    }
+  });
+
   it('F24: plain cli_session_replaced remains a mechanism and does not invent runtime recovery', async () => {
     const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
     const { buildCapsuleFromRouteState } = await import(
@@ -3757,6 +4364,31 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     );
   });
 
+  it('isTransientCliExitCode1: argv/CLI-version incompatibility must NOT be retried (deterministic)', async () => {
+    const { isTransientCliExitCode1 } = await import(
+      '../dist/domains/cats/services/agents/invocation/invoke-helpers.js'
+    );
+
+    // Real shape after formatCliExitError appends the classified reasonCode.
+    // Witnessed 76x in runtime logs 2026-08-06..08-10 (48x "unknown option
+    // '--agent-file'" + 28x "Cannot combine --agent/--agent-file with
+    // --session/--continue") — every one of them retried once for nothing,
+    // which is where the user-visible "未识别的 CLI 错误 ×2" came from.
+    const argvMsg = 'Kimi CLI: CLI 异常退出 (code: 1, signal: none) [incompatible_cli_arguments]';
+    assert.equal(
+      isTransientCliExitCode1(argvMsg),
+      false,
+      'a CLI that rejected our argv rejects the identical argv again — retrying only doubles the failure',
+    );
+
+    // Regression guard: vanilla transient exit still retries
+    assert.equal(
+      isTransientCliExitCode1('Kimi CLI: CLI 异常退出 (code: 1, signal: none)'),
+      true,
+      'untagged transient exit must stay retryable',
+    );
+  });
+
   it('session self-heal: retries once without --resume when Claude reports missing conversation', async () => {
     let invokeCount = 0;
     const sessionDeletes = [];
@@ -4027,6 +4659,228 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       msgs.some((m) => m.type === 'error' && m.metadata?.cliDiagnostics?.reasonCode === 'session_not_found'),
       false,
       'stale-session error should be suppressed when retry succeeds',
+    );
+  });
+
+  // F296 B4 (kimi review P2): the identity belongs to exactly ONE channel.
+  // When a carrier has a target continuity handshake, the self-heal retry
+  // rebuilds the prompt with injectSystemPrompt=true, so the identity is
+  // already inside the bytes. Also putting it on the options channel makes the
+  // provider prepend it a second time. This predates B4 (it already affected
+  // codex/exec_json) but B4 widens the set of carriers that reach it.
+  // Sol review #7: the P2-3 fix (preflight carriers must not eagerly rebuild a
+  // generation on the retry paths) shipped without a regression test. Reverting
+  // it would advance the epoch twice for one retry, leave an ownerless
+  // reservation and double-count metrics — with nothing going red.
+  // Sol review #5: with a preflight carrier the prompt message ids only exist
+  // once `settle` has run, long after baseOptions was built — so the recovery
+  // anchor used to be omitted entirely and app_server model-capacity recovery
+  // could never resume the exact invocation.
+  it('F296 #5: a preflight carrier still receives an exact recovery anchor', async () => {
+    let anchorAtSettle;
+    let anchorAtOutput;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      contextCapability: () => ({
+        provider: 'openai',
+        carrier: 'app_server',
+        reportsRuntimeWindow: false,
+        authoritativeUsage: false,
+        usageTelemetry: 'unavailable',
+        nativeWindowControl: false,
+        nativeCompressionControl: false,
+        observesCompression: true,
+        reason: 'test',
+      }),
+      async *invoke() {
+        throw new Error('preflight carrier must not fall back to invoke()');
+      },
+      async *invokeWithContinuityPreflight(preflight, options) {
+        anchorAtSettle = options?.recoveryAnchor;
+        await preflight.settle({ evidence: { kind: 'started', runtimeSessionId: 'rt-1' } });
+        // Read again after settle: this is when a capacity retry would look.
+        anchorAtOutput = {
+          threadId: options?.recoveryAnchor?.threadId,
+          invocationId: options?.recoveryAnchor?.invocationId,
+          promptMessageIds: [...(options?.recoveryAnchor?.promptMessageIds ?? [])],
+        };
+        yield { type: 'text', catId: 'opus', content: 'ok', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'u1',
+        threadId: 'thread-preflight-anchor',
+        isLastCat: true,
+        contextPromptFactory: async () => ({
+          prompt: 'projected',
+          promptMessageIds: ['msg-a', 'msg-b'],
+        }),
+      }),
+    );
+
+    assert.ok(anchorAtSettle, 'a preflight carrier must be given an anchor even before settle');
+    assert.equal(anchorAtOutput.threadId, 'thread-preflight-anchor');
+    assert.ok(anchorAtOutput.invocationId, 'the anchor carries the invocation id');
+    assert.deepEqual(
+      anchorAtOutput.promptMessageIds,
+      ['msg-a', 'msg-b'],
+      'and after settle it holds the ids of the generation that was actually built',
+    );
+  });
+
+  it('F296 P2-3: a preflight retry builds exactly one generation, not two', async () => {
+    let resolveCalls = 0;
+    let factoryCalls = 0;
+    let settleCalls = 0;
+    const owner = new ContextEpochOwner(new InMemoryContextEpochStore());
+    const countingOwner = {
+      resolve: (input) => {
+        resolveCalls += 1;
+        return owner.resolve(input);
+      },
+      observeCompaction: (input) => owner.observeCompaction(input),
+      confirmColdConsumed: (input) => owner.confirmColdConsumed(input),
+    };
+
+    let invokeCount = 0;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      contextCapability: () => ({
+        provider: 'openai',
+        carrier: 'app_server',
+        reportsRuntimeWindow: false,
+        authoritativeUsage: false,
+        usageTelemetry: 'unavailable',
+        nativeWindowControl: false,
+        nativeCompressionControl: false,
+        observesCompression: true,
+        reason: 'test',
+      }),
+      async *invoke() {
+        throw new Error('preflight carrier must not fall back to invoke()');
+      },
+      async *invokeWithContinuityPreflight(preflight) {
+        invokeCount += 1;
+        settleCalls += 1;
+        await preflight.settle({ evidence: { kind: 'started', runtimeSessionId: `rt-${invokeCount}` } });
+        if (invokeCount === 1) {
+          yield {
+            type: 'error',
+            catId: 'opus',
+            error: 'No conversation found with session ID: stale-sess',
+            timestamp: Date.now(),
+          };
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+          return;
+        }
+        yield { type: 'text', catId: 'opus', content: 'recovered', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    deps.contextEpochOwner = countingOwner;
+    deps.sessionManager = { get: async () => 'stale-sess', store: async () => {}, delete: async () => {} };
+
+    await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'u1',
+        threadId: 'thread-preflight-retry',
+        isLastCat: true,
+        contextPromptFactory: async () => {
+          factoryCalls += 1;
+          return { prompt: 'projected', promptMessageIds: [] };
+        },
+      }),
+    );
+
+    assert.equal(invokeCount, 2, 'the retry happened');
+    assert.equal(settleCalls, 2, 'one settle per attempt');
+    assert.equal(
+      resolveCalls,
+      settleCalls,
+      `a preflight carrier must resolve the epoch exactly once per attempt — got ${resolveCalls} resolves ` +
+        `for ${settleCalls} settles, so the retry path rebuilt a generation eagerly`,
+    );
+    assert.equal(
+      factoryCalls,
+      settleCalls,
+      'and the context prompt factory must run exactly once per attempt for the same reason',
+    );
+  });
+
+  it('F296 P2: self-heal retry does not double-inject identity when the prompt already carries it', async () => {
+    const optionsSeen = [];
+    const promptsSeen = [];
+    let invokeCount = 0;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      contextCapability: () => ({
+        provider: 'openai',
+        carrier: 'exec_json',
+        reportsRuntimeWindow: true,
+        authoritativeUsage: true,
+        usageTelemetry: 'available',
+        nativeWindowControl: true,
+        nativeCompressionControl: true,
+        observesCompression: true,
+        reason: 'test',
+      }),
+      async *invoke(prompt, options) {
+        optionsSeen.push({ ...options });
+        promptsSeen.push(prompt);
+        invokeCount++;
+        if (invokeCount === 1) {
+          yield {
+            type: 'error',
+            catId: 'opus',
+            error: 'No conversation found with session ID: stale-sess',
+            timestamp: Date.now(),
+          };
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+          return;
+        }
+        yield { type: 'session_init', catId: 'opus', sessionId: 'fresh-sess', timestamp: Date.now() };
+        yield { type: 'text', catId: 'opus', content: 'recovered', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    deps.sessionManager = { get: async () => 'stale-sess', store: async () => {}, delete: async () => {} };
+
+    await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        systemPrompt: 'IDENTITY-MARKER',
+        userId: 'u1',
+        threadId: 'thread-selfheal-no-double',
+        isLastCat: true,
+        contextPromptFactory: async () => ({ prompt: 'rebuilt prompt', promptMessageIds: [] }),
+      }),
+    );
+
+    assert.equal(invokeCount, 2, 'should retry once');
+    const retryPrompt = promptsSeen[1];
+    const retryOptions = optionsSeen[1];
+    const inPrompt = retryPrompt.includes('IDENTITY-MARKER');
+    const inOptions = retryOptions.systemPrompt === 'IDENTITY-MARKER';
+    assert.ok(inPrompt || inOptions, 'the identity must reach the retry through one channel');
+    assert.ok(
+      !(inPrompt && inOptions),
+      'identity must not ride BOTH the prompt bytes and the options channel — the provider would prepend it twice',
     );
   });
 
@@ -5312,6 +6166,57 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(sessionRecordCreated, true, 'should create SessionRecord when sessionChain enabled');
   });
 
+  it('F299 rejects substantive output when a provider bypasses the durable request-generation fence', async () => {
+    const activeRecord = {
+      id: 'sr-f299-bypass',
+      seq: 0,
+      status: 'active',
+      catId: 'opus',
+      threadId: 'thread-f299-bypass',
+      userId: 'u1',
+    };
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield { type: 'text', catId: 'opus', content: 'must not escape', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+    const deps = {
+      ...makeDeps(),
+      sessionChainStore: {
+        getChain: async () => [activeRecord],
+        getActive: async () => activeRecord,
+        get: async () => activeRecord,
+        create: async () => activeRecord,
+        update: async () => activeRecord,
+      },
+      transcriptWriter: {
+        appendEvent: () => {},
+        appendDurableEvent: async () => {},
+        keyedContentDigest: async () => `hmac-sha256:${'a'.repeat(64)}`,
+      },
+    };
+
+    const messages = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'u1',
+        threadId: 'thread-f299-bypass',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(
+      messages.some((message) => message.type === 'text'),
+      false,
+    );
+    const error = messages.find((message) => message.type === 'error');
+    assert.match(error?.error ?? '', /request_generation_commit_unavailable/);
+  });
+
   // --- F-BLOAT: Resume skips systemPrompt injection ---
 
   it('F-BLOAT: skips systemPrompt on resume (sessionId present)', async () => {
@@ -5461,6 +6366,88 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.ok(promptsSeen[0].includes('static identity here'), 'systemPrompt prepended on new session');
     assertStagingPromptContract(promptsSeen[0], 'new-session');
     assert.ok(promptsSeen[0].includes('user message'), 'original user prompt still present');
+  });
+
+  it('F293: fresh sparse routing context reaches a resumed provider session with deterministic intent', async () => {
+    const promptsSeen = [];
+    const resolutions = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(prompt) {
+        promptsSeen.push(prompt);
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+    const deps = makeDeps();
+    deps.sessionManager = {
+      get: async () => 'existing-routing-session',
+      store: async () => {},
+      delete: async () => {},
+    };
+    deps.routingContextPromptProjection = {
+      async resolve(input) {
+        resolutions.push(input);
+        return '<runtime-routing-context>F293-SPARSE</runtime-routing-context>';
+      },
+    };
+
+    await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'review this change',
+        systemPrompt: 'static identity here',
+        routingContextIntent: 'review',
+        userId: 'owner-f293',
+        threadId: 'thread-routing-context-resume',
+        isLastCat: true,
+      }),
+    );
+
+    assert.deepEqual(resolutions, [{ ownerId: 'owner-f293', intent: 'review' }]);
+    assert.ok(promptsSeen[0].includes('F293-SPARSE'));
+    assert.ok(!promptsSeen[0].includes('static identity here'), 'dynamic projection is independent of static identity');
+  });
+
+  it('F293: projection failure omits dynamic bytes, preserves invocation, and writes a bounded audit event', async () => {
+    const promptsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(prompt) {
+        promptsSeen.push(prompt);
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+    const deps = makeDeps();
+    deps.routingContextPromptProjection = {
+      async resolve() {
+        throw new RangeError('sensitive routing ledger detail must not enter audit');
+      },
+    };
+
+    const messages = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'ordinary prompt',
+        userId: 'owner-f293',
+        threadId: 'thread-routing-context-projection-failure',
+        isLastCat: true,
+      }),
+    );
+
+    assert.ok(messages.some((message) => message.type === 'done'));
+    assert.ok(promptsSeen[0].includes('ordinary prompt'));
+    assert.ok(!promptsSeen[0].includes('sensitive routing ledger detail'));
+    const { getEventAuditLog } = await import('../dist/domains/cats/services/orchestration/EventAuditLog.js');
+    const events = await getEventAuditLog().readByThread('thread-routing-context-projection-failure');
+    const failure = events.find((event) => event.type === 'routing_context_projection_failed');
+    assert.ok(failure, 'projection failure must be auditable');
+    assert.deepEqual(failure.data, {
+      catId: 'opus',
+      invocationId: 'inv-1',
+      errorName: 'RangeError',
+    });
   });
 
   it('F053: Gemini (sessionChain=true) skips systemPrompt on resume like other cats', async () => {
@@ -6416,6 +7403,108 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(callbackEnv.OPENAI_API_BASE, undefined);
   });
 
+  for (const bound of [false, true]) {
+    it(`account store verdict blocks invocation without hiding its diagnostic (bound=${bound})`, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'invoke-malformed-account-'));
+      const savedRoot = process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
+      const registrySnapshot = catRegistry.getAllConfigs();
+      const { accountRef: _ref, ...config } = catRegistry.tryGet('codex').config;
+      const catId = 'account-verdict-fixture';
+      catRegistry.register(catId, {
+        ...config,
+        id: catId,
+        mentionPatterns: [`@${catId}`],
+        ...(bound ? { accountRef: 'fixture' } : {}),
+      });
+      let invoked = 0;
+      try {
+        process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = root;
+        await mkdir(join(root, '.cat-cafe'));
+        await writeFile(join(root, '.cat-cafe/accounts.json'), '{');
+        const messages = await collect(
+          invokeSingleCat(makeDeps(), {
+            catId,
+            prompt: 'fixture',
+            userId: 'fixture-owner',
+            threadId: 'fixture-thread',
+            isLastCat: true,
+            service: {
+              l0CompilerFn: dummyL0CompilerFn,
+              async *invoke() {
+                invoked++;
+                yield { type: 'done', catId, timestamp: Date.now() };
+              },
+            },
+          }),
+        );
+        assert.equal(invoked, 0, 'invalid store must never fall back to ambient CLI credentials');
+        assert.ok(
+          messages.some((message) => message.type === 'error' && /malformed account store/.test(message.error)),
+          JSON.stringify(messages.filter((message) => message.type === 'error')),
+        );
+      } finally {
+        if (savedRoot === undefined) delete process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
+        else process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = savedRoot;
+        catRegistry.reset();
+        for (const [id, previous] of Object.entries(registrySnapshot)) catRegistry.register(id, previous);
+        await rmWithRetry(root);
+      }
+    });
+  }
+
+  for (const authType of ['oauth', 'subscription', 'api_key']) {
+    it(`credential family guard blocks ${authType} before service invocation`, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'invoke-foreign-account-'));
+      const savedRoot = process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
+      const registrySnapshot = catRegistry.getAllConfigs();
+      const catId = 'foreign-account-fixture';
+      catRegistry.register(catId, {
+        ...catRegistry.tryGet('opus').config,
+        id: catId,
+        mentionPatterns: [`@${catId}`],
+        clientId: 'anthropic',
+        accountRef: 'claude',
+      });
+      let invoked = 0;
+      try {
+        process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = root;
+        await mkdir(join(root, '.cat-cafe'));
+        await writeFile(
+          join(root, '.cat-cafe/accounts.json'),
+          JSON.stringify({ claude: { authType, clientId: 'openai' } }),
+        );
+        await writeFile(
+          join(root, '.cat-cafe/credentials.json'),
+          JSON.stringify({ claude: { apiKey: 'FAKE_FOREIGN_KEY' } }),
+        );
+        const messages = await collect(
+          invokeSingleCat(makeDeps(), {
+            catId,
+            prompt: 'fixture',
+            userId: 'fixture-owner',
+            threadId: 'fixture-thread',
+            isLastCat: true,
+            service: {
+              l0CompilerFn: dummyL0CompilerFn,
+              async *invoke() {
+                invoked++;
+                yield { type: 'done', catId, timestamp: Date.now() };
+              },
+            },
+          }),
+        );
+        assert.equal(invoked, 0);
+        assert.ok(messages.some((message) => message.type === 'error' && /identity.*incompatible/.test(message.error)));
+      } finally {
+        if (savedRoot === undefined) delete process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
+        else process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = savedRoot;
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(registrySnapshot)) catRegistry.register(id, config);
+        await rmWithRetry(root);
+      }
+    });
+  }
+
   it('F127 P1: preserves explicit bound-account failures instead of masking them as generic resolution errors', async () => {
     const root = await mkdtemp(join(tmpdir(), 'f127-bound-account-missing-'));
     const apiDir = join(root, 'packages', 'api');
@@ -7358,8 +8447,9 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       await writeFile(join(mcpDir, entry), '// stub split server', 'utf-8');
     }
 
-    // Create a subscription-mode profile (no API key)
+    // OpenCode owns this native subscription; the model provider is Anthropic.
     const subscriptionProfile = await createProviderProfile(root, {
+      clientId: 'opencode',
       provider: 'anthropic',
       name: 'claude-subscription',
       mode: 'subscription',
@@ -7856,6 +8946,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
 
     const oaiProfile = await createProviderProfile(root, {
+      clientId: 'openai',
       provider: 'anthropic',
       name: 'openai-compat',
       mode: 'api_key',
@@ -8791,7 +9882,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(optionsSeen[0]?.workingDirectory, projectRoot);
   });
 
-  it('reads external-project governance from the persistent workspace when invoked from a runtime checkout', async () => {
+  it('invokes an uninitialized external project from a runtime checkout without writing governance files', async () => {
     const previousCwd = process.cwd();
     const previousRuntimeRoot = process.env.CAT_CAFE_RUNTIME_ROOT;
     const previousWorkspaceRoot = process.env.CAT_CAFE_WORKSPACE_ROOT;
@@ -8806,8 +9897,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     process.env.CAT_CAFE_WORKSPACE_ROOT = workspaceRoot;
     process.chdir(runtimeRoot);
 
-    const bootstrap = new GovernanceBootstrapService(workspaceRoot);
-    await bootstrap.bootstrap(externalProject, { dryRun: false });
+    const beforeEntries = await readdir(externalProject);
 
     let invokedService = false;
     const service = {
@@ -8837,12 +9927,13 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         }),
       );
 
-      assert.equal(invokedService, true, 'the initialized external project should reach the agent service');
+      assert.equal(invokedService, true, 'an uninitialized external project should reach the agent service');
       assert.equal(
         msgs.some((m) => m.type === 'system_info' && m.content?.includes('governance_blocked')),
         false,
-        'dispatch must read the registry written under the persistent workspace',
+        'governance installation is not a dispatch readiness gate',
       );
+      assert.deepStrictEqual(await readdir(externalProject), beforeEntries, 'dispatch must not materialize governance');
     } finally {
       process.chdir(previousCwd);
       if (previousRuntimeRoot === undefined) delete process.env.CAT_CAFE_RUNTIME_ROOT;
@@ -9281,8 +10372,8 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     );
   });
 
-  it('bug-fix: account resolution uses runtime root (process.cwd()), not thread.projectPath', async () => {
-    // Regression: thread.projectPath points to dev worktree which lacks runtime-only accounts.
+  it('F302: sidecar-free external project resolves bound accounts from the runtime root', async () => {
+    // Regression: thread.projectPath points to an external repository with no Clowder AI sidecar.
     // Account resolution must always use process.cwd() (the runtime root).
     const { createProviderProfile } = await import('./helpers/create-test-account.js');
 
@@ -9292,16 +10383,11 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     await mkdir(runtimeApiDir, { recursive: true });
     await writeFile(join(runtimeRoot, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
 
-    // devRoot = where thread.projectPath points (missing the custom account)
+    // devRoot = where thread.projectPath points (no .cat-cafe directory at all)
     const devRoot = await mkdtemp(join(tmpdir(), 'account-dev-root-'));
     const devApiDir = join(devRoot, 'packages', 'api');
     await mkdir(devApiDir, { recursive: true });
     await writeFile(join(devRoot, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
-    // Write a minimal catalog in devRoot WITHOUT the custom account
-    const devCatCafe = join(devRoot, '.cat-cafe');
-    await mkdir(devCatCafe, { recursive: true });
-    await writeFile(join(devCatCafe, 'cat-catalog.json'), JSON.stringify({ accounts: {} }), 'utf-8');
-
     // Create the custom account only in runtimeRoot
     const customProfile = await createProviderProfile(runtimeRoot, {
       provider: 'openai',

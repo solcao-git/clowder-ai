@@ -1,10 +1,11 @@
-import type { MeetingIntake, MeetingIntakeChoices } from '@cat-cafe/shared';
+import type { MeetingArtifactDescriptor, MeetingIntake, MeetingIntakeChoices } from '@cat-cafe/shared';
 import { MeetingIntakeError } from './errors.js';
+import { createMeetingArtifactDescriptor } from './MeetingArtifactResourceService.js';
 import type { MeetingIntakeService } from './MeetingIntakeService.js';
 import type { MeetingIntakeStore } from './MeetingIntakeStore.js';
 import type { SourceAccessLeaseService } from './SourceAccessLeaseService.js';
 
-export interface MeetingArtifact {
+export interface ResolvedMeetingArtifact {
   readonly contentType: 'text/plain';
   readonly text: string;
   readonly provenance: {
@@ -15,7 +16,20 @@ export interface MeetingArtifact {
 }
 
 export interface MeetingArtifactDispatcher {
-  deliver(input: { readonly intake: MeetingIntake; readonly artifact: MeetingArtifact }): Promise<void>;
+  deliver(input: { readonly intake: MeetingIntake; readonly artifact: MeetingArtifactDescriptor }): Promise<void>;
+  retryPresentation(input: {
+    readonly intake: MeetingIntake;
+    readonly clientRequestId: string;
+  }): Promise<MeetingPresentationRetryReceipt>;
+}
+
+export interface MeetingPresentationRetryReceipt {
+  readonly sourceMessageId: string;
+  readonly triggerMessageId: string;
+  readonly queueEntryId: string | null;
+  readonly opportunityId: string;
+  readonly targetCatId: string;
+  readonly deduped: boolean;
 }
 
 export interface MeetingIntakeActionServiceOptions {
@@ -90,7 +104,7 @@ export class MeetingIntakeActionService {
     const current = await this.requireOwner(ownerId, intakeId, expectedRevision);
     if (
       !current.repair ||
-      current.repair.action !== 'retry' ||
+      (current.repair.action !== 'retry' && current.repair.action !== 'regrant') ||
       current.judgmentState !== 'confirmed' ||
       current.executionState !== 'failed'
     ) {
@@ -108,6 +122,36 @@ export class MeetingIntakeActionService {
     return this.executeFromSource(ownerId, intakeId, queued.revision);
   }
 
+  async retryPresentation(
+    ownerId: string,
+    intakeId: string,
+    expectedRevision: number,
+    clientRequestId: string,
+  ): Promise<{ readonly intake: MeetingIntake; readonly presentationRetry: MeetingPresentationRetryReceipt }> {
+    const current = await this.requireOwner(ownerId, intakeId, expectedRevision);
+    if (
+      current.judgmentState !== 'confirmed' ||
+      current.executionState !== 'succeeded' ||
+      current.healthState !== 'healthy' ||
+      current.sourceState !== 'ready' ||
+      !current.choices.destinationHandle
+    ) {
+      throw new MeetingIntakeError('INVALID_TRANSITION', 'meeting intake has not completed successfully');
+    }
+    try {
+      const presentationRetry = await this.options.dispatcher.retryPresentation({ intake: current, clientRequestId });
+      return { intake: current, presentationRetry };
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
+      throw new MeetingIntakeError(
+        code === 'ROUTE_UNAVAILABLE' ? 'DESTINATION_UNAVAILABLE' : 'EXECUTION_FAILED',
+        code === 'ROUTE_UNAVAILABLE'
+          ? 'meeting write-opportunity presentation is unavailable'
+          : 'meeting write-opportunity presentation retry failed',
+      );
+    }
+  }
+
   async markSourceDeleted(ownerId: string, intakeId: string, expectedRevision: number): Promise<MeetingIntake> {
     const current = await this.requireOwner(ownerId, intakeId, expectedRevision);
     return this.fail(current, 'source_deleted');
@@ -117,33 +161,35 @@ export class MeetingIntakeActionService {
     ownerId: string,
     intakeId: string,
     expectedRevision: number,
-    transcript: string,
+    sourceHandle: string,
   ): Promise<MeetingIntake> {
     const current = await this.requireOwner(ownerId, intakeId, expectedRevision);
     if (
       current.repair?.action !== 'manual_import' ||
       current.judgmentState !== 'confirmed' ||
       current.executionState !== 'failed' ||
-      transcript.trim().length === 0 ||
-      Buffer.byteLength(transcript, 'utf8') > 2_000_000
+      !sourceHandle.startsWith('feishu://meeting-artifacts/') ||
+      !this.options.sources.supports(sourceHandle)
     ) {
-      throw new MeetingIntakeError('INVALID_TRANSITION', 'manual transcript import is unavailable or invalid');
+      throw new MeetingIntakeError('INVALID_TRANSITION', 'manual meeting source reference is unavailable or invalid');
     }
-    return this.executeArtifact(current, {
-      contentType: 'text/plain',
-      text: transcript,
-      provenance: {
-        sourceHandle: `host:manual-import:${intakeId}`,
-        trust: 'untrusted_external',
-        instructionPolicy: 'data_only',
-      },
+    const rebound = await this.write(current, {
+      ...current,
+      source: { handle: sourceHandle },
+      artifact: undefined,
+      sourceState: 'ready',
+      executionState: 'queued',
+      repair: undefined,
+      revision: current.revision + 1,
+      updatedAt: this.now(),
     });
+    return this.executeFromSource(ownerId, intakeId, rebound.revision);
   }
 
   private async executeFromSource(ownerId: string, intakeId: string, expectedRevision: number): Promise<MeetingIntake> {
     const current = await this.requireOwner(ownerId, intakeId, expectedRevision);
     const running = await this.start(current);
-    let artifact: MeetingArtifact;
+    let resolved: ResolvedMeetingArtifact;
     try {
       const principalId = `meeting-intake:${running.intakeId}`;
       const lease = await this.options.sources.issue({
@@ -151,19 +197,26 @@ export class MeetingIntakeActionService {
         principalId,
         purpose: 'transcript',
       });
-      artifact = await this.options.sources.resolve(
+      resolved = await this.options.sources.resolve(
         { intakeId: running.intakeId, principalId, purpose: 'transcript', grant: lease.grant },
         new AbortController().signal,
       );
     } catch (error) {
       return this.fail(running, sourceFailure(error));
     }
-    return this.finish(running, async () => this.options.dispatcher.deliver({ intake: running, artifact }));
-  }
-
-  private async executeArtifact(current: MeetingIntake, artifact: MeetingArtifact): Promise<MeetingIntake> {
-    const running = await this.start(current);
-    return this.finish(running, async () => this.options.dispatcher.deliver({ intake: running, artifact }));
+    const artifact = createMeetingArtifactDescriptor({
+      intakeId: running.intakeId,
+      sourceHandle: resolved.provenance.sourceHandle,
+      contentType: resolved.contentType,
+      text: resolved.text,
+    });
+    const bound = await this.write(running, {
+      ...running,
+      artifact,
+      revision: running.revision + 1,
+      updatedAt: this.now(),
+    });
+    return this.finish(bound, async () => this.options.dispatcher.deliver({ intake: bound, artifact }));
   }
 
   private async start(current: MeetingIntake): Promise<MeetingIntake> {

@@ -107,6 +107,17 @@ ${DEFAULT_TTL_SECONDS > 0 ? `redis.call('SET', KEYS[2], ARGV[1], 'EX', ${DEFAULT
 return {'bound', oldCli}
 `;
 
+const BIND_CLI_IF_UNBOUND_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('HGET', KEYS[1], 'status') ~= 'active' then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'cliSessionId') == 1 then return 0 end
+local claimedBy = redis.call('GET', KEYS[2])
+if claimedBy and claimedBy ~= ARGV[1] then return 0 end
+redis.call('HSET', KEYS[1], 'cliSessionId', ARGV[2], 'updatedAt', ARGV[3])
+${DEFAULT_TTL_SECONDS > 0 ? `redis.call('SET', KEYS[2], ARGV[1], 'EX', ${DEFAULT_TTL_SECONDS})` : `redis.call('SET', KEYS[2], ARGV[1])`}
+return 1
+`;
+
 const COMPARE_DELETE_LUA = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
 return 0
@@ -207,7 +218,15 @@ if matched and redis.call('HGET', KEYS[1], 'appliedPolicyStrategy') == 'hybrid'
   and redis.call('HGET', KEYS[1], 'hybridPolicyRevision') == ARGV[1] then
   hybridCount = tostring(redis.call('HINCRBY', KEYS[1], 'hybridObservedCount', 1))
 end
-redis.call('HSET', KEYS[1], 'updatedAt', ARGV[2])
+local sequence = lifetime ~= '' and lifetime or hybridCount
+if sequence == '' then
+  sequence = tostring(redis.call('HINCRBY', KEYS[1], 'compressionObservationSequence', 1))
+end
+redis.call('HSET', KEYS[1],
+  'compressionObservationInvocationId', ARGV[2],
+  'compressionObservationSequence', sequence,
+  'compressionObservationObservedAt', ARGV[3])
+redis.call('HSET', KEYS[1], 'updatedAt', ARGV[3])
 return {'recorded', lifetime, hybridCount, matched and '1' or '0'}
 `;
 
@@ -224,6 +243,57 @@ if redis.call('HEXISTS', KEYS[1], 'compressionCount') == 0 then return -3 end
 local newCount = redis.call('HINCRBY', KEYS[1], 'compressionCount', 1)
 redis.call('HSET', KEYS[1], 'updatedAt', ARGV[1])
 return newCount
+`;
+
+/**
+ * #1382 maintainer P1: atomically merge a provenance note into the stored
+ * capacityPin. The script re-reads the CURRENT pin inside the same Redis
+ * execution, so a delayed writer can never undo a concurrent shrink by
+ * writing back a stale pin object. Dedup lives here: an already-present note
+ * is not re-appended. KEYS[1] = detail key; ARGV[1] = note; ARGV[2] =
+ * updatedAt. Returns 1 when appended, 0 when skipped.
+ */
+const APPEND_CAPACITY_PIN_PROVENANCE_LUA = `
+local data = redis.call('HGET', KEYS[1], 'capacityPin')
+if not data then return 0 end
+local ok, pin = pcall(cjson.decode, data)
+if not ok or type(pin) ~= 'table' or type(pin['provenance']) ~= 'string' then return 0 end
+if string.find(pin['provenance'], ARGV[1], 1, true) then return 0 end
+-- #1382 review P2: semantic dedup — a jittered report number replaces the
+-- previous recovery note in place (one pin carries at most one recovery
+-- instruction) instead of growing provenance unbounded.
+local pattern = "; carrier now reports [%d,]+ tokens .-seal the session to recover if this pin was polluted"
+local replaced, count = string.gsub(pin['provenance'], pattern, ARGV[1], 1)
+if count == 0 then
+  pin['provenance'] = pin['provenance'] .. ARGV[1]
+else
+  pin['provenance'] = replaced
+end
+redis.call('HSET', KEYS[1], 'capacityPin', cjson.encode(pin), 'updatedAt', ARGV[2])
+return 1
+`;
+
+/**
+ * #1382 maintainer P1: atomic shrink-only pin application. The candidate is
+ * written only when no usable pin is stored or its windowTokens is <= the
+ * CURRENT stored pin's — a stored smaller constraint is never overwritten by
+ * a delayed larger candidate. KEYS[1] = detail key; ARGV[1] = candidate JSON;
+ * ARGV[2] = updatedAt. Returns 1 when written, 0 when the stored pin already
+ * constrains harder, -1 when the record is missing.
+ */
+const SHRINK_CAPACITY_PIN_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local data = redis.call('HGET', KEYS[1], 'capacityPin')
+if data then
+  local ok, current = pcall(cjson.decode, data)
+  local candidate = cjson.decode(ARGV[1])
+  if ok and type(current) == 'table' and type(current['windowTokens']) == 'number'
+     and current['windowTokens'] > 0 and candidate['windowTokens'] > current['windowTokens'] then
+    return 0
+  end
+end
+redis.call('HSET', KEYS[1], 'capacityPin', ARGV[1], 'updatedAt', ARGV[2])
+return 1
 `;
 
 export class RedisSessionChainStore implements ISessionChainStore {
@@ -372,6 +442,19 @@ export class RedisSessionChainStore implements ISessionChainStore {
     return this.get(id);
   }
 
+  async bindCliSessionIdIfUnbound(id: string, cliSessionId: string): Promise<SessionRecord | null> {
+    const result = await this.redis.eval(
+      BIND_CLI_IF_UNBOUND_LUA,
+      2,
+      SessionChainKeys.detail(id),
+      SessionChainKeys.byCli(cliSessionId),
+      id,
+      cliSessionId,
+      String(Date.now()),
+    );
+    return Number(result) === 1 ? this.get(id) : null;
+  }
+
   async applyPolicySnapshot(id: string, snapshot: SessionPolicySnapshot): Promise<SessionRecord | null> {
     const result = await this.redis.eval(
       APPLY_POLICY_LUA,
@@ -386,13 +469,19 @@ export class RedisSessionChainStore implements ISessionChainStore {
     return Number(result) === 1 ? this.get(id) : null;
   }
 
-  async recordCompressionEvent(id: string, policyRevision: string): Promise<CompressionEventResult | null> {
+  async recordCompressionEvent(
+    id: string,
+    policyRevision: string,
+    invocationId: string,
+  ): Promise<CompressionEventResult | null> {
+    const observedAt = Date.now();
     const result = (await this.redis.eval(
       RECORD_COMPRESSION_LUA,
       1,
       SessionChainKeys.detail(id),
       policyRevision,
-      String(Date.now()),
+      invocationId,
+      String(observedAt),
     )) as [string, string?, string?, string?];
     if (result[0] !== 'recorded') return null;
     const record = await this.get(id);
@@ -730,6 +819,30 @@ export class RedisSessionChainStore implements ISessionChainStore {
     return code < 0 ? null : code;
   }
 
+  async appendCapacityPinProvenance(id: string, note: string): Promise<SessionRecord | null> {
+    const detailKey = SessionChainKeys.detail(id);
+    // Lua: atomic read-merge-write against the CURRENT stored pin (see the
+    // script comment) — a concurrent shrink is never undone by stale numerics.
+    const result = await this.redis.eval(APPEND_CAPACITY_PIN_PROVENANCE_LUA, 1, detailKey, note, String(Date.now()));
+    if ((result as number) !== 1) return null;
+    return this.get(id);
+  }
+
+  async shrinkCapacityPin(id: string, candidate: SessionCapacityPin): Promise<SessionRecord | null> {
+    const detailKey = SessionChainKeys.detail(id);
+    // Lua: atomic compare-and-write — the candidate lands only when it does
+    // not expand beyond the CURRENT stored pin (one-way pin invariant).
+    const result = await this.redis.eval(
+      SHRINK_CAPACITY_PIN_LUA,
+      1,
+      detailKey,
+      JSON.stringify(candidate),
+      String(Date.now()),
+    );
+    if ((result as number) < 0) return null;
+    return this.get(id);
+  }
+
   async listSealingSessions(): Promise<string[]> {
     const detailKeys = await this.scanKeys('session:*');
     if (detailKeys.length === 0) return [];
@@ -773,6 +886,16 @@ export class RedisSessionChainStore implements ISessionChainStore {
             startedAt: data.hybridStartedAt,
           }
         : undefined;
+    const compressionObservation =
+      data.compressionObservationInvocationId &&
+      data.compressionObservationSequence &&
+      data.compressionObservationObservedAt
+        ? {
+            invocationId: data.compressionObservationInvocationId,
+            sequence: parseInt(data.compressionObservationSequence, 10),
+            observedAt: parseInt(data.compressionObservationObservedAt, 10),
+          }
+        : undefined;
     const consecutiveRestoreFailures = data.consecutiveRestoreFailures
       ? parseInt(data.consecutiveRestoreFailures, 10)
       : undefined;
@@ -792,6 +915,7 @@ export class RedisSessionChainStore implements ISessionChainStore {
       ...(lastUsage ? { lastUsage } : {}),
       messageCount: parseInt(data.messageCount ?? '0', 10),
       compressionCount,
+      ...(compressionObservation ? { compressionObservation } : {}),
       ...(sealReason ? { sealReason } : {}),
       ...(sealedAt ? { sealedAt } : {}),
       ...(appliedPolicy ? { appliedPolicy } : {}),

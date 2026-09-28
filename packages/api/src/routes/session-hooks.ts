@@ -11,16 +11,17 @@
  * corresponding Clowder AI SessionRecord via `getByCliSessionId()`.
  */
 
-import type { SessionRecord } from '@cat-cafe/shared';
-import type { FastifyInstance, FastifyPluginOptions } from 'fastify';
+import type { FastifyInstance, FastifyPluginOptions, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import {
-  completeCapsuleForCompact,
-  isCollaborationContinuityCapsuleV1,
-} from '../domains/cats/services/agents/invocation/CollaborationContinuityCapsule.js';
 import type { ISessionSealer } from '../domains/cats/services/session/SessionSealer.js';
 import type { TranscriptReader } from '../domains/cats/services/session/TranscriptReader.js';
 import type { ISessionChainStore } from '../domains/cats/services/stores/ports/SessionChainStore.js';
+import {
+  type CallbackAuthRegistry,
+  registerCallbackAuthHook,
+  requireCallbackAuth,
+} from './callback-auth-prehandler.js';
+import { createSessionCompactionSurface, type SessionCompactionSurfaceDeps } from './session-compaction-surface.js';
 
 const sealSchema = z.object({
   cliSessionId: z.string().min(1).max(500),
@@ -33,51 +34,58 @@ const sopBookmarkSchema = z.object({
   sopStage: z.string().min(1).max(100),
 });
 
-interface SessionHooksRouteOptions extends FastifyPluginOptions {
+interface SessionHooksRouteOptions extends FastifyPluginOptions, SessionCompactionSurfaceDeps {
   sessionChainStore: ISessionChainStore;
   sessionSealer: ISessionSealer;
   transcriptReader: TranscriptReader;
-  /** Shared secret for hook authentication. If set, X-Cat-Cafe-Hook-Token header is required. */
-  hookToken?: string;
+  /** Invocation-scoped callback authority shared with the managed Claude child. */
+  callbackRegistry: CallbackAuthRegistry;
+}
+
+function cliSessionIdFromHookRequest(request: FastifyRequest): string | undefined {
+  const body = request.body && typeof request.body === 'object' ? (request.body as Record<string, unknown>) : undefined;
+  const query =
+    request.query && typeof request.query === 'object' ? (request.query as Record<string, unknown>) : undefined;
+  if (typeof body?.cliSessionId === 'string') return body.cliSessionId;
+  return typeof query?.cliSessionId === 'string' ? query.cliSessionId : undefined;
+}
+
+function invocationOwnsSession(
+  invocation: { userId: string; catId: string; threadId: string },
+  session: { userId: string; catId: string; threadId: string },
+): boolean {
+  return (
+    session.userId === invocation.userId &&
+    session.catId === invocation.catId &&
+    session.threadId === invocation.threadId
+  );
 }
 
 export async function sessionHooksRoutes(app: FastifyInstance, opts: SessionHooksRouteOptions): Promise<void> {
-  const { sessionChainStore, sessionSealer, transcriptReader, hookToken } = opts;
+  const { sessionChainStore, sessionSealer, callbackRegistry } = opts;
+  const compactionSurface = createSessionCompactionSurface({
+    ...opts,
+    hookAuthenticationReady: () => callbackRegistry.isStartupRecoveryComplete?.() !== false,
+  });
 
-  function compactContinuityFor(record: SessionRecord) {
-    const capsule = completeCapsuleForCompact(record.continuityCapsule, { createdAt: Date.now() });
-    if (!capsule) return undefined;
-    return {
-      capsule,
-      diagnostics: {
-        source: 'active_session_route_state',
-        boundary: 'compact_boundary',
-        generated: true,
-        threadId: record.threadId,
-        catId: record.catId,
-        sessionId: record.id,
-        compressionCount: record.compressionCount,
-      },
-    };
-  }
-
-  // Hook authentication guard — fail-closed: always requires valid token
-  app.addHook('onRequest', async (request, reply) => {
-    if (!hookToken) {
-      reply.status(503);
-      reply.send({ error: 'Hook authentication not configured (set CAT_CAFE_HOOK_TOKEN)' });
-      return;
-    }
-    const provided = request.headers['x-cat-cafe-hook-token'];
-    if (provided !== hookToken) {
-      reply.status(401);
-      reply.send({ error: 'Invalid or missing hook token' });
+  registerCallbackAuthHook(app, callbackRegistry, { enforceToolExecutionPolicy: false });
+  app.addHook('preHandler', async (request, reply) => {
+    const invocation = requireCallbackAuth(request, reply);
+    if (!invocation) return;
+    const cliSessionId = cliSessionIdFromHookRequest(request);
+    if (!cliSessionId) return;
+    const session = await sessionChainStore.getByCliSessionId(cliSessionId);
+    if (!session) return;
+    if (!invocationOwnsSession(invocation, session)) {
+      reply.status(403).send({ error: 'session_hook_scope_mismatch' });
     }
   });
 
   // POST /api/sessions/seal — Hook-triggered session seal
   // Called by f24-pre-compact.sh before Claude Code context compression.
   app.post('/api/sessions/seal', async (request, reply) => {
+    const invocation = requireCallbackAuth(request, reply);
+    if (!invocation) return;
     const parseResult = sealSchema.safeParse(request.body);
     if (!parseResult.success) {
       reply.status(400);
@@ -115,18 +123,29 @@ export async function sessionHooksRoutes(app: FastifyInstance, opts: SessionHook
           status: 'unavailable',
           missingCapabilities: ['managed_invocation_boundary'],
         },
+        contextEpoch: {
+          status: 'unsupported',
+          reason: 'managed_invocation_boundary_unavailable',
+        },
       });
     }
 
     // Atomically update lifetime telemetry (when its origin is known) and the
     // revision-scoped hybrid counter. A concurrent policy revision makes the
     // event stale instead of attributing it to the new epoch.
-    const observed = await sessionChainStore.recordCompressionEvent(record.id, policy.revision);
+    const observed = await sessionChainStore.recordCompressionEvent(
+      record.id,
+      policy.revision,
+      invocation.invocationId,
+    );
     if (!observed) {
       reply.status(409);
       return { error: 'Session disappeared during compression observation (race)', sessionId: record.id };
     }
     const updated = await sessionChainStore.get(record.id);
+    const contextEpoch = updated
+      ? await compactionSurface.observeAuthoritativeCompaction(updated, 'claude_precompact_hook')
+      : { status: 'unsupported' as const, reason: 'session_record_unavailable' as const };
 
     if (!observed.revisionMatched) {
       return reply.send({
@@ -137,6 +156,7 @@ export async function sessionHooksRoutes(app: FastifyInstance, opts: SessionHook
         strategy: policy.config.strategy,
         policyRevision: policy.revision,
         ...(updated?.appliedPolicy ? { activePolicyRevision: updated.appliedPolicy.revision } : {}),
+        contextEpoch,
       });
     }
 
@@ -160,7 +180,8 @@ export async function sessionHooksRoutes(app: FastifyInstance, opts: SessionHook
           ...(strategy.strategy === 'hybrid' ? { maxCompressions } : {}),
           strategy: strategy.strategy,
           executionStatus: policy.execution,
-          ...(updated ? { continuity: compactContinuityFor(updated) } : {}),
+          ...(updated ? { continuity: compactionSurface.compactContinuityFor(updated) } : {}),
+          contextEpoch,
         });
       }
     }
@@ -208,91 +229,11 @@ export async function sessionHooksRoutes(app: FastifyInstance, opts: SessionHook
       status: 'sealing',
       strategy: strategy.strategy,
       executionStatus: policy.execution,
+      contextEpoch,
     });
   });
 
-  // GET /api/sessions/latest-digest — Get the latest sealed session's digest
-  // Called by f24-post-compact-bootstrap.sh to inject context after compression.
-  app.get<{
-    Querystring: { cliSessionId?: string };
-  }>('/api/sessions/latest-digest', async (request, reply) => {
-    const { cliSessionId } = request.query;
-    if (!cliSessionId) {
-      reply.status(400);
-      return { error: 'cliSessionId query parameter required' };
-    }
-
-    // Look up the session record to find catId + threadId
-    const record = await sessionChainStore.getByCliSessionId(cliSessionId);
-    if (!record) {
-      reply.status(404);
-      return { error: 'No session found for this CLI session ID' };
-    }
-
-    const hasObservedCompact =
-      (record.compressionCount !== null && record.compressionCount > 0) ||
-      (record.hybridProgress?.observedCount ?? 0) > 0;
-    const activeCompactContinuity =
-      record.status === 'active' && hasObservedCompact ? compactContinuityFor(record) : undefined;
-    if (activeCompactContinuity) {
-      return reply.send({
-        sessionId: record.id,
-        status: record.status,
-        seq: record.seq,
-        catId: record.catId,
-        threadId: record.threadId,
-        digest: null,
-        continuity: activeCompactContinuity,
-      });
-    }
-
-    // Get the full chain for this cat+thread, find the latest sealed session
-    const chain = await sessionChainStore.getChain(record.catId, record.threadId, record.userId);
-    const sealedSessions = chain
-      .filter((s) => s.status === 'sealed' && s.sealedAt != null)
-      .sort((a, b) => (b.sealedAt ?? 0) - (a.sealedAt ?? 0));
-
-    if (sealedSessions.length === 0) {
-      reply.status(404);
-      return { error: 'No sealed sessions found' };
-    }
-
-    const latest = sealedSessions[0]!;
-
-    // Read extractive digest
-    const digest = await transcriptReader.readDigest(latest.id, latest.threadId, latest.catId);
-    if (!digest) {
-      reply.status(404);
-      return { error: 'Digest not found for latest sealed session' };
-    }
-    const sealedCapsule = isCollaborationContinuityCapsuleV1(digest.continuityCapsule)
-      ? digest.continuityCapsule
-      : undefined;
-
-    return reply.send({
-      sessionId: latest.id,
-      seq: latest.seq,
-      catId: latest.catId,
-      threadId: latest.threadId,
-      sealedAt: latest.sealedAt,
-      digest,
-      ...(sealedCapsule
-        ? {
-            continuity: {
-              capsule: sealedCapsule,
-              diagnostics: {
-                source: 'sealed_session_digest',
-                boundary: sealedCapsule.continuationReason,
-                generated: true,
-                threadId: latest.threadId,
-                catId: latest.catId,
-                sessionId: latest.id,
-              },
-            },
-          }
-        : {}),
-    });
-  });
+  compactionSurface.registerLatestDigestRoute(app);
 
   // --- F073 P4: SOP stage bookmark ---
   // In-memory store (process-scoped). Replaces /tmp/ file bookmark for AC-14.
@@ -309,6 +250,10 @@ export async function sessionHooksRoutes(app: FastifyInstance, opts: SessionHook
       return { error: 'Invalid request body', details: parsed.error.issues };
     }
     const { cliSessionId, skill, sopStage } = parsed.data;
+    if (!(await sessionChainStore.getByCliSessionId(cliSessionId))) {
+      reply.status(404);
+      return { error: 'No session found for this CLI session ID' };
+    }
     const now = new Date(Date.now()).toISOString();
     sopBookmarks.set(cliSessionId, { skill, sopStage, recordedAt: now });
 
@@ -331,6 +276,10 @@ export async function sessionHooksRoutes(app: FastifyInstance, opts: SessionHook
     if (!cliSessionId) {
       reply.status(400);
       return { error: 'cliSessionId query parameter required' };
+    }
+    if (!(await sessionChainStore.getByCliSessionId(cliSessionId))) {
+      reply.status(404);
+      return { error: 'No session found for this CLI session ID' };
     }
     const bookmark = sopBookmarks.get(cliSessionId);
     if (!bookmark) {

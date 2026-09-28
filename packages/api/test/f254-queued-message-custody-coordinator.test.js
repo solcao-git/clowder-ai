@@ -4,6 +4,7 @@ import { describe, test } from 'node:test';
 import { InvocationQueue } from '../dist/domains/cats/services/agents/invocation/InvocationQueue.js';
 import {
   createInitialCrossThreadQueuedMessageCustody,
+  createInitialFanoutQueuedMessageCustody,
   createInitialQueuedMessageCustody,
   QueuedMessageCustodyCoordinator,
 } from '../dist/domains/cats/services/agents/invocation/QueuedMessageCustodyCoordinator.js';
@@ -52,6 +53,94 @@ function appendCustodiedMessage(store, queue, entry) {
 }
 
 describe('F254 queued message custody coordinator', () => {
+  test('PR7 refuses to persist an action fence under a different Queue idempotency identity', () => {
+    const queue = new InvocationQueue();
+    const entry = queue.enqueue({
+      idempotencyKey: 'queue-custody:wrong-action-source:codex',
+      ownerAuthProvenance: 'strict',
+      threadId: 'thread-action-identity',
+      userId: 'user-1',
+      content: 'fenced action',
+      source: 'agent',
+      sourceCategory: 'a2a',
+      targetCats: ['codex'],
+      intent: 'execute',
+      autoExecute: true,
+      a2aTriggerMessageId: 'message-action-identity',
+      actionSuccessorFence: {
+        leaseId: 'lease-action-identity',
+        generation: 3,
+        dispatchId: 'cross-post:action-identity',
+      },
+    }).entry;
+
+    assert.throws(
+      () => createInitialFanoutQueuedMessageCustody('message-action-identity', [entry]),
+      /action-successor Queue carrier has mismatched idempotency/,
+    );
+  });
+
+  test('PR7 converges a fan-out sibling after more than three custody CAS conflicts', async () => {
+    const queue = new InvocationQueue();
+    const store = new MessageStore();
+    const entries = ['opus', 'codex'].map((catId) => {
+      const result = queue.enqueue({
+        ownerAuthProvenance: 'unknown',
+        threadId: 'thread-fanout',
+        userId: 'user-1',
+        content: 'same-thread fan-out',
+        source: 'agent',
+        sourceCategory: 'a2a',
+        targetCats: [catId],
+        intent: 'execute',
+        autoExecute: true,
+        callerCatId: 'codex-sol',
+        a2aParentInvocationId: 'parent-fanout',
+        a2aTriggerMessageId: 'message-fanout',
+      });
+      assert.equal(result.outcome, 'enqueued');
+      return result.entry;
+    });
+    const message = store.append({
+      id: 'message-fanout',
+      threadId: 'thread-fanout',
+      userId: 'user-1',
+      catId: 'codex-sol',
+      content: 'same-thread fan-out',
+      mentions: ['opus', 'codex'],
+      timestamp: 100,
+      deliveryStatus: 'queued',
+      queueCustody: createInitialFanoutQueuedMessageCustody('message-fanout', entries, {
+        requestedTargetCats: ['opus', 'codex'],
+        createdAt: 100,
+      }),
+    });
+    for (const entry of entries) {
+      queue.backfillMessageId(entry.threadId, entry.userId, entry.id, message.id);
+    }
+    assert.equal(queue.markProcessingById('thread-fanout', entries[0].id, 'opus'), true);
+    const processing = queue.getEntrySnapshot('thread-fanout', 'user-1', entries[0].id);
+    let transitionCalls = 0;
+    const contendedStore = {
+      getById: (messageId) => store.getById(messageId),
+      transitionQueueCustody(messageId, input) {
+        transitionCalls += 1;
+        if (transitionCalls <= 3) {
+          return { kind: 'revision_mismatch', actualRevision: input.expectedRevision };
+        }
+        return store.transitionQueueCustody(messageId, input);
+      },
+    };
+    const coordinator = new QueuedMessageCustodyCoordinator({ messageStore: contendedStore });
+
+    assert.deepEqual(await coordinator.persistEntry(processing), [message.id]);
+    assert.equal(transitionCalls, 4, 'the fourth linearization attempt must remain reachable');
+    assert.deepEqual(store.getById(message.id).queueCustody.carrierStateByTargetCatId, {
+      opus: { status: 'processing', processingStartedAt: processing.processingStartedAt },
+      codex: { status: 'queued' },
+    });
+  });
+
   test('replay fence treats terminal truth in any coalesced source as a no-reentry boundary', async () => {
     const queue = new InvocationQueue();
     const store = new MessageStore();
@@ -308,6 +397,72 @@ describe('F254 queued message custody coordinator', () => {
     );
   });
 
+  test('retires only the durable Queue target bound to the exact completed action fence', async () => {
+    const queue = new InvocationQueue();
+    const store = new MessageStore();
+    const message = store.append({
+      threadId: 'thread-1',
+      userId: 'user-1',
+      catId: 'fable5',
+      content: 'review exact HEAD',
+      mentions: ['codex-sol'],
+      timestamp: 100,
+      deliveryStatus: 'queued',
+      extra: { crossPost: { sourceThreadId: 'thread-source' } },
+    });
+    const exactFence = {
+      leaseId: 'lease-head-a',
+      generation: 4,
+      dispatchId: 'dispatch-head-a',
+      terminalPredicateDigest: 'digest-head-a',
+      invocationLineageRef: 'dispatch:dispatch-head-a',
+    };
+    const entries = [['codex-sol', exactFence]].map(([catId, actionSuccessorFence]) => {
+      const result = queue.enqueue({
+        ownerAuthProvenance: 'unknown',
+        threadId: 'thread-1',
+        userId: 'user-1',
+        content: message.content,
+        source: 'agent',
+        sourceCategory: 'a2a',
+        targetCats: [catId],
+        intent: 'review',
+        autoExecute: true,
+        callerCatId: 'fable5',
+        a2aParentInvocationId: 'parent-1',
+        a2aTriggerMessageId: message.id,
+        idempotencyKey: `action:${actionSuccessorFence.leaseId}:${actionSuccessorFence.generation}:${catId}`,
+        actionSuccessorFence,
+      });
+      assert.equal(result.outcome, 'enqueued');
+      queue.backfillMessageId('thread-1', 'user-1', result.entry.id, message.id);
+      return queue.getEntrySnapshot('thread-1', 'user-1', result.entry.id);
+    });
+    assert.equal(
+      store.initializeQueueCustody(message.id, createInitialCrossThreadQueuedMessageCustody(message.id, entries)).kind,
+      'initialized',
+    );
+    const retiredAt = entries[0].createdAt + 100;
+    const coordinator = new QueuedMessageCustodyCoordinator({ messageStore: store, now: () => retiredAt });
+
+    const mismatch = await coordinator.retireActionSuccessorFence(message.id, {
+      ...exactFence,
+      leaseId: 'lease-head-b',
+    });
+    assert.equal(mismatch, null);
+    assert.deepEqual(store.getById(message.id).queueCustody.pendingTargetCats, ['codex-sol']);
+    const first = await coordinator.retireActionSuccessorFence(message.id, exactFence);
+    const replay = await coordinator.retireActionSuccessorFence(message.id, exactFence);
+    const custody = store.getById(message.id).queueCustody;
+
+    assert.equal(first.changed, true);
+    assert.equal(replay.changed, false);
+    assert.deepEqual(custody.pendingTargetCats, []);
+    assert.deepEqual(custody.withdrawnByCatIds, ['codex-sol']);
+    assert.equal(custody.carrierByTargetCatId['codex-sol'].actionSuccessorFence.leaseId, 'lease-head-a');
+    assert.deepEqual(custody.actionSuccessorTerminalFenceByTargetCatId['codex-sol'], exactFence);
+  });
+
   test('builds initial custody from the exact live Queue identity', () => {
     const queue = new InvocationQueue();
     const entry = enqueueUser(queue, ['opus', 'codex'], 'strict');
@@ -316,6 +471,7 @@ describe('F254 queued message custody coordinator', () => {
       version: 1,
       entryId: entry.id,
       revision: 1,
+      ownerUserId: 'user-1',
       intent: 'implement',
       ownerAuthProvenance: 'strict',
       status: 'queued',

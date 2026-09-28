@@ -984,9 +984,10 @@ created: 2026-02-26
   2. `CAT_CAFE_RUNTIME_RESTART_OK=1` 显式授权才放行
   3. 新增 `scripts/review-start.sh`（`pnpm review:start`）：review 验证统一入口，自动分配 3201/3202 端口、内存 Redis、review 沙盒路径
   4. review 模板新增"沙盒路径 + 启动命令 + 实际端口"必填字段
+- 2026-09-10 纠正：第 2 条环境变量放行被证明不能表达授权——任意调用者都能设置它，反而让跨 worktree 归属检查失效。该 bypass 已移除；变量取值为 0 或 1 都不能放行 foreign/unknown PID。runtime 的显式生命周期动作只作用于 daemon state 验证出的同一部署，版本一致性检查与行动授权也明确分离。
 - 防护：
   1. `start-dev.sh` 端口归属 guard（基于进程 cwd，不硬编码端口号）——任何端口冲突都能防
-  2. 回归测试覆盖"默认拒绝跨 worktree kill"和"显式授权放行"两条路径
+  2. 回归测试覆盖环境变量未设置、0、1 时都拒绝跨 worktree/unknown PID
   3. `pnpm review:start` 统一入口消除"在哪启动、用什么端口"的歧义
   4. request-review 模板强制证据字段（reviewer 必须填沙盒路径和端口）
 - 来源锚点：
@@ -1135,11 +1136,12 @@ created: 2026-02-26
 
 ### LL-055: spawn 出的"长尾 child runtime"必须能脱离 parent 自动死亡
 - 状态：draft
-- 更新时间：2026-05-09（src extension）
+- 更新时间：2026-08-30（F294 controlled-contention recurrence）
 
 - 坑：两次同模式踩坑，1 天内连续暴露——
   1. **Test infra（首次）**：`process-liveness-probe.test.js` spawn `node -e while(true){}` 作为 busy CPU child；测试异常退出（runner timeout / 用户 Ctrl+C / `pnpm gate` 中断）时漏掉 child cleanup，每次泄漏一只 PPID=1 孤儿进程。累积 4 只时占满 ~270% CPU，导致 runtime `pnpm dev:direct` 在 20s 超时窗口内起不来 3002，看起来像"启动超时 + tsx Force killing"诡异连锁，根因实际在测试设计。
   2. **Src（次日 2026-05-09 发现）**：`packages/api/src/.../first-run-quest/client-detection.ts` 用 `execAsync('opencode version', { timeout: 5000 })` 探测 OpenCode CLI 是否安装。`opencode version` 不是简单 CLI 查询——`opencode` 是 agent runtime，`version` 子命令会拉起完整 agent process。`exec` 的 `timeout` 默认发 SIGTERM；agent process 不响应就僵住，parent promise reject 后 child 成 PPID=1 + 67% CPU 烧 50 分钟孤儿。**这是 LL 的范围扩展——同模式不限于 test，src 里"靠 SIGTERM 链 kill 复杂 child runtime"是同样系统性漏洞。**
+  3. **Harness acceptance（2026-08-30 再犯）**：F294 full-gate lease 的一次受控争用验收用 shell 启动 6 个无界 `while :; do :; done` worker，只在 controller 尾部逐个 `kill`。controller 中断后，6 个 worker 以 `PPID=1` 各烧一核近 15 小时，令 current-main HTML-widget 浏览器序列稳定撞上 12 秒产品 deadline；隔离用例仍约 1.3 秒通过。产品 deadline 和 proof 均正确，错误在验收负载没有自己的生命周期上限。
 - 根因：
   1. **结构性**：测试设计依赖 parent SIGTERM handler 链式 kill child；macOS 没有 Linux `PR_SET_PDEATHSIG`，parent 异常死亡（SIGKILL / runner timeout / Ctrl+C）后 child 不会自动陪葬，被 launchd 收编成 PPID=1，继续 `while(true)` 烧 CPU 直到外部干预。
   2. **可观测性**：孤儿没有指向源头的进程链（PPID=1），仅靠 `ps` 看不出"是谁 spawn 的"，只能 grep 字面量 `while(true){}` 反查代码。
@@ -1147,8 +1149,9 @@ created: 2026-02-26
 - 修复（已落地）：
   - **Test 修复（PR #1607, 2026-05-08）**：busy child 自带 5–10s 自杀 deadline——`while(Date.now() < end)` 替代 `while(true)`，最坏情况下泄漏一只也只活一个测试时长，不会跨 session 累积。`packages/api/test/process-liveness-probe.test.js` 第 145 行已改。
   - **Src 修复（2026-05-09）**：`client-detection.ts` 把"靠 `<cli> version`/`<cli> --version` 探测"换成"`command -v <cli>` 存在性探测"——`execFile` 走 `/bin/sh -c 'command -v "$1"'` 路径（POSIX 内置，不 spawn agent runtime），timeout 1s。`versionCmd` 字段从 `CliSpec` 删除，`DetectedClient.version` 字段保留为可选但永不填值（前端 `ClientStep` 已 conditional render，自然降级到只显示"已安装"）。同时把 `existsOnPath` 抽成可注入接口便于测试。
+  - **Harness 修复（F294, 2026-08-30）**：受控 CPU 压力统一走 `scripts/run-bounded-cpu-contention.mjs`。worker 同时持有最多 60 秒的单调时钟硬 deadline 和 controller PID 存活检查；回归覆盖 wall clock 回拨与 SIGKILL controller，并要求全部 worker 在有界时间内自行退出。parent signal handler 只做快速清理，不再是唯一生命线。
 - 防护：
-  1. **Test**：任何 `*.test.{js,ts}` 里 spawn 的 busy / long-lived 子进程必须满足两条之一：(a) 自带时间 deadline，(b) 暴露 child PID 让外部测试 finally 块独立 SIGKILL，**不依赖 parent SIGTERM handler 链式 kill**。
+  1. **Test**：任何 `*.test.{js,ts}` 或验收脚本 spawn 的 busy / long-lived 子进程都必须自带单调时钟硬 deadline；受控压力 worker 还要检查 exact parent 是否存活。暴露 child PID、`finally` 和 parent signal handler 只作加速清理，不能替代 child 自己的退出所有权。
   2. **Src**（新增）：低成本 detection / health probe 路径**禁止 spawn 复杂 runtime**——能用 `command -v` / `which` / `where` 就不用 `<cli> --version`。即使是看起来"应该是简单 CLI"的目标（`opencode version`），也不能假设其 child 会响应 SIGTERM；agent runtime / headless browser 这类复杂 child 的生命周期不能让 parent 信号链承担。
   3. **回归守护**：注入式 `existsOnPath` + unit test 断言所有 spec 没有 `versionCmd` / `versionArgs` 字段，CI 直接拦截重新引入。见 `packages/api/test/client-detection.test.js`（5 个 case，含 LL-055 src-extension regression guard）。
   4. 卡启动 / CPU 异常排查 SOP（顺序按出现频率）：
@@ -1158,6 +1161,7 @@ created: 2026-02-26
   5. CI lint（建议 follow-up）：扫 `**/*.{js,ts}` 中 `exec\\(.*<cli>\\s+(version|--version)` 模式（src + test 一起），匹配上直接 fail。
 - 来源锚点：
   - `packages/api/test/process-liveness-probe.test.js#L140-L155`（test 修复 PR #1607）
+  - `scripts/run-bounded-cpu-contention.mjs` + `.test.mjs`（F294 controlled-contention recurrence）
   - `packages/api/src/domains/cats/services/first-run-quest/client-detection.ts`（src 修复 2026-05-09）
   - `packages/api/test/client-detection.test.js`（regression guards）
   - 2026-05-08 runtime 启动超时事件（4 只 test 孤儿 6h–19h，270% CPU，3002 无法在 20s 内监听）
@@ -1780,7 +1784,7 @@ created: 2026-02-26
   - **测试形态要覆盖 class，不只覆盖路径**：至少一个参数化 regression 把同一不变量跑过 lexical / semantic / hybrid / raw / entity-merge 等现有模式；新增路径必须加入枚举表。
   - **封板审计与点修分离**：cloud 循环达到 LL-072 阈值后，当前轮真 bug 可以修，但终局依据改为本地 stateful reviewer 的全类枚举和 final SHA review，不再 re-trigger 等 “0 P2”。
   - **更深抽象另开 follow-up**：若正确坐标系是单一 `finalizeRanking` / mutation lifecycle 咽喉，且当前 PR 已能正确覆盖现有路径，则登记后续重构，不在封板 commit 里扩大 scope。
-- 来源锚点：PR #2755（final head `7feae0cc80fb11dbfd6a96dd830fef755b881341`，squash `17edde5e3b311cb27b271c6385fe47b22b0676c0`）/ Fable5 seal-board verdict `[thread-id]#0001783259660566-000337-62d016d2` / Opus final stateful review `[thread-id]#0001783261249985-000361-02d0dd2d` / `docs/features/F188-library-stewardship.md` timeline 2026-07-05
+- 来源锚点：PR #2755（final head `7feae0cc80fb11dbfd6a96dd830fef755b881341`，squash `17edde5e3b311cb27b271c6385fe47b22b0676c0`）/ Fable5 seal-board verdict `[thread-id]#private-source-id` / Opus final stateful review `[thread-id]#private-source-id` / `docs/features/F188-library-stewardship.md` timeline 2026-07-05
 - 原理：同类 bug 的最小单位不是 reviewer 当前指出的 line，而是失效的不变量类。先枚举类，再修路径；否则 review loop 会把“系统性漏面”伪装成一串独立小锅。
 
 - 关联：LL-072（cloud review 无不动点，封板协议）| LL-083（封闭集补齐 vs 开放纠缠繁殖）| LL-087（stateful UI 的 plan-time invariant table）| feedback_grep_consumers_before_contract_change | feedback_plan_stateful_lifecycle_state_machine
@@ -1867,7 +1871,7 @@ created: 2026-02-26
 - 根因：把三种不同 claim 压成一个完成态：①文本/编译结构正确；②canonical runtime 真正收到；③触发场景出现时发生正确行动。静态测试只能证明第一层；ToolSearch 可用也不证明 unknown-unknown 会主动唤醒。
 - 修复：F234 durable truth 改为 `structural 8/8` 与 `action journey 0/6 verified` 分账；广泛 diet 冻结。#3329 只迁出三条已有 F203 spec/audit 替代承载的历史账目，保留 active counter-prompt、F218 与 ADR-038 breadcrumb，并用语义断言 + budget guard 锁住边界。
 - 防护：每个删除候选必须回答 replacement carrier 在哪、谁是 authority、真实 delivery 如何证明、哪个 action journey 验行为、失败怎样 rollback。没有 consumer journey 的静态绿只能叫“结构通过”，不能叫“优化完成”。
-- 来源锚点：F234 `Follow-up truth split + diet freeze` | ADR-038 `Generation Diet Completion Gate` | PR #3329 | operator source `0001785553549038-001517-efe0fa4a`
+- 来源锚点：F234 `Follow-up truth split + diet freeze` | ADR-038 `Generation Diet Completion Gate` | PR #3329 | operator source `private-source-id`
 - 原理：**模型看见文字、模型能找到工具、模型在正确时机采取行动，是三件不同的事。** Prompt diet 的风险不在删了多少，而在删除后是否仍有一条可证明的认知与执行路径。
 - 关联：F234 Phase L0-GD | F203 canonical L0 delivery | F192 capability wakeup | LL-095 高频注入措辞放大
 
@@ -1876,7 +1880,7 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-08-01
 
-- 坑：PR #3276 已完成 exact-HEAD review、全量 gate、mergeability 与路径安全/鉴权证据后，GitHub required check 仍返回 `runner_id=0`、`steps=[]` 的 billing/spending-limit 红灯。团队把同一外部账单状态再次升级成新的代码或合入选择，形成表演性等待；代码、重跑和本地猫都不能“变出钱”解决它。
+- 坑：PR #3276 已完成 exact-HEAD review、全量 gate、mergeability 与路径安全/鉴权证据后，GitHub required check 仍返回 `runner_id=0`、`steps=[]` 的 billing/spending-limit 红灯。团队把同一外部账单状态再次升级成新的代码或合入选择，形成表演性等待；代码、重跑和本地猫都不能“变出钱”解决它。**这不是 owner action：不要求 operator 付费、修账单或关闭 workflow，也不反复把同一额度边界上报成待办。**
 - 根因：把“外部执行器没有获得 runner”误读成“代码执行后失败”。zero-step job 没有 source-under-test 运行事实，只证明 GitHub 账户或 billing infrastructure 没有启动 job；它既不是代码失败，也不是绿色 CI 证据。
 - 修复：把该事件归入 operational evidence lane，保留 exact PR/head、独立 review、已完成 gate、mergeability、zero-step payload 与账户提示的 typed decision frame。若授权与 merge-gate 已闭合，billing-only 不重复制造新的等待或 operator 选择；若必需行为证据仍缺，则明确缺哪一项，不拿 zero-step 红灯替代它。
 - 防护：识别 `runner_id=0` 且 `steps=[]` 时先判 job 是否实际执行；把 billing/payment/spending-limit 与 source/test failure 分桶。只有真实 runner/step 输出才能支持代码通过或失败 claim；外部基础设施状态只影响可用证据面，不改写代码真相。
@@ -1926,7 +1930,47 @@ created: 2026-02-26
   - `docs/features/F294-selective-message-bundles.md`“浏览器部署准入状态机”与 2026-08-17 timeline
   - `packages/web/src/hooks/useConnectionStatus.ts`（`deriveDeploymentAdmission`）
   - `packages/web/test/build-stamp.test.cjs` 与 `packages/web/src/hooks/__tests__/useConnectionStatus-deployment-revision.test.ts`
-  - source thread `[thread-id]#0001786969233723-000003-d8236618`
+  - source thread `[thread-id]#private-source-id`
 - 原理：**Fail-closed 不是“信息不足时关闭最多东西”，而是“信息不足时只拒绝无法证明安全的 claim”。** 护栏的权限应等于它保护的风险域；超过这个范围，护栏本身就成为更高影响的故障源。恢复承诺同样是一种契约——若动作不能推动状态迁移，就不该把它展示为出口。
 
 - 关联：F294 / PR #3744（旧页面兼容性守卫）/ PR #3750（事故修复）/ LL-097（不同完成 claim 必须分账）/ ADR-031（按问题选择机制，不把工具箱当清单）
+
+### LL-101: 安全长门禁仍需先收敛——冻结切面、便宜闭包、首错即停
+
+- 状态：validated
+- 更新时间：2026-08-26
+
+- 坑：全量开源同步已经有 temp target、F251、reconciliation、完整 source/public gate 等安全边界，但一次同步仍连续跑数小时、反复因新的导出脚本闭包、capability-tip 引用、migration notes 或移动中的 main 失败。每个红灯都是真问题，然而发现顺序让便宜的确定性错误排在 install/build/`test:public` 之后；修完一个再追最新 main，又让先前长跑证据失效。安全性提高了，收敛成本却没有被设计。
+- 根因：把“验证强度”误当成“执行顺序”，让昂贵综合门禁同时承担快速反馈；又把 moving branch 当 release cut，缺少 source/public/reconciliation 的显式冻结边界。长门禁失败后继续跑后续阶段收集次生错误，则进一步放大无效耗时。
+- 防护：默认使用稳定快车道：①先完成 community/intake guard；②冻结 exact source SHA、public target HEAD 与 reconciliation artifact；③从冻结 source checkout 重新执行该 SHA 自己的 wrapper，并在 detached temp target 反复跑无安装、无真实写入 preflight，前置 export/security、public script closure、增量引用、F251 和 behavior notes；④preflight/validate/真实写入均要求 target HEAD、远端 public main 与 expected target HEAD 三头一致；⑤preflight 绿后，对同一切面各跑一次完整 source gate 与 temp-public validation；⑥完整 public gate首个硬失败立即停止；⑦新 source main 提交默认进入下一班，不能悄悄刷新当前切面。
+- 边界：这不是减少 release 证据。完整 source gate、完整 temp-public gate、F251、startup acceptance 与真实 target 写前复核仍保留；`--fast-validate` 也不能替代它们。public main 前进时只重开 public/reconciliation 切面；只有 source/export binding 变化才使 source gate 证据失效。
+- 原理：**综合长门禁适合证明终态，不适合承担发现所有低成本错误的第一反馈。** 正确的加速不是少测，而是让确定性失败尽早、让昂贵证明只跑在稳定切面上、让失败及时取消剩余成本。
+- 关联：F116 / F251 / `scripts/sync-to-opensource.sh --preflight` / `docs/postmortems/2026-03-13-opensource-sync-incident-chain.md` / LL-035（temp-target 安全）/ LL-036（长跑终态诚实）/ LL-079（volatile ref）
+
+### LL-102: 防御性编程不能校正航向——流程机制必须分别证明方向、风险与成本
+
+- 状态：draft
+- 更新时间：2026-09-02
+
+- 坑：多个 development episode 中，作者和 reviewer 都高强度执行 worktree、兼容、复审与 full gate，但最终实现仍偏离 issue、feature contract 或产品愿景；同时长出第二套相似概念、更多球权对象和无人负责的 follow-up。质量仪式增加，方向正确性与真实质量没有同步提高，最后由operator人肉指出偏离、找 owner、催 main 红灯和协调收口。
+- 根因：流程围绕“把当前实现做得更牢”优化，没有把 accepted source → exact HEAD → non-author conclusion 作为同一条追溯链；又把确定契约、运行健康和不确定效用混成一项“质量”，于是 targeted/full、review、observability 与 eval 被按完整性仪式叠加。每发现一个协调裂缝就新造 state/owner/custody/verdict，令系统开始服务自己的流程对象。
+- 触发条件：小改动无客观风险仍跑 full gate；review 多轮继续扩张当前实现而不回读 accepted source；兼容旧实现时出现并行概念；任何方案需要operator日常判断 owner、催 follow-up 或替 main 健康值夜；为一个流程问题同时新增第二 command/file/receipt/registry/lifecycle。
+- 修复：以 accepted source 追溯链重画坐标；逐 claim 选择机制。Reviewer soft anchor、gate-time revision compare/内嵌 risk classifier/R4 自动重投刹车各守自己的确定契约；运行耗时与 main health 归 F153/opt-in guardian；只有“anchor 是否减少 intent drift”进入 F311 单变量 Program，并以 process cost 与 human coordination rescue 为不可抵消 guardrail。
+- 防护：新增流程对象前做 no-second-owner/state/custody/verdict census；review blocker 必须带 source/risk anchor、可核验失败与 diff 因果；classifier 只保留 ephemeral、only-more-strict 的人工 risk flag；无 owner follow-up 当场死亡；automation evidence 缺失时只降级 automation，不锁开发者；每条新机制预注册 keep/tune/sunset。
+- 来源锚点：`[thread-id]#private-source-id`（质量与方向纠偏）| `[thread-id]#private-source-id`（保姆税）| `[thread-id]#private-source-id`（机制/概念增生与 F311 路由）| `[thread-id]#private-source-id`（A2A/lease/verdict 反例）| 收敛蓝图 (internal)
+- 原理：**把车造得更坚固不会让它自动开向正确目的地。** 方向靠 accepted-source 追溯，确定风险靠 guard，运行健康靠 observability，不确定效用才靠 eval；机制的数量不是质量，能否更早发现偏航且不增加人类协调税才是质量。
+
+- 关联：ADR-031 v3.5 candidate | LL-071（A2A scope 误读放大）| LL-072/083（review 无不动点与开放纠缠）| LL-095（机制工具箱不是清单）| LL-101（长门禁先收敛）| F100 Process Evolution | F303 Design Gate Integrity | F311 Capability Evolution Workspace
+
+### LL-103: 测试替身要封住最外层副作用——内层 stub 会在实现改委托后失效
+
+- 状态：validated
+- 更新时间：2026-09-10
+
+- 坑：运行 `scripts/test-start-dev.sh` 时，旧测试以为 mock `python3 -m venv` 就能隔离 `install_sidecar_venvs`。该生产函数后来把 ASR 安装改为委托统一 shell installer，测试却仍直接执行整段函数；而且 `HOME` 只在函数调用时覆盖，统一 installer 已沿加载期冻结的 `CAT_CAFE_HOME` 指向真实 `~/.cat-cafe`。结果测试短暂执行真实 pip，在用户级 `whisper-venv` 重写了 `pip`、`faster-whisper`、`av`、`ctranslate2`、`flatbuffers`、`onnxruntime` 六个 distribution。
+- 止损与影响：发现后确认测试及 pip 进程均已结束；未启动/重启 runtime，未写 Redis。当前 venv `pip check` 为 green，`faster_whisper` / `av` / `ctranslate2` / `onnxruntime` import 为 green；旧 distribution 版本没有 canonical 账本，故不猜测降级或删除。
+- 根因：测试替身绑定了旧实现细节，而非真实副作用边界；用户级路径在 source-time 决定，却只在 call-time 伪隔离；该 legacy shell test 又长期不在常规 gate 内，已删除的 sidecar helper 断言与真实 installer 逃逸同时腐烂。
+- 修复：删除已无生产函数的 sidecar 断言；在 test 中 mock 统一 installer 的最外层 `bash` delegate，剩余 venv 全落临时 `HOME`，并验证 ASR delegate 与 TTS/LLM/embed 临时路径。shared rules 固化“source 前隔离路径 + mock 最外层 effect boundary + 无账本不盲回滚”。
+- 原理：**测试隔离要对“什么能改变外部世界”负责，不要对“当前实现恰好调用了哪个内层函数”负责。** 委托层一变，内层 stub 就可能静默失效；只有从最外层 effect sink 关门，fixture-only 才是真的 fixture-only。
+
+- 关联：`scripts/test-start-dev.sh` | `scripts/setup.sh::install_sidecar_venvs` | `scripts/services/whisper-install.sh` | shared-rules §14d

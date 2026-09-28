@@ -2,8 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useChatStore } from '@/stores/chatStore';
-import { API_URL, apiFetch } from '@/utils/api-client';
+import { apiFetch } from '@/utils/api-client';
 import { buildWorktreeAliasMap, resolveListedWorktreeId, type WorktreeAliasMap } from '@/utils/worktree-id-alias';
+import { useWorkspaceFileChange } from './useWorkspaceFileChange';
+import { useWorkspaceSearch } from './useWorkspaceSearch';
+
+export type { SearchResult } from './useWorkspaceSearch';
 
 export interface WorktreeEntry {
   id: string;
@@ -43,16 +47,6 @@ export interface FileData {
   binary?: boolean;
 }
 
-export interface SearchResult {
-  path: string;
-  line: number;
-  content: string;
-  contextBefore: string;
-  contextAfter: string;
-  /** Which search mode produced this result (used by 'all' mode for grouping) */
-  matchType?: 'filename' | 'content';
-}
-
 async function discoverWorktrees(projectPath: string): Promise<WorktreeEntry[]> {
   const params = new URLSearchParams();
   if (projectPath && projectPath !== 'default') params.set('repoRoot', projectPath);
@@ -86,7 +80,7 @@ function reconcileDiscoveredWorktree(
   if (discoveredId !== currentId) setWorktreeId(discoveredId);
 }
 
-export function useWorkspace() {
+export function useWorkspace({ loadContent = true }: { loadContent?: boolean } = {}) {
   const worktreeId = useChatStore((s) => s.workspaceWorktreeId);
   const openFilePath = useChatStore((s) => s.workspaceOpenFilePath);
   const setWorktreeId = useChatStore((s) => s.setWorkspaceWorktreeId);
@@ -100,11 +94,16 @@ export function useWorkspace() {
   const [worktreesError, setWorktreesError] = useState<string | null>(null);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [file, setFile] = useState<FileData | null>(null);
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
-  const [searchLoading, setSearchLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const worktreeRequestSeq = useRef(0);
+  const {
+    results: searchResults,
+    loading: searchLoading,
+    error: searchError,
+    search,
+    reset: resetSearch,
+  } = useWorkspaceSearch(worktreeId);
   const projectKey = projectPath || 'default';
   const worktreesReadyForProject = worktreesProjectPath === projectKey;
   const currentWorktrees = worktreesReadyForProject ? worktrees : [];
@@ -165,8 +164,8 @@ export function useWorkspace() {
   );
 
   useEffect(() => {
-    if (worktreeId) fetchTree();
-  }, [worktreeId, fetchTree]);
+    if (loadContent && worktreeId) fetchTree();
+  }, [loadContent, worktreeId, fetchTree]);
 
   // Lazy-load subtree for a directory at max depth (children === undefined)
   const fetchSubtree = useCallback(
@@ -214,136 +213,23 @@ export function useWorkspace() {
 
   // Load file when openFilePath changes
   useEffect(() => {
-    if (openFilePath) fetchFile(openFilePath);
+    if (!loadContent) return;
+    if (openFilePath) void fetchFile(openFilePath);
     else setFile(null);
-  }, [openFilePath, fetchFile]);
+  }, [loadContent, openFilePath, fetchFile]);
 
-  // File-change watcher: auto-reload when file is modified externally
-  const [pendingExternalSha, setPendingExternalSha] = useState<string | null>(null);
-  const editDirtyRef = useRef(false);
-  const fileShaRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    fileShaRef.current = file?.sha256 ?? null;
-  }, [file?.sha256]);
-
-  const setEditDirty = useCallback(
-    (dirty: boolean) => {
-      editDirtyRef.current = dirty;
-      if (!dirty && pendingExternalSha) {
-        setPendingExternalSha(null);
-        if (openFilePath) fetchFile(openFilePath);
-      }
-    },
-    [pendingExternalSha, openFilePath, fetchFile],
-  );
-
-  const applyExternalChange = useCallback(() => {
-    setPendingExternalSha(null);
-    if (openFilePath) fetchFile(openFilePath);
-  }, [openFilePath, fetchFile]);
-
-  const dismissExternalChange = useCallback(() => {
-    setPendingExternalSha(null);
-  }, []);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional reset on file switch
-  useEffect(() => {
-    setPendingExternalSha(null);
-  }, [openFilePath]);
-
-  useEffect(() => {
-    if (!worktreeId || !openFilePath) return;
-    let cancelled = false;
-    let cleanup: (() => void) | null = null;
-
-    import('socket.io-client').then(({ io }) => {
-      if (cancelled) return;
-      const apiUrl = new URL(API_URL);
-      const socket = io(`${apiUrl.protocol}//${apiUrl.host}`, {
-        transports: ['websocket'],
-        forceNew: true,
-      });
-
-      socket.on('connect', () => {
-        socket.emit('workspace:watch-file', {
-          worktreeId,
-          path: openFilePath,
-          sha256: fileShaRef.current,
-        });
-      });
-
-      socket.on('workspace:file-changed', (data: { worktreeId: string; path: string; sha256: string }) => {
-        if (data.path !== openFilePath || data.worktreeId !== worktreeId) return;
-        if (data.sha256 === fileShaRef.current) return;
-        if (editDirtyRef.current) {
-          setPendingExternalSha(data.sha256);
-        } else {
-          fetchFile(openFilePath);
-        }
-      });
-
-      cleanup = () => {
-        socket.emit('workspace:unwatch-file');
-        socket.disconnect();
-      };
-    });
-
-    return () => {
-      cancelled = true;
-      cleanup?.();
-    };
-  }, [worktreeId, openFilePath, fetchFile]);
-
-  // Single-mode search helper (filename or content)
-  const searchSingle = useCallback(
-    async (query: string, type: 'content' | 'filename'): Promise<SearchResult[]> => {
-      const res = await apiFetch('/api/workspace/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ worktreeId, query, type }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: 'Failed to search workspace' }));
-        throw new Error(data.error ?? 'Failed to search workspace');
-      }
-      const data = await res.json();
-      return (data.results ?? []) as SearchResult[];
-    },
-    [worktreeId],
-  );
-
-  // Search — supports 'content', 'filename', or 'all' (fires both in parallel)
-  const search = useCallback(
-    async (query: string, type: 'content' | 'filename' | 'all' = 'content') => {
-      if (!worktreeId || !query.trim()) return;
-      setSearchLoading(true);
-      setError(null);
-      try {
-        if (type === 'all') {
-          const [fileResults, contentResults] = await Promise.all([
-            searchSingle(query, 'filename'),
-            searchSingle(query, 'content'),
-          ]);
-          // Tag each result with its match type for grouped rendering
-          const tagged: SearchResult[] = [
-            ...fileResults.map((r) => ({ ...r, matchType: 'filename' as const })),
-            ...contentResults.map((r) => ({ ...r, matchType: 'content' as const })),
-          ];
-          setSearchResults(tagged);
-        } else {
-          const results = await searchSingle(query, type);
-          setSearchResults(results);
-        }
-      } catch {
-        setSearchResults([]);
-        setError('Failed to search workspace');
-      } finally {
-        setSearchLoading(false);
-      }
-    },
-    [worktreeId, searchSingle],
-  );
+  const {
+    pendingExternalSha,
+    onDirtyChange: setEditDirty,
+    applyExternalChange,
+    dismissExternalChange,
+  } = useWorkspaceFileChange({
+    enabled: loadContent,
+    worktreeId,
+    path: openFilePath,
+    currentSha: file?.sha256 ?? null,
+    onReload: fetchFile,
+  });
 
   // Reveal file in system file manager (Finder/Explorer)
   const revealInFinder = useCallback(
@@ -372,6 +258,7 @@ export function useWorkspace() {
     searchResults,
     loading,
     searchLoading,
+    searchError,
     error,
     pendingExternalSha,
     fetchWorktrees,
@@ -379,7 +266,7 @@ export function useWorkspace() {
     fetchSubtree,
     fetchFile,
     search,
-    setSearchResults,
+    resetSearch,
     revealInFinder,
     setEditDirty,
     applyExternalChange,

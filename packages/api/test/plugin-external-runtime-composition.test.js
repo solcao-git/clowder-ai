@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
-
+import { MessageStore } from '../dist/domains/cats/services/stores/ports/MessageStore.js';
 import {
   createDormantPluginRuntimeComposition,
   EXTERNAL_PLUGIN_PRE_ACTIVE_TIMEOUT_MS,
@@ -12,20 +12,23 @@ import {
 } from '../dist/domains/plugin/index.js';
 import { MemoryMeetingIntakeStore, MemorySignalRouteStore } from '../dist/domains/signal-intake/index.js';
 import {
+  completeExternalHandshake,
   EXTERNAL_PACKAGE_DIGEST,
   externalCandidate,
   externalManifest,
   FakePluginProcessAdapter,
 } from './plugin-external-runtime-helpers.js';
 
-async function composition(projectRoot, processes = new FakePluginProcessAdapter()) {
+async function composition(projectRoot, processes = new FakePluginProcessAdapter(), packages) {
   return {
     processes,
     runtime: createDormantPluginRuntimeComposition({
       projectRoot,
       routes: new MemorySignalRouteStore(),
       intakes: new MemoryMeetingIntakeStore(),
+      messageStore: new MessageStore(),
       processes,
+      ...(packages === undefined ? {} : { packages }),
       now: () => 5_000,
     }),
   };
@@ -50,14 +53,27 @@ test('current-main compatibility paths are explicit, project-scoped, and replace
     paths: injected,
     routes: new MemorySignalRouteStore(),
     intakes: new MemoryMeetingIntakeStore(),
+    messageStore: new MessageStore(),
   });
   assert.deepEqual(runtime.paths, injected);
   assert.equal(runtime.inventoryStore.path, injected.inventorySnapshotPath);
   assert.equal(runtime.brokerStore.path, injected.brokerSnapshotPath);
 });
 
-test('dormant composition recovers both durable stores without spawning a process', async () => {
+test('composition recovers both durable stores and resumes enabled owner intent with fresh authority', async () => {
   const projectRoot = await mkdtemp(resolve(tmpdir(), 'cat-cafe-k2d-composition-restart-'));
+  await mkdir(resolve(projectRoot, 'dist'), { recursive: true });
+  await writeFile(resolve(projectRoot, externalManifest().runtime.entrypoint), '');
+  const packages = {
+    async resolveInstalledPackage() {
+      return {
+        rootDir: projectRoot,
+        manifest: externalManifest(),
+        verifyIntegrity: async () => undefined,
+        release: async () => undefined,
+      };
+    },
+  };
   const first = await composition(projectRoot);
   const installed = await first.runtime.inventory.installPackage({
     manifest: externalManifest(),
@@ -88,18 +104,83 @@ test('dormant composition recovers both durable stores without spawning a proces
   await connection.ready({ bindingNonce: binding.bindingNonce });
   assert.equal((await first.runtime.inventoryStore.snapshot()).instances[0].runtimeState, 'healthy');
 
-  const restarted = await composition(projectRoot);
+  const restarted = await composition(projectRoot, new FakePluginProcessAdapter(), packages);
   const recovered = await restarted.runtime.recoverAfterRestart();
 
-  assert.deepEqual(recovered, { brokerSessions: 1, inventoryInstances: 1 });
-  assert.equal(restarted.processes.specs.length, 0);
+  assert.deepEqual(recovered, { brokerSessions: 1, inventoryInstances: 0, resumeRequested: 1 });
+  const child = await restarted.processes.waitForProcess(0);
+  await completeExternalHandshake(child);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(restarted.processes.specs.length, 1);
   const recoveredInstance = (await restarted.runtime.inventoryStore.snapshot()).instances[0];
-  assert.equal(recoveredInstance.activationState, 'disabled');
-  assert.equal(recoveredInstance.runtimeState, 'stopped');
-  assert.equal(recoveredInstance.lifecycleRevision, 2);
+  assert.equal(recoveredInstance.activationState, 'enabled');
+  assert.equal(recoveredInstance.runtimeState, 'healthy');
+  assert.equal(recoveredInstance.lifecycleRevision, 1);
   const broker = await restarted.runtime.brokerStore.snapshot();
   assert.equal(broker.sessions[0].phase, 'closed');
   assert.equal(broker.sessions[0].closeReason, 'host_restart');
+  assert.equal(broker.sessions[1].phase, 'active');
+  await restarted.runtime.shutdown();
+});
+
+test('dormant composition binds messaging routes to its single K-1 domain', async () => {
+  const projectRoot = await mkdtemp(resolve(tmpdir(), 'cat-cafe-m0-composition-messaging-'));
+  const manifest = externalManifest();
+  const grants = ['messaging.send', 'messaging.appendElements', 'message.event.subscribe'];
+  manifest.features[0].capabilities = grants;
+  const runtime = createDormantPluginRuntimeComposition({
+    projectRoot,
+    routes: new MemorySignalRouteStore(),
+    intakes: new MemoryMeetingIntakeStore(),
+    messageStore: new MessageStore(),
+    now: () => 5_000,
+  });
+  const installed = await runtime.inventory.installPackage({
+    manifest,
+    computedPackageDigest: EXTERNAL_PACKAGE_DIGEST,
+    expectedPackageDigest: EXTERNAL_PACKAGE_DIGEST,
+    packagePluginId: externalCandidate().pluginId,
+    effectiveGrants: grants,
+    signalSchemas: {
+      'schemas/external.signal.v1.schema.json': {
+        type: 'object',
+        properties: { payload: { type: 'object' }, source: { type: 'object' } },
+        required: ['payload', 'source'],
+      },
+    },
+  });
+  await runtime.inventoryStore.transaction((transaction) => {
+    const instance = transaction.instances.get(installed.pluginInstanceId);
+    transaction.instances.put({
+      ...instance,
+      configReadiness: 'ready',
+      activationState: 'enabled',
+      runtimeState: 'stopped',
+      updatedAt: 5_001,
+    });
+  });
+  const connection = await runtime.broker.openExternalConnection(installed.pluginInstanceId);
+  const binding = await connection.hello(externalCandidate());
+  await connection.ready({ bindingNonce: binding.bindingNonce });
+  const { handleId } = await runtime.messaging.issueThreadHandle({
+    pluginInstanceId: installed.pluginInstanceId,
+    threadId: 'thread-1',
+    userId: 'user-1',
+    scope: { canSend: true, canSubscribe: true },
+  });
+
+  const subscription = await connection.call('messaging.subscribe', { handle: handleId });
+  const receipt = await connection.call('messaging.send', {
+    address: { kind: 'thread_handle', handle: handleId },
+    idempotencyKey: 'composition-send-1',
+    payload: {
+      provenance: { epistemicStatus: 'inference' },
+      elements: [{ elementId: 'element-1', kind: 'text', payload: { text: 'composition' } }],
+    },
+  });
+  assert.equal(typeof subscription.subscriptionId, 'string');
+  assert.equal(receipt.messageHandle.kind, 'message');
+  assert.equal((await runtime.brokerStore.snapshot()).calls.length, 0, 'K-1 owns messaging settlement');
 });
 
 test('production handshake policy covers verified external source readiness without budget drift', async () => {
@@ -109,6 +190,7 @@ test('production handshake policy covers verified external source readiness with
     projectRoot,
     routes: new MemorySignalRouteStore(),
     intakes: new MemoryMeetingIntakeStore(),
+    messageStore: new MessageStore(),
     processes: new FakePluginProcessAdapter(),
     now: () => now,
   });
@@ -145,6 +227,7 @@ test('production handshake policy covers verified external source readiness with
   assert.equal(EXTERNAL_PLUGIN_PRE_ACTIVE_TIMEOUT_MS, 4 * 60_000);
   assert.equal(runtime.broker.preActiveTimeoutMs, EXTERNAL_PLUGIN_PRE_ACTIVE_TIMEOUT_MS);
   assert.equal(runtime.supervisor.handshakeTimeoutMs, EXTERNAL_PLUGIN_PRE_ACTIVE_TIMEOUT_MS);
+  assert.ok(runtime.messaging, 'composition must expose the single K-1 messaging domain used by Broker routes');
 });
 
 test('production composition constructs and recovers K-2D but exposes no startup activation', () => {
@@ -152,19 +235,54 @@ test('production composition constructs and recovers K-2D but exposes no startup
 
   const routeBootstrapIndex = source.indexOf('await ensureOfficialPluginSignalRoutes({');
   const runtimeCompositionIndex = source.indexOf('createDormantPluginRuntimeComposition({');
+  const managerCompositionIndex = source.indexOf('createPluginManagerRuntimeComposition({');
 
   assert.match(source, /createDormantPluginRuntimeComposition/);
+  assert.match(source, /messageStore,\s*\.\.\.\(redis \? \{ redis \} : \{\}\)/);
   assert.match(source, /routes: signalRouteStore,\s*ownerId: privateUserId/);
   assert.ok(routeBootstrapIndex >= 0, 'production must provision official Host signal routes');
   assert.ok(
     routeBootstrapIndex < runtimeCompositionIndex,
     'Host signal routes must exist before the external runtime can accept owner activation',
   );
-  assert.match(source, /await externalPluginRuntime\.recoverAfterRestart\(\)/);
-  assert.match(source, /await externalPluginRuntime\.shutdown\('api_shutdown'\)/);
+  const runtimeBinding = source.match(/const\s+([A-Za-z_$][\w$]*)\s*=\s*createDormantPluginRuntimeComposition\(\{/);
+  assert.ok(runtimeBinding, 'production must bind the dormant plugin runtime composition');
+  const runtimeName = runtimeBinding[1];
+  const recoveryIndex = source.indexOf(`await ${runtimeName}.recoverAfterRestart()`);
+  assert.match(source, new RegExp(`await ${runtimeName}\\.recoverAfterRestart\\(\\)`));
+  assert.match(source, /new FilesystemBuiltinPluginPackageMaterializer\(\{/);
+  assert.match(source, /builtinContributions:\s*\{/);
+  assert.ok(
+    managerCompositionIndex >= 0 && managerCompositionIndex < recoveryIndex,
+    'builtin contribution routing must be registered before durable instances resume',
+  );
+  assert.match(source, new RegExp(`await ${runtimeName}\\.shutdown\\('api_shutdown'\\)`));
   assert.match(source, /OfficialPluginHistoryImportService/);
   assert.match(source, /createLarkCliFeishuArtifactInspector/);
   assert.match(source, /historyImport:/);
+  assert.match(source, /createPluginManagerRuntimeComposition\(\{/);
+  assert.match(source, /new MachineOfficialPluginCatalog\(\{/);
+  assert.match(source, /validateCatalog: validatePluginCatalog/);
+  assert.match(source, /loadMachinePluginCatalog\(OFFICIAL_PLUGIN_CATALOG_URL\)/);
+  assert.match(source, /replacesRepositoryPluginId:\s*'video-analysis'/);
+  const managerCompatibilityIndex = source.indexOf('const repositoryPluginManagerCompatibility =');
+  const managerComposition = source.slice(managerCompatibilityIndex, recoveryIndex);
+  assert.ok(managerCompatibilityIndex >= 0, 'repository compatibility must be composed after catalog policy exists');
+  assert.match(
+    managerComposition,
+    /compatibility:\s*repositoryPluginManagerCompatibility/,
+    'Train B Manager must project real repository plugins through its read-only compatibility boundary',
+  );
+  assert.match(managerComposition, /loadSuppressedPluginIds:/);
+  assert.match(managerComposition, /resolveRepositoryReplacementPluginIds\(/);
+  assert.match(managerComposition, /pluginRuntime\.inventoryStore\.snapshot\(\)/);
+  assert.match(managerComposition, /instance\.lifecycleState === 'installed'/);
+  assert.match(source, /registerPluginManagerRoutes\(managerApp/);
+  assert.match(source, /contributions: pluginManagerRuntime\.builtinSupervisor/);
+  assert.match(source, /register\(pluginManagerUploadRoutes/);
+  assert.match(source, /officialRouteCatalogProvider:\s*officialPluginCatalog/);
+  assert.match(source, /installer: pluginManagerRuntime\.officialRouteInstaller/);
+  assert.doesNotMatch(source, /new OfficialPluginPackageInstaller\(/);
   assert.match(source, /registerOfficialPluginRoutes\(app/);
-  assert.doesNotMatch(source, /externalPluginRuntime\.supervisor\.start\(/);
+  assert.doesNotMatch(source, new RegExp(`${runtimeName}\\.supervisor\\.start\\(`));
 });

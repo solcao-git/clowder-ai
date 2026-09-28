@@ -30,9 +30,12 @@ import {
   ROUTING_STRATEGY,
   ROUTING_TARGET_CATS,
 } from '../../../../../infrastructure/telemetry/genai-semconv.js';
+import { inferRoutingContextIntent } from '../../../../routing-context/RoutingDispatchPreflightPort.js';
 import type { IntentResult } from '../../context/IntentParser.js';
 import { parseIntent, ROUTE_CONTROL_TAGS, stripIntentTags } from '../../context/IntentParser.js';
 import type { IRuntimeSessionStore } from '../../runtime-session/RuntimeSessionStore.js';
+import type { ContextEpochOwner } from '../../session/ContextEpochOwner.js';
+import type { PresentationLedger } from '../../session/PresentationLedger.js';
 import { SessionManager } from '../../session/SessionManager.js';
 import type { ISessionSealer } from '../../session/SessionSealer.js';
 import type { TranscriptReader } from '../../session/TranscriptReader.js';
@@ -42,11 +45,11 @@ import type { IDraftStore } from '../../stores/ports/DraftStore.js';
 import type { IMessageStore, StoredMessage } from '../../stores/ports/MessageStore.js';
 import type { ISessionChainStore } from '../../stores/ports/SessionChainStore.js';
 import type { ITaskStore } from '../../stores/ports/TaskStore.js';
-import type { IThreadStore, ThreadRoutingPolicyV1, ThreadRoutingScope } from '../../stores/ports/ThreadStore.js';
+import type { IThreadStore, ThreadRoutingPolicyV1 } from '../../stores/ports/ThreadStore.js';
 import { DEFAULT_THREAD_ID } from '../../stores/ports/ThreadStore.js';
 import type { IWorkflowSopStore } from '../../stores/ports/WorkflowSopStore.js';
 import { getTimelineOrderTime, SYSTEM_USER_IDS } from '../../stores/visibility.js';
-import type { AgentMessage, AgentService } from '../../types.js';
+import type { AgentMessage, AgentRouteIntent, AgentService } from '../../types.js';
 import type { InvocationRegistry } from '../invocation/InvocationRegistry.js';
 import {
   type InvocationCapacitySnapshot,
@@ -54,6 +57,7 @@ import {
 } from '../invocation/invocation-capacity-snapshot.js';
 import type { TaskProgressStore } from '../invocation/TaskProgressStore.js';
 import type { AgentRegistry } from '../registry/AgentRegistry.js';
+import type { AgentRegistrationFailure } from '../registry/AgentServiceUnavailableError.js';
 import type {
   A2ASlotTrackingOptions,
   PersistenceContext,
@@ -96,6 +100,10 @@ const HANDLE_CONTINUATION_RE = /[a-z0-9_.-]/;
 const QUOTE_BEFORE_MENTION_RE = /["'“”‘’]/;
 const DOMAIN_SUFFIX_START_RE = /[\p{L}\p{N}]/u;
 const BARE_URL_PREFIX_BEFORE_MENTION_RE = /(?:^|[^a-z0-9_-])(?:[a-z0-9-]+\.)+[a-z0-9-]+(?:\/[^\s@]*)*\/$/i;
+
+function projectAgentRouteIntent(intent: IntentResult): AgentRouteIntent {
+  return { intent: intent.intent, explicit: intent.explicit };
+}
 const DOMAIN_LIKE_UNKNOWN_HANDLE_RE = /^[a-z0-9_-]+(?:\.[a-z0-9-]+)+$/i;
 const ASCII_WORD_RE = /[a-z0-9]/i;
 const QUOTE_SPAN_PAIRS: readonly [string, string][] = [
@@ -485,47 +493,10 @@ function buildMentionData(configs: Record<string, import('@cat-cafe/shared').Cat
 }
 
 /**
- * F042: Infer routing scope from message text (v1).
- * Intentionally deterministic and conservative.
- */
-function inferRoutingScope(message: string): ThreadRoutingScope | null {
-  const lower = message.toLowerCase();
-  const hasPrToken = /\bpr\b/i.test(lower);
-
-  // Review-ish cues
-  if (
-    lower.includes('review') ||
-    lower.includes('lgtm') ||
-    lower.includes('merge') ||
-    hasPrToken ||
-    message.includes('合入') ||
-    message.includes('开 PR') ||
-    message.includes('云端 review') ||
-    message.includes('帮我看看') ||
-    message.includes('请 reviewer 看看') ||
-    message.includes('请 review')
-  ) {
-    return 'review';
-  }
-
-  // Architecture-ish cues
-  if (
-    lower.includes('architecture') ||
-    lower.includes('tradeoff') ||
-    message.includes('架构') ||
-    message.includes('设计') ||
-    message.includes('方案')
-  ) {
-    return 'architecture';
-  }
-
-  return null;
-}
-
-/**
  * Options for AgentRouter constructor
  */
 export interface AgentRouterOptions {
+  collectiveContext?: import('../invocation/invoke-single-cat.js').InvocationDeps['collectiveContext'];
   agentRegistry: AgentRegistry;
   registry: InvocationRegistry;
   messageStore: IMessageStore;
@@ -536,6 +507,24 @@ export interface AgentRouterOptions {
   threadStore?: IThreadStore;
   /** F24: Session chain store for context health tracking */
   sessionChainStore?: ISessionChainStore;
+  /** F296 B3b-1: persistent context epoch and cold/hot mode owner. */
+  contextEpochOwner?: ContextEpochOwner;
+  /** F296: authenticated Claude project-hook readiness from API bootstrap. */
+  hookAuthenticationReady?: boolean | (() => boolean);
+  /** F296: project-local PreCompact carrier readiness for the invocation workspace. */
+  claudeProjectHookCarrierReady?: boolean | ((projectRoot: string) => boolean);
+  /** F296 B3b-2: shared provider-presentation delivery ledger. */
+  presentationLedger?: PresentationLedger;
+  /** F293: owner-scoped sparse routing projection consumed by provider generation. */
+  routingContextPromptProjection?: import('../../../../routing-context/RoutingContextPromptProjector.js').RoutingContextPromptProjectionPort;
+  /** F293: shared actual-send preflight over the same resolver/catalog graph. */
+  routingDispatchPreflight?: import('../../../../routing-context/RoutingDispatchPreflightPort.js').RoutingDispatchPreflightPort;
+  /** F293: durable dispatch terminal observer over the same routing signal graph. */
+  routingDispatchSignalObserver?: import('../../../../routing-context/RoutingDispatchSignalContract.js').RoutingDispatchTerminalObserver;
+  /** F276: terminal disposition authority for person-memory write opportunities. */
+  writeOpportunityTerminalLedger?: import('../invocation/invoke-single-cat.js').InvocationDeps['writeOpportunityTerminalLedger'];
+  /** F276: reservation and delivery authority for person-memory write opportunities. */
+  writeOpportunityDeliveryStore?: import('../invocation/invoke-single-cat.js').InvocationDeps['writeOpportunityDeliveryStore'];
   /** F211 Phase A2: runtime sidecar for provider runtime session metadata */
   runtimeSessionStore?: IRuntimeSessionStore;
   /** F24 Phase C: Transcript writer for event recording */
@@ -598,14 +587,14 @@ export interface AgentRouterOptions {
   turnCustodyProjectionService?: import('../../../../ball-custody/TurnCustodyProjectionService.js').TurnCustodyProjectionService;
   /** F222: Frustration auto-issue store */
   frustrationIssueStore?: import('../../stores/ports/FrustrationIssueStore.js').IFrustrationIssueStore;
-  /** F222: Pending request store — cancel burst detection */
-  pendingRequestStore?: import('../../stores/ports/PendingRequestStore.js').IPendingRequestStore;
   /** F229: Concierge config store for duty-cat岗位 prompt injection */
   conciergeConfigStore?: import('../../../../concierge/ConciergeConfigStore.js').IConciergeConfigStore;
   /** F229 Phase B: TriagePlan store for triage-plan marker → confirm/cancel card actions */
   conciergeTriagePlanStore?: import('../../../../concierge/ConciergeTriagePlanStore.js').IConciergeTriagePlanStore;
   /** F247 AC-B1c-3 PR-C: Cloud invoke bridge for @gpt-pro → ChatGPT dispatch */
   cloudInvokeBridge?: import('../../cloud-bridge/types.js').ICloudInvokeBridge;
+  /** F247: shared server-custodied source-bound return authorization. */
+  cloudReturnGrantStore?: import('../../cloud-bridge/cloud-return-grant.js').CloudReturnGrantStore;
   /** F247/F167: server-owned terminal producer for the exact cloud A2A carrier. */
   a2aDispatchDispositionService?: Pick<
     import('../../../../ball-custody/A2ADispatchDispositionService.js').A2ADispatchDispositionService,
@@ -619,6 +608,8 @@ export interface AgentRouterOptions {
   freshnessStateStore?: import('../../freshness/FreshnessInvocationStateStore.js').FreshnessInvocationStateStore;
   /** F254 D2: invocation-scoped provider-native freshness broker factory. */
   providerNativeFreshnessFactory?: import('../invocation/invoke-single-cat.js').InvocationDeps['providerNativeFreshnessFactory'];
+  /** F306: canonical cross-provider request/response surface. */
+  runtimeInteractionPort?: import('../../../../runtime-interaction/ports/RuntimeInteractionPort.js').RuntimeInteractionPort;
   /** F254 Phase D (AC-D4): Freshness event log for stream output audit trail */
   freshnessEventLog?: import('../../freshness/FreshnessAttentionEventLog.js').FreshnessAttentionEventLog;
   /** F254 Phase E: persistent closure + atomic MessageStore output commit. */
@@ -629,6 +620,10 @@ export interface AgentRouterOptions {
   personMemoryProposalStatusContextResolver?: import('../../../../memory/people/PersonMemoryProposalStatusContextResolver.js').PersonMemoryProposalStatusContextResolver;
   /** F287: invocation-bound Cue Plane adapter. */
   memoryCuePromptService?: import('../../../../memory/cue/MemoryCueInvocationPromptService.js').MemoryCueInvocationPromptResolver;
+  profileCueOpportunitySource?: import('../../../../memory/cue/sources/ProfileMemoryCueSource.js').ProfileMemoryCueSource;
+  eventCueOpportunitySource?: import('../../../../memory/cue/sources/EventMemoryCueSource.js').EventMemoryCueSource;
+  /** F231 canonical profile owner for F299 source-lifecycle binding. */
+  profileRepository?: import('../../profile/ProfileRepository.js').FileProfileRepository;
 }
 
 /**
@@ -636,12 +631,23 @@ export interface AgentRouterOptions {
  */
 export class AgentRouter {
   private services: Record<string, AgentService>;
+  private unavailableServices: ReadonlyMap<string, AgentRegistrationFailure> = new Map();
   private registry: InvocationRegistry;
   private messageStore: IMessageStore;
+  private collectiveContext: import('../invocation/invoke-single-cat.js').InvocationDeps['collectiveContext'];
   private sessionManager: SessionManager;
   private deliveryCursorStore: DeliveryCursorStore;
   private threadStore: IThreadStore | null;
   private sessionChainStore: ISessionChainStore | undefined;
+  private contextEpochOwner: ContextEpochOwner | undefined;
+  private hookAuthenticationReady: boolean | (() => boolean);
+  private claudeProjectHookCarrierReady: boolean | ((projectRoot: string) => boolean);
+  private presentationLedger: PresentationLedger | undefined;
+  private routingContextPromptProjection?: import('../../../../routing-context/RoutingContextPromptProjector.js').RoutingContextPromptProjectionPort;
+  private routingDispatchPreflight?: import('../../../../routing-context/RoutingDispatchPreflightPort.js').RoutingDispatchPreflightPort;
+  private routingDispatchSignalObserver?: import('../../../../routing-context/RoutingDispatchSignalContract.js').RoutingDispatchTerminalObserver;
+  private writeOpportunityTerminalLedger?: import('../invocation/invoke-single-cat.js').InvocationDeps['writeOpportunityTerminalLedger'];
+  private writeOpportunityDeliveryStore?: import('../invocation/invoke-single-cat.js').InvocationDeps['writeOpportunityDeliveryStore'];
   private runtimeSessionStore: IRuntimeSessionStore | undefined;
   private transcriptWriter: TranscriptWriter | undefined;
   private transcriptReader: TranscriptReader | undefined;
@@ -689,13 +695,13 @@ export class AgentRouter {
   private turnCustodyProjectionService?: import('../../../../ball-custody/TurnCustodyProjectionService.js').TurnCustodyProjectionService;
   /** F222 */
   private frustrationIssueStore?: import('../../stores/ports/FrustrationIssueStore.js').IFrustrationIssueStore;
-  private pendingRequestStore?: import('../../stores/ports/PendingRequestStore.js').IPendingRequestStore;
   /** F229 */
   private conciergeConfigStore?: import('../../../../concierge/ConciergeConfigStore.js').IConciergeConfigStore;
   /** F229 Phase B */
   private conciergeTriagePlanStore?: import('../../../../concierge/ConciergeTriagePlanStore.js').IConciergeTriagePlanStore;
   /** F247 AC-B1c-3 PR-C */
   private cloudInvokeBridge?: import('../../cloud-bridge/types.js').ICloudInvokeBridge;
+  private cloudReturnGrantStore?: import('../../cloud-bridge/cloud-return-grant.js').CloudReturnGrantStore;
   private a2aDispatchDispositionService?: Pick<
     import('../../../../ball-custody/A2ADispatchDispositionService.js').A2ADispatchDispositionService,
     'complete'
@@ -707,6 +713,8 @@ export class AgentRouter {
   private freshnessStateStore?: import('../../freshness/FreshnessInvocationStateStore.js').FreshnessInvocationStateStore;
   /** F254 D2 */
   private providerNativeFreshnessFactory?: import('../invocation/invoke-single-cat.js').InvocationDeps['providerNativeFreshnessFactory'];
+  /** F306 */
+  private runtimeInteractionPort?: import('../../../../runtime-interaction/ports/RuntimeInteractionPort.js').RuntimeInteractionPort;
   /** F254 Phase D (AC-D4) */
   private freshnessEventLog?: import('../../freshness/FreshnessAttentionEventLog.js').FreshnessAttentionEventLog;
   /** F254 Phase E */
@@ -717,6 +725,9 @@ export class AgentRouter {
   private personMemoryProposalStatusContextResolver?: import('../../../../memory/people/PersonMemoryProposalStatusContextResolver.js').PersonMemoryProposalStatusContextResolver;
   /** F287 */
   private memoryCuePromptService?: import('../../../../memory/cue/MemoryCueInvocationPromptService.js').MemoryCueInvocationPromptResolver;
+  private profileCueOpportunitySource?: import('../../../../memory/cue/sources/ProfileMemoryCueSource.js').ProfileMemoryCueSource;
+  private eventCueOpportunitySource?: import('../../../../memory/cue/sources/EventMemoryCueSource.js').EventMemoryCueSource;
+  private profileRepository?: import('../../profile/ProfileRepository.js').FileProfileRepository;
   private speechMentionRe: RegExp;
 
   /**
@@ -775,6 +786,7 @@ export class AgentRouter {
   }
 
   private rebuildRuntimeCaches(agentRegistry: AgentRegistry): void {
+    this.unavailableServices = agentRegistry.getAllUnavailableEntries();
     this.services = {};
     for (const [catId, service] of agentRegistry.getAllEntries()) {
       this.services[catId] = service;
@@ -791,6 +803,7 @@ export class AgentRouter {
 
     this.registry = options.registry;
     this.messageStore = options.messageStore;
+    this.collectiveContext = options.collectiveContext;
     this.sessionManager = new SessionManager(options.sessionStore);
     // #1200 P2-3: wire cursor canonicalizer for v1→v2 async resolution
     const canonicalizer = options.messageStore.canonicalizeCursor
@@ -800,6 +813,15 @@ export class AgentRouter {
       options.deliveryCursorStore ?? new DeliveryCursorStore(options.sessionStore, canonicalizer);
     this.threadStore = options.threadStore ?? null;
     this.sessionChainStore = options.sessionChainStore;
+    this.contextEpochOwner = options.contextEpochOwner;
+    this.hookAuthenticationReady = options.hookAuthenticationReady ?? false;
+    this.claudeProjectHookCarrierReady = options.claudeProjectHookCarrierReady ?? false;
+    this.presentationLedger = options.presentationLedger;
+    this.routingContextPromptProjection = options.routingContextPromptProjection;
+    this.routingDispatchPreflight = options.routingDispatchPreflight;
+    this.routingDispatchSignalObserver = options.routingDispatchSignalObserver;
+    this.writeOpportunityTerminalLedger = options.writeOpportunityTerminalLedger;
+    this.writeOpportunityDeliveryStore = options.writeOpportunityDeliveryStore;
     this.runtimeSessionStore = options.runtimeSessionStore;
     this.transcriptWriter = options.transcriptWriter;
     this.transcriptReader = options.transcriptReader;
@@ -827,20 +849,24 @@ export class AgentRouter {
     this.ballCustody = options.ballCustody;
     this.turnCustodyProjectionService = options.turnCustodyProjectionService;
     this.frustrationIssueStore = options.frustrationIssueStore;
-    this.pendingRequestStore = options.pendingRequestStore;
     this.conciergeConfigStore = options.conciergeConfigStore;
     this.conciergeTriagePlanStore = options.conciergeTriagePlanStore;
     this.cloudInvokeBridge = options.cloudInvokeBridge;
+    this.cloudReturnGrantStore = options.cloudReturnGrantStore;
     this.a2aDispatchDispositionService = options.a2aDispatchDispositionService;
     this.freshnessReinvokeCheck = options.freshnessReinvokeCheck;
     this.turnExecutionStore = options.turnExecutionStore;
     this.freshnessStateStore = options.freshnessStateStore;
     this.providerNativeFreshnessFactory = options.providerNativeFreshnessFactory;
+    this.runtimeInteractionPort = options.runtimeInteractionPort;
     this.freshnessEventLog = options.freshnessEventLog;
     this.freshnessOutputCommitCoordinator = options.freshnessOutputCommitCoordinator;
     this.injectionTraceStore = options.injectionTraceStore;
     this.personMemoryProposalStatusContextResolver = options.personMemoryProposalStatusContextResolver;
     this.memoryCuePromptService = options.memoryCuePromptService;
+    this.profileCueOpportunitySource = options.profileCueOpportunitySource;
+    this.eventCueOpportunitySource = options.eventCueOpportunitySource;
+    this.profileRepository = options.profileRepository;
   }
 
   refreshFromRegistry(agentRegistry: AgentRegistry): void {
@@ -879,6 +905,13 @@ export class AgentRouter {
   contextCapacitySnapshot(catId: CatId): InvocationCapacitySnapshot | undefined {
     const service = this.services[catId];
     return service ? resolveInvocationCapacitySnapshot({ catId, service }) : undefined;
+  }
+
+  supportsCollectiveParticipation(catId: string): boolean {
+    return (
+      this.isRoutableCat(catId) &&
+      this.services[catId]?.supportsToolExecutionPolicy?.({ mode: 'collective_participation' }) === true
+    );
   }
 
   private isRoutableCat(catId: string | null | undefined): catId is CatId {
@@ -1018,7 +1051,7 @@ export class AgentRouter {
     candidates: CatId[],
   ): CatId[] {
     const routableCandidates = this.filterRoutableCats(candidates);
-    const scope = inferRoutingScope(message);
+    const scope = inferRoutingContextIntent(message);
     if (!scope) {
       if (routableCandidates.length > 0) return routableCandidates;
       const fallback = this.pickFallbackCat(new Set());
@@ -1143,28 +1176,23 @@ export class AgentRouter {
    *
    * P1 fix: uses token boundary check (same regex as parseMentions) to avoid
    * substring collisions like @allison→@all or @threadsafe→@thread.
+   * User-authored group mentions share the individual mention scanner, so a
+   * valid token works inline while quotes, code blocks, and URLs remain inert.
    */
   private async parseGroupMentions(
     message: string,
     threadId: string,
   ): Promise<{ cats: CatId[]; matchPosition: number } | null> {
     const lowerMessage = this.normalizeSpeechMentions(message).toLowerCase();
-    const excluded = buildMentionExclusionSpans(lowerMessage);
 
     /** Find first boundary-valid match position, or -1 if not found */
     const findMatchPosition = (pattern: string): number => {
       const lowerPattern = pattern.toLowerCase();
       let found = -1;
-      forEachRouteLineMentionCandidate(lowerMessage, (line, lineOffset, candidate) => {
+      forEachUserMentionCandidate(lowerMessage, (candidate) => {
         if (found >= 0) return;
-        const candidatePosition = lineOffset + candidate;
-        if (isInsideSpan(candidatePosition, excluded)) return;
-        if (!line.startsWith(lowerPattern, candidate)) return;
-        const end = candidate + lowerPattern.length;
-        const charAfter = line[end];
-        if (!charAfter || MENTION_TOKEN_BOUNDARY_RE.test(charAfter)) {
-          found = candidatePosition;
-        }
+        const end = matchMentionPatternEnd(lowerMessage, candidate, lowerPattern);
+        if (end !== null && isMentionEndBoundary(lowerMessage, end)) found = candidate;
       });
       return found;
     };
@@ -1455,7 +1483,11 @@ export class AgentRouter {
     const apiPort = process.env.API_SERVER_PORT ?? '3004';
     return {
       services: this.services,
+      unavailableServices: this.unavailableServices,
+      ...(this.routingDispatchPreflight ? { routingDispatchPreflight: this.routingDispatchPreflight } : {}),
       invocationDeps: {
+        messageStore: this.messageStore,
+        ...(this.collectiveContext ? { collectiveContext: this.collectiveContext } : {}),
         registry: this.registry,
         sessionManager: this.sessionManager,
         threadStore: this.threadStore,
@@ -1463,6 +1495,22 @@ export class AgentRouter {
         ...(this.turnExecutionStore ? { turnExecutionStore: this.turnExecutionStore } : {}),
         ...(this.taskProgressStore ? { taskProgressStore: this.taskProgressStore } : {}),
         ...(this.sessionChainStore ? { sessionChainStore: this.sessionChainStore } : {}),
+        ...(this.contextEpochOwner ? { contextEpochOwner: this.contextEpochOwner } : {}),
+        hookAuthenticationReady: this.hookAuthenticationReady,
+        claudeProjectHookCarrierReady: this.claudeProjectHookCarrierReady,
+        ...(this.presentationLedger ? { presentationLedger: this.presentationLedger } : {}),
+        ...(this.routingContextPromptProjection
+          ? { routingContextPromptProjection: this.routingContextPromptProjection }
+          : {}),
+        ...(this.routingDispatchSignalObserver
+          ? { routingDispatchSignalObserver: this.routingDispatchSignalObserver }
+          : {}),
+        ...(this.writeOpportunityTerminalLedger
+          ? { writeOpportunityTerminalLedger: this.writeOpportunityTerminalLedger }
+          : {}),
+        ...(this.writeOpportunityDeliveryStore
+          ? { writeOpportunityDeliveryStore: this.writeOpportunityDeliveryStore }
+          : {}),
         ...(this.runtimeSessionStore ? { runtimeSessionStore: this.runtimeSessionStore } : {}),
         ...(this.transcriptWriter ? { transcriptWriter: this.transcriptWriter } : {}),
         ...(this.transcriptReader ? { transcriptReader: this.transcriptReader } : {}),
@@ -1478,6 +1526,7 @@ export class AgentRouter {
         ...(this.conciergeConfigStore ? { conciergeConfigStore: this.conciergeConfigStore } : {}),
         ...(this.conciergeTriagePlanStore ? { conciergeTriagePlanStore: this.conciergeTriagePlanStore } : {}),
         ...(this.cloudInvokeBridge ? { cloudInvokeBridge: this.cloudInvokeBridge } : {}),
+        ...(this.cloudReturnGrantStore ? { cloudReturnGrantStore: this.cloudReturnGrantStore } : {}),
         ...(this.a2aDispatchDispositionService
           ? { a2aDispatchDispositionService: this.a2aDispatchDispositionService }
           : {}),
@@ -1486,7 +1535,11 @@ export class AgentRouter {
         ...(this.providerNativeFreshnessFactory
           ? { providerNativeFreshnessFactory: this.providerNativeFreshnessFactory }
           : {}),
+        ...(this.runtimeInteractionPort ? { runtimeInteractionPort: this.runtimeInteractionPort } : {}),
         ...(this.memoryCuePromptService ? { memoryCuePromptService: this.memoryCuePromptService } : {}),
+        ...(this.profileCueOpportunitySource ? { profileCueOpportunitySource: this.profileCueOpportunitySource } : {}),
+        ...(this.eventCueOpportunitySource ? { eventCueOpportunitySource: this.eventCueOpportunitySource } : {}),
+        ...(this.profileRepository ? { profileRepository: this.profileRepository } : {}),
       },
       messageStore: this.messageStore,
       deliveryCursorStore: this.deliveryCursorStore,
@@ -1505,7 +1558,6 @@ export class AgentRouter {
       ...(this.worldContextProvider ? { worldContextProvider: this.worldContextProvider } : {}),
       ...(this.worldStore ? { worldStore: this.worldStore } : {}),
       ...(this.frustrationIssueStore ? { frustrationIssueStore: this.frustrationIssueStore } : {}),
-      ...(this.pendingRequestStore ? { pendingRequestStore: this.pendingRequestStore } : {}),
       ...(this.ballCustody ? { ballCustody: this.ballCustody } : {}),
       ...(this.turnCustodyProjectionService ? { turnCustodyProjectionService: this.turnCustodyProjectionService } : {}),
       ...(this.freshnessEventLog ? { freshnessEventLog: this.freshnessEventLog } : {}),
@@ -1644,7 +1696,10 @@ export class AgentRouter {
     }
 
     const strategyDeps = this.getStrategyDeps();
+    const routingContextIntent = inferRoutingContextIntent(cleanMessage);
     const routeOptions = {
+      routeIntent: projectAgentRouteIntent(intent),
+      ...(routingContextIntent ? { routingContextIntent } : {}),
       contentBlocks,
       uploadDir,
       signal,
@@ -1719,12 +1774,17 @@ export class AgentRouter {
       persistedPromptMessages?: RouteOptions['persistedPromptMessages'];
       /** F281: required on typed first-party ingress; only direct_owner is injectable. */
       humanDispositionInvocationOrigin: HumanDispositionInvocationOrigin;
+      routingQueueSource?: RouteOptions['routingQueueSource'];
       /** F153: caller trace context for cross-route A2A propagation */
       callerTraceContext?: CallerTraceContext;
       /** Explicit A2A trigger message ID for queue-dispatched stream reply threading */
       a2aTriggerMessageId?: string;
       /** Server-owned caller identity paired with the exact A2A trigger. */
       a2aCallerCatId?: string;
+      /** Exact per-target cloud source carrier from callback/Queue custody. */
+      cloudDispatchProvenance?: RouteOptions['cloudDispatchProvenance'];
+      /** Fail cloud dispatch visibly when the exact multi-mention carrier is absent. */
+      requiresExactCloudDispatchProvenance?: RouteOptions['requiresExactCloudDispatchProvenance'];
       /** F222 P1: Whether this route is eligible for frustration auto-issue detection.
        *  true/undefined = user-origin (eligible, default for backward compat).
        *  false = agent/connector-origin (A2A handoff) — suppress detection. */
@@ -1737,6 +1797,9 @@ export class AgentRouter {
       freshnessSupplementId?: RouteOptions['freshnessSupplementId'];
       freshnessSupplementRequiredMessageIds?: RouteOptions['freshnessSupplementRequiredMessageIds'];
       toolExecutionPolicy?: RouteOptions['toolExecutionPolicy'];
+      executionScope?: RouteOptions['executionScope'];
+      memoryCueOpportunitySeeds?: RouteOptions['memoryCueOpportunitySeeds'];
+      asrPersonMemoryScenes?: RouteOptions['asrPersonMemoryScenes'];
     },
   ): AsyncIterable<AgentMessage> {
     const cleanMessage = appendContextAttachmentsToPrompt(stripIntentTags(message), options.contentBlocks);
@@ -1828,7 +1891,10 @@ export class AgentRouter {
     }
 
     const strategyDeps = this.getStrategyDeps();
+    const routingContextIntent = inferRoutingContextIntent(cleanMessage);
     const routeOptions = {
+      routeIntent: projectAgentRouteIntent(intent),
+      ...(routingContextIntent ? { routingContextIntent } : {}),
       ownerAuthProvenance: options.ownerAuthProvenance,
       ...(options?.turnCustodyWake ? { turnCustodyWake: options.turnCustodyWake } : {}),
       ...(options?.turnCustodyWakeForCat ? { turnCustodyWakeForCat: options.turnCustodyWakeForCat } : {}),
@@ -1845,6 +1911,9 @@ export class AgentRouter {
       freshnessSupplementId: options?.freshnessSupplementId,
       freshnessSupplementRequiredMessageIds: options?.freshnessSupplementRequiredMessageIds,
       toolExecutionPolicy: options?.toolExecutionPolicy,
+      executionScope: options?.executionScope,
+      memoryCueOpportunitySeeds: options?.memoryCueOpportunitySeeds,
+      asrPersonMemoryScenes: options?.asrPersonMemoryScenes,
       invocationController: options?.invocationController,
       trackA2ASlot: options?.trackA2ASlot,
       completeA2ASlots: options?.completeA2ASlots,
@@ -1857,7 +1926,10 @@ export class AgentRouter {
       })),
       a2aTriggerMessageId: options?.a2aTriggerMessageId,
       a2aCallerCatId: options?.a2aCallerCatId,
+      cloudDispatchProvenance: options?.cloudDispatchProvenance,
+      requiresExactCloudDispatchProvenance: options?.requiresExactCloudDispatchProvenance,
       humanDispositionInvocationOrigin: options.humanDispositionInvocationOrigin,
+      ...(options.routingQueueSource ? { routingQueueSource: options.routingQueueSource } : {}),
       thinkingMode,
       ...(options?.cursorBoundaries ? { cursorBoundaries: options.cursorBoundaries } : {}),
       ...(options?.persistenceContext ? { persistenceContext: options.persistenceContext } : {}),
@@ -1888,7 +1960,7 @@ export class AgentRouter {
     } finally {
       // F153 Phase F KD-22: Write route span tracing to user message for cold start recovery.
       // Runs in finally so both success and error paths persist the route root pointer.
-      if (userMessageId) {
+      if (userMessageId && !options?.requiresExactCloudDispatchProvenance) {
         const sc = routeSpan.spanContext();
         try {
           await Promise.resolve(
@@ -1910,6 +1982,16 @@ export class AgentRouter {
     for (const [catId, boundaryId] of boundaries) {
       try {
         await this.deliveryCursorStore.ackCursor(userId, catId as CatId, threadId, boundaryId);
+        log.info(
+          {
+            f148: 'delivery-cursor-ack',
+            threadId,
+            catId,
+            boundaryRef: boundaryId,
+            writer: 'AgentRouter.ackCollectedCursors',
+          },
+          '[F153] content-free delivery cursor writer audit',
+        );
       } catch (err) {
         log.error({ catId, err }, `[ackCollectedCursors] failed`);
       }

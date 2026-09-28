@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { describe, it } from 'node:test';
+import ts from 'typescript';
 import { buildWindowsStatus, resolveWindowsStatusPorts } from './lib/platform-status.mjs';
 
 const ROOT = resolve(process.cwd());
 const localRequire = createRequire(import.meta.url);
+const BUILD_CHILD_ENV_INHERITED_CWD_EXCEPTIONS = [
+  // Antigravity never sets spawn.cwd, so its process and shell cwd intentionally inherit together.
+  'packages/api/src/domains/cats/services/agents/providers/GeminiAgentService.ts::buildChildEnv(options.callbackEnv)',
+];
 
 function resolvePackageBin(packageName) {
   const pkgPath = localRequire.resolve(`${packageName}/package.json`);
@@ -36,6 +41,54 @@ function createSandbox(envFile = '') {
   }
 
   return dir;
+}
+
+function listTypeScriptFiles(root) {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(root, entry.name);
+    return entry.isDirectory() ? listTypeScriptFiles(path) : entry.isFile() && entry.name.endsWith('.ts') ? [path] : [];
+  });
+}
+
+function hasWorkingDirectoryOption(call) {
+  const options = call.arguments[1];
+  return (
+    options !== undefined &&
+    ts.isObjectLiteralExpression(options) &&
+    options.properties.some(
+      (property) =>
+        (ts.isShorthandPropertyAssignment(property) && property.name.text === 'workingDirectory') ||
+        (ts.isPropertyAssignment(property) &&
+          ((ts.isIdentifier(property.name) && property.name.text === 'workingDirectory') ||
+            (ts.isStringLiteral(property.name) && property.name.text === 'workingDirectory'))),
+    )
+  );
+}
+
+function collectBuildChildEnvCallsMissingWorkingDirectory() {
+  const sourceRoot = resolve(ROOT, 'packages/api/src');
+  const findings = [];
+
+  for (const path of listTypeScriptFiles(sourceRoot)) {
+    const source = readFileSync(path, 'utf8');
+    const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+    function visit(node) {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'buildChildEnv' &&
+        !hasWorkingDirectoryOption(node)
+      ) {
+        findings.push(`${relative(ROOT, path).replaceAll('\\', '/')}::${node.getText(sourceFile)}`);
+      }
+      ts.forEachChild(node, visit);
+    }
+
+    visit(sourceFile);
+  }
+
+  return findings.sort();
 }
 
 function runSourceOnly({ sandboxDir, env = {}, extraArgs = [], commands }) {
@@ -379,6 +432,26 @@ describe('cross-platform pnpm-start profile propagation (#421)', () => {
     );
   });
 
+  it('registers exact worktree Redis ownership before launching services and releases it on cleanup', () => {
+    const source = readFileSync(resolve(ROOT, 'scripts/start-dev.sh'), 'utf8');
+    const mainSource = source.slice(source.indexOf('\nmain() {'));
+    const setupIndex = mainSource.indexOf('\n    setup_storage');
+    const registerIndex = mainSource.indexOf('\n    register_redis_dev_lease');
+    const cleanupSource = source.slice(source.indexOf('\ncleanup() {'), source.indexOf('\ntrap cleanup EXIT'));
+
+    assert.ok(setupIndex >= 0, 'storage setup must remain discoverable');
+    assert.ok(registerIndex > setupIndex, 'worktree Redis ownership must be registered after Redis is healthy');
+    assert.match(source, /register-dev --port "\$REDIS_PORT" --redis-pid "\$redis_pid"/);
+    assert.match(source, /--data-dir "\$REDIS_DATA_DIR"/);
+    assert.match(source, /--owner-pid "\$\$" --project-root "\$PROJECT_DIR"/);
+    assert.match(
+      source,
+      /case "\$DAEMON_DEPLOYMENT_ID" in\s+runtime\|alpha\) return 0/s,
+      'runtime and Alpha deployments must remain outside the worktree dev lease namespace',
+    );
+    assert.match(cleanupSource, /remove_redis_dev_lease/);
+  });
+
   it('contains an optional F247 helper process failure inside the cloud capability boundary', () => {
     const sandboxDir = createSandbox();
     writeFileSync(join(sandboxDir, 'scripts', 'f247-cloud-services.mjs'), '', 'utf8');
@@ -484,10 +557,18 @@ describe('cross-platform pnpm-start profile propagation (#421)', () => {
     );
     const tmuxGateway = readFileSync(resolve(ROOT, 'packages/api/src/domains/terminal/tmux-gateway.ts'), 'utf8');
 
-    assert.match(acpClient, /buildChildEnv\(this\.config\.env\)/);
-    assert.match(acpHttpClient, /buildChildEnv\(this\.config\.env\)/);
+    assert.match(acpClient, /buildChildEnv\(this\.config\.env, \{ workingDirectory: this\.config\.cwd \}\)/);
+    assert.match(acpHttpClient, /buildChildEnv\(this\.config\.env, \{ workingDirectory: this\.config\.cwd \}\)/);
     assert.match(tmuxGateway, /'CONNECTOR_GATEWAY_AUTOSTART'/);
     assert.match(tmuxGateway, /'CAT_CAFE_PROVISION_GLOBAL_SIDECAR'/);
+  });
+
+  it('requires every buildChildEnv caller to declare its intended working directory or a narrow exception', () => {
+    assert.deepEqual(
+      collectBuildChildEnvCallsMissingWorkingDirectory(),
+      BUILD_CHILD_ENV_INHERITED_CWD_EXCEPTIONS,
+      'new buildChildEnv callers must pass workingDirectory so child PWD/INIT_CWD cannot drift from spawn cwd',
+    );
   });
 
   it('Windows status succeeds only when required API and web PID files are running', () => {
@@ -626,6 +707,54 @@ describe('cross-platform pnpm-start profile propagation (#421)', () => {
       /CAT_CAFE_DIRECT_NO_WATCH:\s*'1'/,
       'pnpm start must mark runtime-worktree startup as no-watch before dispatching',
     );
+  });
+
+  it('legacy restart environment cannot bypass foreign process ownership', () => {
+    const sandboxDir = createSandbox();
+    try {
+      const script = `
+source "$1" --source-only >/dev/null
+pid_cwd() { printf '%s\\n' /tmp/foreign-runtime-owner; }
+CAT_CAFE_RUNTIME_RESTART_OK=1
+guard_fn=guard_port_kill_ownership
+"$guard_fn" 39876 API 424242
+`;
+      const result = spawnSync('bash', ['-c', script, '_', join(sandboxDir, 'scripts', 'start-dev.sh')], {
+        cwd: sandboxDir,
+        encoding: 'utf8',
+        env: { ...process.env, API_SERVER_PORT: '39876', FRONTEND_PORT: '39875', PREVIEW_GATEWAY_PORT: '0' },
+      });
+
+      assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.match(`${result.stdout}\n${result.stderr}`, /cross worktree|跨 worktree/i);
+      assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /继续强制释放/);
+    } finally {
+      rmSync(sandboxDir, { recursive: true, force: true });
+    }
+  });
+
+  it('legacy restart environment cannot bypass an unreadable process owner', () => {
+    const sandboxDir = createSandbox();
+    try {
+      const script = `
+source "$1" --source-only >/dev/null
+pid_cwd() { return 1; }
+CAT_CAFE_RUNTIME_RESTART_OK=1
+guard_fn=guard_port_kill_ownership
+"$guard_fn" 39876 API 424242
+`;
+      const result = spawnSync('bash', ['-c', script, '_', join(sandboxDir, 'scripts', 'start-dev.sh')], {
+        cwd: sandboxDir,
+        encoding: 'utf8',
+        env: { ...process.env, API_SERVER_PORT: '39876', FRONTEND_PORT: '39875', PREVIEW_GATEWAY_PORT: '0' },
+      });
+
+      assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.match(`${result.stdout}\n${result.stderr}`, /unknown-cwd/);
+      assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /继续强制释放/);
+    } finally {
+      rmSync(sandboxDir, { recursive: true, force: true });
+    }
   });
 
   it('start-windows.ps1 clears inherited profile vars when strict mode is on', () => {

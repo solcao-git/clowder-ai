@@ -1,5 +1,7 @@
-import type { MeetingIntakeJudgmentField } from '@cat-cafe/shared';
-import type { Capability } from '@clowder-ai/plugin-contract';
+import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import type { MeetingIntakeJudgmentField, PluginDescription, PluginIconSpec } from '@cat-cafe/shared';
+import type { Capability, PluginManifest } from '@clowder-ai/plugin-contract';
 
 export interface OfficialPluginOwnerAuth {
   readonly kind: 'lark-cli-device';
@@ -13,10 +15,32 @@ export interface OfficialPluginCatalogEntry {
   readonly packageName: string;
   readonly version: string;
   readonly pluginId: string;
+  readonly distribution: 'registry' | 'bundled';
   readonly archiveUrl: string;
   readonly packageDigest: string;
+  /** Host-owned migration identity hidden when this catalog row is discoverable. */
+  readonly replacesRepositoryPluginId?: string;
   readonly effectiveGrants: readonly Capability[];
   readonly ownerAuth?: OfficialPluginOwnerAuth;
+  /** Canonical discovery presentation. Host grants and installation truth remain separate. */
+  readonly presentation?: {
+    readonly displayName: string;
+    readonly description: PluginDescription;
+    readonly icon: PluginIconSpec;
+    readonly publisher: string;
+  };
+}
+
+/** Catalog discovery may repeat presentation, but it cannot become a second truth. */
+export function officialPluginPresentationMatches(entry: OfficialPluginCatalogEntry, manifest: unknown): boolean {
+  if (entry.presentation === undefined) return true;
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return false;
+  const candidate = manifest as { name?: unknown; description?: unknown; icon?: unknown };
+  return (
+    candidate.name === entry.presentation.displayName &&
+    isDeepStrictEqual(candidate.description, entry.presentation.description) &&
+    isDeepStrictEqual(candidate.icon, entry.presentation.icon)
+  );
 }
 
 export interface OfficialPluginRelease {
@@ -36,6 +60,7 @@ export interface OfficialPluginCatalogPolicy {
   readonly catalogId: string;
   readonly packageName: string;
   readonly pluginId: string;
+  readonly distribution: 'registry' | 'bundled';
   readonly releaseTag: 'next';
   readonly bootstrapRelease: OfficialPluginRelease;
   readonly effectiveGrants: readonly Capability[];
@@ -51,6 +76,7 @@ export function officialPluginCatalogEntry(
     catalogId: policy.catalogId,
     packageName: policy.packageName,
     pluginId: policy.pluginId,
+    distribution: policy.distribution,
     version: release.version,
     archiveUrl: release.archiveUrl,
     packageDigest: release.packageDigest,
@@ -59,17 +85,53 @@ export function officialPluginCatalogEntry(
   };
 }
 
+export const COLLECTIVE_CONNECTOR_PLUGIN_MANIFEST = {
+  pluginId: 'official.collective-connector',
+  version: '0.1.0',
+  contractVersion: '0.1.0',
+  name: 'Collective Connector',
+  description: 'Pairs this Clowder AI Host with an independent Collective Service.',
+  features: [
+    {
+      id: 'collective-connection',
+      name: 'Collective connection',
+      resources: [],
+      capabilities: [],
+    },
+  ],
+  data: [
+    {
+      name: 'collective-connections',
+      dataClass: 'relationship',
+      strategy: 'retained',
+      schemaVersion: '1',
+    },
+    {
+      name: 'collective-signal-custody',
+      dataClass: 'interaction-history',
+      strategy: 'retained',
+      schemaVersion: '1',
+    },
+  ],
+  runtime: { transport: 'builtin' },
+} as const satisfies PluginManifest;
+
+export function bundledManifestDigest(manifest: PluginManifest): string {
+  return `sha512-${createHash('sha512').update(JSON.stringify(manifest)).digest('base64')}`;
+}
+
 export const OFFICIAL_PLUGIN_POLICIES = [
   {
     catalogId: 'feishu-meeting-intake',
     packageName: '@clowder-ai/feishu-meeting-intake',
     pluginId: 'official.feishu-meeting-intake',
+    distribution: 'registry',
     releaseTag: 'next',
     bootstrapRelease: {
-      version: '0.1.0-alpha.4',
+      version: '0.1.0-alpha.9',
       archiveUrl:
-        'https://registry.npmjs.org/@clowder-ai/feishu-meeting-intake/-/feishu-meeting-intake-0.1.0-alpha.4.tgz',
-      packageDigest: 'sha512-LCGMvCt7RR7gvlpJazEo3nwM9BY55Ibl3HCd34Jmcphe1LNBnFVY6DCDpkrrD+xh45c3xA9Sc4C3U6jtRrfLyw==',
+        'https://registry.npmjs.org/@clowder-ai/feishu-meeting-intake/-/feishu-meeting-intake-0.1.0-alpha.9.tgz',
+      packageDigest: 'sha512-d1wf5Il1Ls18Db9EUB4S0qqhDFRe6mSLIyv9E3Tz7VqI59gffHCe+JKmCJOYVGJBiv1ItrTq8ChthF0SzdSWYQ==',
     },
     effectiveGrants: ['events.publish'],
     ownerAuth: {
@@ -85,6 +147,34 @@ export const OFFICIAL_PLUGIN_POLICIES = [
         initialUnresolved: ['speakers', 'context', 'destination', 'outputs'],
       },
     ],
+  },
+  {
+    catalogId: 'collective-connector',
+    packageName: '@cat-cafe/collective-connector',
+    pluginId: 'official.collective-connector',
+    distribution: 'bundled',
+    releaseTag: 'next',
+    bootstrapRelease: {
+      version: '0.1.0',
+      archiveUrl: 'builtin:official.collective-connector',
+      packageDigest: bundledManifestDigest(COLLECTIVE_CONNECTOR_PLUGIN_MANIFEST),
+    },
+    effectiveGrants: [],
+    hostSignalRoutes: [],
+  },
+  {
+    catalogId: 'genoffice-docx',
+    packageName: '@clowder-ai/genoffice-docx',
+    pluginId: 'dev.clowder.genoffice-docx',
+    distribution: 'registry',
+    releaseTag: 'next',
+    bootstrapRelease: {
+      version: '0.1.0-alpha.1',
+      archiveUrl: 'https://registry.npmjs.org/@clowder-ai/genoffice-docx/-/genoffice-docx-0.1.0-alpha.1.tgz',
+      packageDigest: 'sha512-MT893A4JY0zi8WWgI3xxNqE2ENoX8032rdRiJRvUIQxq7A0uvB8gbiapj1cuHBLCuRxgBNg5wBRnwGX69sPxrQ==',
+    },
+    effectiveGrants: [],
+    hostSignalRoutes: [],
   },
 ] as const satisfies readonly OfficialPluginCatalogPolicy[];
 

@@ -4,18 +4,17 @@ related_features: [F200, F209, F221, F231, F256, F260, F263, F276, F281, F282]
 topics: [memory, recall, cue-plane, agentic-recall, decision-opportunity, progressive-disclosure]
 doc_kind: spec
 created: 2026-08-01
-tips_exempt: "F287 改变猫的内部记忆线索与召回路径；Phase C 的 opaque drill/outcome MCP 仅消费尚待 Phase D 接线的 CueEnvelope，工具 description 已承载使用时机与安全边界，当前没有可独立教学的用户入口。"
 description: "让猫在执行过程的真实判断点想起有用记忆，并以有界线索、按需钻取和可失效消费闭合跨 lane 读侧。"
 description_source: human
 description_author: codex-sol
-description_updated_at: 2026-08-02T06:20:00Z
+description_updated_at: 2026-08-27T10:40:00Z
 ---
 
 # F287: Memory Cue Plane（记忆线索与召回闭环）
 
 > **Status**: done | **Completed**: 2026-08-02 | **Owner**: 小太阳·Maine Coon (@codex-sol, GPT-5.6 Sol) | **Priority**: P1
 >
-> **Gate**: Architecture Design Gate PASSED — Ragdoll terminal APPROVE；operator 选择 Option A，并授权直接进入单一 F128 execution thread（`0001785585275543-000433-45096643`）。
+> **Gate**: Architecture Design Gate PASSED — Ragdoll terminal APPROVE；operator 选择 Option A，并授权直接进入单一 F128 execution thread（`private-source-id`）。
 
 Architecture cell: memory
 
@@ -31,11 +30,11 @@ operator把组织与产品价值说得很直接：
 
 > “Memory Cue Plane（记忆线索层）我建议单独立项，不应该拆散到各个 feat 的 phase 里……不然做了 n 天，某天我们发现记忆系统还有 bug 又没修。”
 >
-> — source message `0001785576172502-000024-b99b889a`
+> — source message `private-source-id`
 
 本 feature 的目标不是再造一个通用 RAG，而是让记忆闭环成为一等系统能力：**猫走到真实判断点 → 获得为什么是现在的有界线索 → 自己决定钻取、使用或忽略 → 纠正/遗忘后线索可靠失效**。operator不需要重复解释，也不需要把猫赶回旧 thread 才能使用历史。
 
-operator 于 `0001785580244904-000093-589e005d` 明确授权先立项，并保留本人和Ragdoll后续内容审阅；本次不主动召唤Ragdoll。
+operator 于 `private-source-id` 明确授权先立项，并保留本人和Ragdoll后续内容审阅；本次不主动召唤Ragdoll。
 
 ## Current State / 现状基线
 
@@ -62,6 +61,7 @@ operator 于 `0001785580244904-000093-589e005d` 明确授权先立项，并保�
 | Lane 不对称 | Entity 有 alias nudge；Person 主要靠主动 tool；Taste/Profile 没有同等级自动 consumer | “存了”不等于猫能感知 |
 | 生产噪声 | F282 实际浮现过“App / 而言 / commit / 我希望 / 成本”等高背景频率碎片 | 主动 nudge 污染上下文并消耗人的审批注意力 |
 | 消费闭环 | presented / drilled / applied / dismissed 没有统一、无正文的 episode 语义；source correction 又与消费结果混在一起 | 无法判断线索有用、无用，还是底层记忆已经被纠正/失效 |
+| 明确 Taste 应用 | owner 两次明确说 `ELI5`，已批准 F221 Taste 可检索但没有 typed opportunity；手动读到 Index 后仍输出纯 Markdown | retrieved 被误当成 applied，批准的“HTML 富文本优先”没有进入执行合同 |
 | 状态投影 | F281 全部 AC 与代码已落，feature 仍为 `in-progress`，BACKLOG 仍写 `spec`；旧 task 仍出现在本 thread | 子系统完成后整体仍像永久半成品 |
 
 因此当前不是“缺一条更长 prompt”，而是生产质量、可检索性、触发、lane 路由、消费与 lifecycle truth 六处没有由同一个用户旅程闭合。
@@ -77,6 +77,7 @@ operator 于 `0001785580244904-000093-589e005d` 明确授权先立项，并保�
 | R5 | 人物、运行先例、Taste 三种记忆按不同机制被想起 | AC-D1..AC-D3 | three golden journeys | [x] |
 | R6 | 猫能 drill/use/ignore；纠正、遗忘、越权后 cue fail closed | AC-C4, AC-E1, AC-E2 | lifecycle fixtures + UAT | [x] |
 | R7 | 不把完成状态散落成永久半成品 | AC-A2, AC-E4 | feature/BACKLOG/task/cell parity check | [x] |
+| R8 | 明确命中已批准 Taste trigger 时，必须 exact drill 并用真实交付证据闭合 applied | AC-F1..AC-F4 | closed catalog + route/source/callback RED→GREEN | [x] |
 
 ### 覆盖检查
 
@@ -102,7 +103,7 @@ operator 于 `0001785580244904-000093-589e005d` 明确授权先立项，并保�
 3. F282 lane-neutral detector 加入背景频率/近期突增与确定性噪声门，保留 Alden 与单次重要机会。
 4. F276 完成“有信息人物卡 approve → recall → correct → forget”的真实 owner UAT；不以历史 rejected Alden 卡冒充成功。
 
-AC-B2 已发现三文件并行 WIP（`context-transport.ts`、`route-helpers.ts`、`f148-context-transport.test.js`），来源为 F263 thread message `0001785555680310-001610-7225e1a1`。F287 已通过 cross-thread message `0001785582525286-000172-7b2b3f29` 核验并冻结边界：Design Gate 不触碰代码；进入实现时先消费/修订该 patch，不平行重写。
+AC-B2 已发现三文件并行 WIP（`context-transport.ts`、`route-helpers.ts`、`f148-context-transport.test.js`），来源为 F263 thread message `private-source-id`。F287 已通过 cross-thread message `private-source-id` 核验并冻结边界：Design Gate 不触碰代码；进入实现时先消费/修订该 patch，不平行重写。
 
 ### Phase C: Cue Plane Contract
 
@@ -129,6 +130,13 @@ AC-B2 已发现三文件并行 WIP（`context-transport.ts`、`route-helpers.ts`
 - 验证 private scope、cross-owner fail closed、forget 后零 cue、无关事件零污染、预算和去重。
 - 形成 keep/tune/sunset verdict；同步 feature、BACKLOG、task、ownership cell、discussion 与完成索引。
 
+### Post-close hardening: explicit approved Taste consumption
+
+- Catalog v2 增加唯一 closed pair `owner_message / approved_taste_invoked`；v2 trigger registry 当前只接受 `ELI5`，不接受 raw query、全库 top-k 或 LLM intent classifier。
+- producer 只读取当前 direct-owner message 的 `stripStructuralEnvelope` 结果，并要求真实 `sourceMessageId`；history-only、connector/A2A、未知 trigger 都返回零 seed。
+- resolver 只读取 `docs/taste/vignettes/visual-quality-ELI5-pcpjsd.md`，投影阶段不复制 vignette；owner-auth drill 才返回当前 revision 的完整批准内容与 typed `html_widget` application contract。
+- explicit Taste 的 `applied` 必须已有 `presented + drilled`，source revision 仍有效，且同 callback-auth invocation 的 `RichBlockBuffer` 真实存在 `html_widget`。纯 Markdown、只检索/只读 Index 或跨 invocation rich block 都不能记为 applied。
+
 ## User Journey
 
 ### Primary Journey: 猫在真正需要时想起，而不是等人重复
@@ -153,6 +161,7 @@ AC-B2 已发现三文件并行 WIP（`context-transport.ts`、`route-helpers.ts`
 | S2 | decision episode | 猫猫 | zero-step billing failure → operational precedent cue → 交付判断 | replay fixture + gate outcome |
 | S3 | judgment surface | 猫猫 | design/review → Taste dimension map → drill vignette | negative pollution fixture + UAT |
 | S4 | memory lifecycle | operator | 纠正/forget → 同一机会重放 → 零旧 cue | deletion/invalidation fixture |
+| S5 | explicit Taste application | operator + 猫猫 | 当前 owner message 明确 `ELI5` → exact approved vignette cue → drill → `html_widget` → applied | serial/parallel seed + exact source + callback evidence fixture |
 
 ## Acceptance Criteria
 
@@ -162,7 +171,7 @@ AC-B2 已发现三文件并行 WIP（`context-transport.ts`、`route-helpers.ts`
 
 - [x] AC-A1: memory source map 覆盖 F102/F152/F186/F188/F200/F209/F221/F231/F256/F260/F263/F271/F276/F281/F282，逐项记录 canonical truth、consumer、cue path、drill、forget、main/live/UAT 与 owner；非作者能从代码/spec/commit 复核。
 - [x] AC-A2: F281/F282 的 feature、BACKLOG、completed index 与当前 thread task 投影对齐；不得把 all-AC-checked 的 feature继续展示为 `spec`。
-  operator Hub settlement completed for exact owner-bound tasks `0001785409801656-000018-8eb3356f` and `0001785409804908-000019-47e814aa`; authoritative readback is `done/done`（`0001785593462801-000757-ad289215`）。
+  operator Hub settlement completed for exact owner-bound tasks `private-source-id` and `private-source-id`; authoritative readback is `done/done`（`private-source-id`）。
 - [x] AC-A3: F287 spec、BACKLOG、当前 command thread 与唯一 persistent task 互相链接；同一 Phase 不创建三个平级长期执行 thread。
 
 ### Phase B（Recall Readiness）
@@ -174,7 +183,7 @@ AC-B2 已发现三文件并行 WIP（`context-transport.ts`、`route-helpers.ts`
 - [x] AC-B3: F282 frozen cohort 同时包含 Alden、单次重要人物、中文高频碎片、代码词与一般名词；约束向量证明 relevant coverage 不塌、irrelevant/审批负担下降，统计层仍不判断 lane/重要性。
   Frozen replay verdict：detector relevant `4/5`、single-important judgment `2/3`、irrelevant `0/4`、attention vector `[1,0,0,0,0,0,3]`；frequency remains a content-free, lane-neutral opportunity signal，不成为 lane/importance verdict。
 - [x] AC-B4: F276 真实 owner UAT 产出有身份/关系/互动信息的卡，approve 后可 recall，correct 后更新，forget 后不可召回；历史 rejected Alden proposal 不计通过。
-  Alpha v4 candidate `person_candidate_8eeef98bc6efdd8a6117e1ae` materialize 后，消息 `0001785601744375-000001-a0f73ee4` 证明 `resolved → applied → resolved → purged → not_available`；fresh invocation `0001785601829128-000003-f5b79014` 再次得到 `not_available`。这验证 main 已加载的 F276 lifecycle；Phase B implementation 已由 PR #3366 落到 main，但未获 runtime activation 授权，故 `main=landed`、`live=dormant`、既有 F276 UAT 不混报。
+  Alpha v4 candidate `person_candidate_8eeef98bc6efdd8a6117e1ae` materialize 后，消息 `private-source-id` 证明 `resolved → applied → resolved → purged → not_available`；fresh invocation `private-source-id` 再次得到 `not_available`。这验证 main 已加载的 F276 lifecycle；Phase B implementation 已由 PR #3366 落到 main，但未获 runtime activation 授权，故 `main=landed`、`live=dormant`、既有 F276 UAT 不混报。
 
 ### Phase C（Cue Contract）
 
@@ -187,7 +196,7 @@ AC-B2 已发现三文件并行 WIP（`context-transport.ts`、`route-helpers.ts`
 
 Phase C landed evidence: PR #3367 merge `7ad6043386ad58afc6d87ea8985cd42b9654b58c` 将 strict shared union/catalog、five-family registry、zero-only admission、bounded prompt/dedupe/expiry、SQLite V37 content-free append-only ledger、exact retry/two-connection WAL race，以及 owner-authenticated lifecycle callbacks + MCP parity 一并落到 main。句柄以 process-lifecycle key 做 AES-256-GCM authenticated encryption：不新增 handle store，API restart 后旧 handle fail closed；只有签名有效且 scope 相同的过期 handle 才落 `expired` invalidation，无法认证的旧/篡改 handle 不生成可伪造事件。`presented` 在 whole-cue 进入 assembled prompt 后，以 deterministic cue/invocation key 写入；never-presented 与已 invalidated 的新 outcome 均拒绝，失效前已成功 outcome 的 exact retry 保持幂等但不复活 cue。
 
-Executable evidence: shared contract **11/11**；API catalog/registry/plane/schema/episode/callback **25/25**；MCP lifecycle + registration/toolset **32/32**；API、shared、MCP TypeScript builds 均 PASS。Kimi 对 parent implementation 与 V37 legacy-test semantic delta 分别 APPROVE（`0001785609724241-001208-9c3017fc`、`0001785609866099-001219-d0ce61e9`）；最终 9-commit latest-main rebase 的 `git range-diff` 为 9/9 `=`，final HEAD `d0540e53057746e1b4927b0108d9ec486f23b6c2` 的 Brand Boundary Guard 通过，semantic-identical HEAD `93d5e64150c5f04973335b5f3bbf02670b1f90e9` 的 full `pnpm gate` exit 0。代码 `main=landed`、`live=dormant`；未执行 runtime sync/restart/activation，尚无 Phase C live/UAT claim。
+Executable evidence: shared contract **11/11**；API catalog/registry/plane/schema/episode/callback **25/25**；MCP lifecycle + registration/toolset **32/32**；API、shared、MCP TypeScript builds 均 PASS。Kimi 对 parent implementation 与 V37 legacy-test semantic delta 分别 APPROVE（`private-source-id`、`private-source-id`）；最终 9-commit latest-main rebase 的 `git range-diff` 为 9/9 `=`，final HEAD `d0540e53057746e1b4927b0108d9ec486f23b6c2` 的 Brand Boundary Guard 通过，semantic-identical HEAD `93d5e64150c5f04973335b5f3bbf02670b1f90e9` 的 full `pnpm gate` exit 0。代码 `main=landed`、`live=dormant`；未执行 runtime sync/restart/activation，尚无 Phase C live/UAT claim。
 
 ### Phase D（Golden Slices）
 
@@ -195,7 +204,7 @@ Executable evidence: shared contract **11/11**；API catalog/registry/plane/sche
 - [x] AC-D2: billing-only replay 仅在 delivery decision frame 到场，不在任务开场 query 或无关 gate 注入；cue 包含完整运行先例与 whyNow，consumer 能作 keep/tune/sunset 判断。
 - [x] AC-D3: Taste journey 只投影相关维度地图与 drill handle；自动选具体 vignette/结论的负向 fixture 为零，猫主动 drill 后可读完整已批准内容。
 
-Phase D landed evidence: PR #3372 merge `f9d0116f9be0c2eaa612bf907c0106bd38f96deb` 将 person、operational precedent 与 Taste 三条 frozen journey 接入真实 serial/parallel、connector/queue 与 source/drill 装配路径；同实体 legacy nudge 仅在 cue admitted 后抑制，GitHub billing 四元组绑定同一 check run/job 且 partial/prose/extra spoof 为零，judgment surface 仅接受 human explicit tag 或 typed workflow override。Kimi 对 final exact HEAD `6e432d8de8040c7d87ad735fe4f14c6e574eb4c6` 的 semantic-delta review APPROVE（`0001785634849243-000197-48d01e1c`），无 P1/P2，独立 overlap 244/244 + shared 12/12；latest-main full `pnpm gate` 全绿。代码 `main=landed`、`live=dormant`；真实 integrated UAT 仍属于 Phase E。
+Phase D landed evidence: PR #3372 merge `f9d0116f9be0c2eaa612bf907c0106bd38f96deb` 将 person、operational precedent 与 Taste 三条 frozen journey 接入真实 serial/parallel、connector/queue 与 source/drill 装配路径；同实体 legacy nudge 仅在 cue admitted 后抑制，GitHub billing 四元组绑定同一 check run/job 且 partial/prose/extra spoof 为零，judgment surface 仅接受 human explicit tag 或 typed workflow override。Kimi 对 final exact HEAD `6e432d8de8040c7d87ad735fe4f14c6e574eb4c6` 的 semantic-delta review APPROVE（`private-source-id`），无 P1/P2，独立 overlap 244/244 + shared 12/12；latest-main full `pnpm gate` 全绿。代码 `main=landed`、`live=dormant`；真实 integrated UAT 仍属于 Phase E。
 
 ### Phase E（Integrated UAT + Close）
 
@@ -205,6 +214,15 @@ Phase D landed evidence: PR #3372 merge `f9d0116f9be0c2eaa612bf907c0106bd38f96de
 - [x] AC-E4: feature、BACKLOG、task、ownership cell、discussion、completed index 与 thread 状态同一次关闭迁移完成；无 orphan task 或“代码 done / 文档 spec”漂移。
 
 Phase E close evidence: PR #3376 merge `e5ead065143bb0fe6fdf997b088ee8240cf9d2c8` 落地三份 metric birth certificate、byte-identical replay 与 content-free lifecycle hardening；PR #3381 merge `7831df17a281df21e0da78b959428c5ca5c1e594` 保证 trusted Billing carrier 在 Redis direct/queued 两条路径同 contract；真实 canonical LL-098 + opaque handle Alpha UAT 暴露 300-token family budget drop 后，PR #3383 merge `1a8b4012e8282de2005c3d0649f58a38e22ce058` 只把 operational precedent budget 调到 420，并保留 person/taste=300 与 737-token whole-cue drop。Alpha HEAD `cf9980b595168dbb5b64250c2e48022ba3ad27cd` 包含上述 merge，3011/3012/4111/6398 健康；Person、Taste、Operational 三条 owner-authenticated journey 与负向矩阵见 `docs/features/evidence/F287/README.md`。三个 family verdict 均为 `keep`，无 aggregate score；production 未重启、未验证。
+
+### Post-close explicit Taste correction
+
+- [x] AC-F1: shared catalog v2 只新增 `owner_message / approved_taste_invoked`，payload 固定为 `triggerKey=ELI5 + sourceMessageId`；unknown key、rawQuery、producer mismatch 均 parse 失败。
+- [x] AC-F2: serial/parallel 只从当前 direct-owner semantic message 生产一次 seed；结构历史命中、connector/A2A、缺 sourceMessageId 与未知 trigger 均为零。
+- [x] AC-F3: cue 只投影 exact F221 source coordinate，drill 才返回完整 current-revision vignette 与 typed `html_widget` contract；tag/revision 漂移按 `source_corrected` fail closed。
+- [x] AC-F4: explicit Taste `applied` 要求 presented、drilled、current source 与同 invocation `html_widget` 四项同时成立；Markdown-only 返回 `409 application_evidence_required`；已提交 request 的 exact retry 不依赖瞬态 buffer 且不新增事件，content-free episode 仍不保存 HTML 或 Taste 正文。
+
+Executable evidence: shared contract **14/14**；F287/F296 targeted API suites **63/63**；shared/API TypeScript builds PASS。生产 `3002/6399` 未触碰；Alpha/live verdict 在本修正合入后单独验证，不从 branch tests 推断。
 
 ## Dependencies
 
@@ -270,4 +288,4 @@ Phase E close evidence: PR #3376 merge `e5ead065143bb0fe6fdf997b088ee8240cf9d2c8
 
 ## Tips Contribution（F244）
 
-`tips_exempt: F287 改变猫的内部记忆线索与召回路径；kickoff 不新增用户可直接操作或发现的产品入口。`
+`feature-f287-explicit-eli5-html` 教用户直接说 `ELI5`，让猫用批准的可视化品味输出 HTML 富文本。公开 `bodySource` 只指向本 feature 的已导出行为合同；runtime 仍从 canonical F221 Taste 读取 exact approved vignette，不复制或外发 `docs/taste/`，也不另造能力真相。

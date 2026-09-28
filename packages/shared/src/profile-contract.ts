@@ -4,7 +4,25 @@
  */
 
 export const CURRENT_RELATIONSHIP_PROFILE_URI = 'cat-cafe-profile://relationship/current' as const;
+/** Phase E: canonical URI for the owner-wide shared corpus. */
+export const CURRENT_CORPUS_PROFILE_URI = 'cat-cafe-profile://corpus/current' as const;
 export const DEFAULT_PROFILE_USER_ID = 'default-user';
+export const USER_CAPSULE_CHAR_LIMIT = 300;
+
+/** Phase E: fixed relative path for the shared corpus file inside profiles/<userId>/. */
+export const PROFILE_CORPUS_RELATIVE_PATH = 'corpus/shared-facts.md' as const;
+
+/** Phase E: returns the fixed corpus relative path (pure function for symmetry with relationshipPrimerRelativePath). */
+export function profileCorpusRelativePath(): string {
+  return PROFILE_CORPUS_RELATIVE_PATH;
+}
+
+/**
+ * Phase E: profileRevisionOf lives in ./profile-revision.ts (server-only, node:crypto).
+ * Extracted because memory-cue.ts → this file is in the barrel's transitive closure,
+ * and collective-client bundles for platform:'browser' which can't resolve node:crypto.
+ * Import from '@cat-cafe/shared/profile-revision' for INV-4 canonical revision function.
+ */
 
 const PROFILE_PATH_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_PROFILE_USER_ID_LENGTH = 512;
@@ -39,4 +57,32 @@ export function relationshipKeyFromPrimerRelativePath(targetPath: string): strin
   const match = /^relationship\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})-primer\.md$/.exec(normalized);
   if (!match) throw new Error(`Invalid relationship primer target "${targetPath}"`);
   return assertProfilePathSegment('relationshipKey', match[1]);
+}
+
+/**
+ * Canonical F231 rendering for the capsule bytes embedded in L0.
+ *
+ * Keeping this pure transform in the profile contract lets durable evidence
+ * bind the exact rendered profile segment, instead of accidentally binding a
+ * newer on-disk profile body after compilation has already happened.
+ */
+export function renderUserCapsuleSection(raw: string): string {
+  const lines = raw.trim().split('\n');
+  let body: string;
+  if (lines[0]?.trim() === '---') {
+    const closingFence = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+    body = (closingFence < 0 ? lines.slice(1) : lines.slice(closingFence + 1)).join('\n').trim();
+  } else {
+    const metadataFence = lines.findIndex((line) => line.trim() === '---');
+    body = (metadataFence < 0 ? raw : lines.slice(metadataFence + 1).join('\n')).trim();
+  }
+  if (!body) return '';
+  const charCount = [...body.replace(/\s/g, '')].length;
+  if (charCount > USER_CAPSULE_CHAR_LIMIT) {
+    throw new Error(
+      `USER_CAPSULE exceeds ${USER_CAPSULE_CHAR_LIMIT}-character limit: ${charCount} characters. ` +
+        `Capsule must be ≤${USER_CAPSULE_CHAR_LIMIT} chars (KD-7). Trim content or move overflow to primer.`,
+    );
+  }
+  return `## 主人画像\n\n${body}`;
 }

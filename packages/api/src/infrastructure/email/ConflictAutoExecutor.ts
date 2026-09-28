@@ -7,7 +7,6 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { FastifyBaseLogger } from 'fastify';
 import { listWorktrees } from '../../domains/workspace/workspace-security.js';
 import { withHiddenGhCliWindow } from '../github/gh-cli-env.js';
 
@@ -29,15 +28,33 @@ export interface ConflictAutoExecutorOptions {
   readonly repoRoot?: string;
 }
 
+interface PullRequestHead {
+  readonly branch: string;
+  readonly headSha: string;
+}
+
 export class ConflictAutoExecutor {
   constructor(private readonly opts: ConflictAutoExecutorOptions) {}
 
-  async resolve(repoFullName: string, prNumber: number): Promise<AutoResolveResult> {
+  async resolve(
+    repoFullName: string,
+    prNumber: number,
+    expectedHeadSha: string,
+    signal?: AbortSignal,
+  ): Promise<AutoResolveResult> {
     const { log } = this.opts;
+    signal?.throwIfAborted();
 
-    // 1. Get PR head branch from GitHub
-    const branch = await this.getPrBranch(repoFullName, prNumber);
-    if (!branch) return { kind: 'skipped', reason: 'cannot determine PR branch' };
+    // 1. Bind the write to the exact HEAD that produced the conflict observation.
+    const prHead = await this.getPrHead(repoFullName, prNumber, signal);
+    if (!prHead) return { kind: 'skipped', reason: 'cannot determine PR head' };
+    if (prHead.headSha !== expectedHeadSha) {
+      return {
+        kind: 'skipped',
+        reason: `PR HEAD changed from ${expectedHeadSha} to ${prHead.headSha} — refusing stale auto-rebase`,
+      };
+    }
+    const { branch } = prHead;
 
     // Safety: only feat/* branches
     if (!branch.startsWith('feat/')) {
@@ -46,6 +63,7 @@ export class ConflictAutoExecutor {
 
     // 2. Find local worktree for this branch
     const worktreePath = await this.findWorktree(branch);
+    signal?.throwIfAborted();
     if (!worktreePath) return { kind: 'skipped', reason: `no local worktree for branch ${branch}` };
 
     // Safety: never touch runtime
@@ -53,40 +71,71 @@ export class ConflictAutoExecutor {
       return { kind: 'skipped', reason: 'refusing to touch runtime worktree' };
     }
 
+    const localHead = (await this.git(worktreePath, ['rev-parse', 'HEAD'], signal)).stdout.trim();
+    if (localHead !== expectedHeadSha) {
+      return {
+        kind: 'skipped',
+        reason: `local HEAD ${localHead || '<empty>'} does not match observed PR HEAD ${expectedHeadSha}`,
+      };
+    }
+
     log.info(`[ConflictAutoExecutor] Attempting auto-rebase for ${branch} in ${worktreePath}`);
 
     // 3. Fetch + rebase
     try {
-      await this.git(worktreePath, ['fetch', 'origin', 'main']);
-      await this.git(worktreePath, ['rebase', 'origin/main']);
+      await this.git(worktreePath, ['fetch', 'origin', 'main'], signal);
+      await this.git(worktreePath, ['rebase', 'origin/main'], signal);
     } catch {
-      return this.handleRebaseFailure(worktreePath, branch);
+      if (signal?.aborted) {
+        // A cancelled rebase may leave sequencer state behind. Finish the
+        // existing bounded cleanup before surfacing the abort; the scheduler
+        // keeps its overlap lock until this promise settles.
+        await this.abortRebase(worktreePath);
+        signal.throwIfAborted();
+      }
+      return this.handleRebaseFailure(worktreePath, branch, signal);
     }
 
     // 4. Clean rebase succeeded → push
     try {
-      await this.git(worktreePath, ['push', '--force-with-lease']);
+      const remoteRef = `refs/heads/${branch}`;
+      await this.git(
+        worktreePath,
+        ['push', `--force-with-lease=${remoteRef}:${expectedHeadSha}`, 'origin', `HEAD:${remoteRef}`],
+        signal,
+      );
       log.info(`[ConflictAutoExecutor] Clean rebase + push succeeded for ${branch}`);
       return { kind: 'resolved', method: 'clean-rebase', branch };
     } catch {
+      signal?.throwIfAborted();
       // Push rejected (e.g. someone else pushed) — don't escalate, just skip
       return { kind: 'skipped', reason: 'push --force-with-lease rejected' };
     }
   }
 
-  private async handleRebaseFailure(worktreePath: string, branch: string): Promise<AutoResolveResult> {
+  private async handleRebaseFailure(
+    worktreePath: string,
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<AutoResolveResult> {
     const { log } = this.opts;
     let conflictFiles: string[] = [];
 
     try {
-      const { stdout } = await this.git(worktreePath, ['diff', '--name-only', '--diff-filter=U']);
+      const { stdout } = await this.git(worktreePath, ['diff', '--name-only', '--diff-filter=U'], signal);
       conflictFiles = stdout.trim().split('\n').filter(Boolean);
     } catch {
+      if (signal?.aborted) {
+        await this.abortRebase(worktreePath);
+        signal.throwIfAborted();
+      }
       // Can't even list conflicts
     }
 
-    // Always abort
-    await this.git(worktreePath, ['rebase', '--abort']).catch(() => {});
+    // Always abort. Cleanup deliberately has only its own 30s process bound:
+    // parent cancellation is already known, and terminal truth waits here.
+    await this.abortRebase(worktreePath);
+    signal?.throwIfAborted();
 
     if (conflictFiles.length === 0) {
       log.warn(`[ConflictAutoExecutor] Rebase failed but no conflict files found for ${branch}`);
@@ -97,15 +146,21 @@ export class ConflictAutoExecutor {
     return { kind: 'escalated', files: conflictFiles, branch };
   }
 
-  async getPrBranch(repoFullName: string, prNumber: number): Promise<string | null> {
+  async getPrHead(repoFullName: string, prNumber: number, signal?: AbortSignal): Promise<PullRequestHead | null> {
     try {
       const { stdout } = await execFileAsync(
         'gh',
-        ['api', `repos/${repoFullName}/pulls/${prNumber}`, '--jq', '.head.ref'],
-        withHiddenGhCliWindow({ timeout: GH_TIMEOUT_MS }),
+        ['api', `repos/${repoFullName}/pulls/${prNumber}`, '--jq', '{branch:.head.ref,headSha:.head.sha}'],
+        withHiddenGhCliWindow({ timeout: GH_TIMEOUT_MS, signal }),
       );
-      return stdout.trim() || null;
+      const value: unknown = JSON.parse(stdout);
+      if (!value || typeof value !== 'object') return null;
+      const candidate = value as Record<string, unknown>;
+      if (typeof candidate.branch !== 'string' || !candidate.branch) return null;
+      if (typeof candidate.headSha !== 'string' || !candidate.headSha) return null;
+      return { branch: candidate.branch, headSha: candidate.headSha };
     } catch {
+      signal?.throwIfAborted();
       return null;
     }
   }
@@ -119,7 +174,18 @@ export class ConflictAutoExecutor {
     }
   }
 
-  private git(cwd: string, args: string[]) {
-    return execFileAsync('git', args, { cwd, timeout: GIT_TIMEOUT_MS });
+  private git(cwd: string, args: string[], signal?: AbortSignal) {
+    return execFileAsync('git', args, { cwd, timeout: GIT_TIMEOUT_MS, signal });
+  }
+
+  private async abortRebase(worktreePath: string): Promise<void> {
+    try {
+      await this.git(worktreePath, ['rebase', '--abort']);
+    } catch (error) {
+      this.opts.log.warn(
+        { error, worktreePath },
+        '[ConflictAutoExecutor] Failed to abort rebase cleanup; worktree may require repair',
+      );
+    }
   }
 }

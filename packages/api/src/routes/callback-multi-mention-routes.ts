@@ -25,16 +25,21 @@ import {
   actionSuccessorFencesMatch,
   reconcileActionSuccessorEnqueue,
 } from '../domains/ball-custody/reconcile-action-successor-enqueue.js';
+import type { TurnCustodyWakeProvenance } from '../domains/ball-custody/TurnCustodyProjectionService.js';
 import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
+import type { InvocationRecord } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
 import type { OwnerAuthProvenance } from '../domains/cats/services/agents/invocation/owner-auth-provenance.js';
+import { isTerminalDispositionEvent } from '../domains/cats/services/agents/invocation/PerCatTerminalDispositionCollector.js';
 import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/visible-turn.js';
 import { resolveCatTarget } from '../domains/cats/services/agents/routing/cat-target-resolver.js';
 import {
   type MultiMentionCreateParams,
   MultiMentionOrchestrator,
 } from '../domains/cats/services/agents/routing/MultiMentionOrchestrator.js';
+import { userFacingSystemInfoNoticeContent } from '../domains/cats/services/agents/routing/persist-system-info-warnings.js';
 import { createA2ASlotTrackingBridge } from '../domains/cats/services/agents/routing/route-helpers.js';
+import type { CloudDispatchProvenance } from '../domains/cats/services/cloud-bridge/types.js';
 import { parseIntent } from '../domains/cats/services/context/IntentParser.js';
 import {
   checkFreshnessForPostMessage,
@@ -50,13 +55,17 @@ import {
 import type { AgentRouter } from '../domains/cats/services/index.js';
 import type { DeliveryCursorStore } from '../domains/cats/services/stores/ports/DeliveryCursorStore.js';
 import type { IInvocationRecordStore } from '../domains/cats/services/stores/ports/InvocationRecordStore.js';
-import { type IMessageStore, isDelivered } from '../domains/cats/services/stores/ports/MessageStore.js';
+import {
+  type IMessageStore,
+  isDelivered,
+  type StoredMessage,
+} from '../domains/cats/services/stores/ports/MessageStore.js';
 import type { IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
 import type {
   ITurnExecutionStore,
   TurnExecutionRecord,
 } from '../domains/cats/services/stores/ports/TurnExecutionStore.js';
-import { canViewMessage } from '../domains/cats/services/stores/visibility.js';
+import { canViewMessage, resolveVisibleReplyParent } from '../domains/cats/services/stores/visibility.js';
 import {
   protocolActionWithoutCustodyTotal,
   successorActionFenceUnavailable,
@@ -65,6 +74,7 @@ import {
   successorUnfencedSingleTargetMultiMention,
 } from '../infrastructure/telemetry/instruments.js';
 import type { SocketManager } from '../infrastructure/websocket/index.js';
+import { emitParallelRoutingPills } from './a2a-routing-projection.js';
 import { requireCallbackAuth } from './callback-auth-prehandler.js';
 import { resolveCallbackActionLeaseRef } from './callback-scope-helpers.js';
 
@@ -89,6 +99,78 @@ export function classifyMultiMentionCarrierUsage(input: { targetCount: number; h
   return { singleTarget, unfencedSingleTarget: singleTarget && !input.hasAction };
 }
 
+function multiMentionIntent(question: string, context: string | undefined): string {
+  return [question, ...(context ? ['---', context] : [])].join('\n\n');
+}
+
+async function resolveCloudDispatchProvenance(input: {
+  record: InvocationRecord;
+  messageStore: IMessageStore;
+  question: string;
+  context: string | undefined;
+  log: FastifyBaseLogger;
+}): Promise<CloudDispatchProvenance | undefined> {
+  const sourceMessageId = input.record.originTriggerMessageId ?? input.record.a2aTriggerMessageId;
+  if (!sourceMessageId) {
+    input.log.warn(
+      { invocationId: input.record.invocationId },
+      '[F247] multi-mention exact source provenance unavailable',
+    );
+    return undefined;
+  }
+
+  let source: StoredMessage | null;
+  try {
+    source = await resolveVisibleReplyParent(input.messageStore, sourceMessageId, {
+      threadId: input.record.threadId,
+      viewer: { type: 'cat', catId: createCatId('gpt-pro') },
+      publicReply: true,
+    });
+  } catch (err) {
+    input.log.warn(
+      { invocationId: input.record.invocationId, sourceMessageId, err },
+      '[F247] multi-mention exact source lookup failed closed',
+    );
+    return undefined;
+  }
+  if (
+    !source ||
+    source.id !== sourceMessageId ||
+    source.threadId !== input.record.threadId ||
+    source.userId !== input.record.userId ||
+    source.deletedAt ||
+    !isDelivered(source) ||
+    source.userId === 'system' ||
+    source.catId === 'system' ||
+    source.origin === 'briefing' ||
+    !canViewMessage(source, { type: 'cat', catId: input.record.catId })
+  ) {
+    input.log.warn(
+      { invocationId: input.record.invocationId, sourceMessageId },
+      '[F247] multi-mention exact source failed scope or public-return eligibility validation',
+    );
+    return undefined;
+  }
+
+  const sourceSender: CloudDispatchProvenance['sourceSender'] = source.catId
+    ? {
+        kind: 'cat',
+        id: source.catId,
+        ...(source.extra?.stream?.turnInvocationId
+          ? { invocationId: source.extra.stream.turnInvocationId }
+          : source.extra?.stream?.invocationId
+            ? { invocationId: source.extra.stream.invocationId }
+            : {}),
+      }
+    : { kind: 'user', id: source.userId };
+  return {
+    sourceMessageId,
+    sourceSender,
+    calledByCatId: input.record.catId,
+    intent: multiMentionIntent(input.question, input.context),
+  };
+}
+
 // ── Schema ───────────────────────────────────────────────────────────
 const multiMentionSchema = z
   .object({
@@ -105,6 +187,14 @@ const multiMentionSchema = z
   })
   .superRefine((value, ctx) => {
     if (!value.action) return;
+    if (value.action.actionFamily === 'review') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['action'],
+        message:
+          'Local review uses ordinary durable A2A delivery with localReviewVerdict, reviewedHeadSha, and accepted-source fields, not multi_mention action custody.',
+      });
+    }
     if (!value.idempotencyKey) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['idempotencyKey'], message: 'required with action metadata' });
     }
@@ -187,7 +277,8 @@ export interface MultiMentionRouteDeps {
       catId: string;
       invocationId: string;
       messageIds: readonly string[];
-    }): Promise<void>;
+      seenAt: number;
+    }): Promise<readonly TurnCustodyWakeProvenance[] | void>;
   };
 }
 
@@ -250,10 +341,7 @@ function registerMultiMentionCompletionHook(input: {
       { requestId: input.requestId, catId: input.catId, newStatus, responseLength: finalResponse.length },
       '[F122B B6] multi-mention queue response recorded',
     );
-    if (newStatus === 'done') {
-      cancelTimeout(input.requestId);
-      void flushResult(input.deps, input.requestId, input.threadId, input.userId, input.log);
-    }
+    settleGroupIfComplete(input.deps, input.requestId, input.threadId, input.userId, input.log);
   });
 }
 
@@ -268,6 +356,8 @@ function enqueueMultiMentionTarget(input: {
   userId: string;
   ownerAuthProvenance: OwnerAuthProvenance;
   initiator: CatId;
+  cloudDispatchProvenance: CloudDispatchProvenance | undefined;
+  parentInvocationId: string;
   log: FastifyBaseLogger;
   actionFence: ActionSuccessorFence | undefined;
 }): 'enqueued' | 'skipped' | 'depth_limited' | 'unavailable' {
@@ -297,10 +387,15 @@ function enqueueMultiMentionTarget(input: {
     intent: 'execute',
     autoExecute: true,
     callerCatId: input.initiator,
+    a2aParentInvocationId: input.parentInvocationId,
+    idempotencyKey: input.actionFence
+      ? `action:${input.actionFence.leaseId}:${input.actionFence.generation}:${input.catId}`
+      : `multi-mention:${input.requestId}:${input.catId}`,
+    ...(input.cloudDispatchProvenance ? { cloudDispatchProvenance: input.cloudDispatchProvenance } : {}),
+    requiresExactCloudDispatchProvenance: true,
     ...(input.actionFence
       ? {
           actionSuccessorFence: input.actionFence,
-          idempotencyKey: `action:${input.actionFence.leaseId}:${input.actionFence.generation}:${input.catId}`,
         }
       : {}),
   });
@@ -332,9 +427,20 @@ async function dispatchViaQueue(
   userId: string,
   ownerAuthProvenance: OwnerAuthProvenance,
   initiator: CatId,
+  cloudDispatchProvenance: CloudDispatchProvenance | undefined,
+  parentInvocationId: string,
   log: FastifyBaseLogger,
   actionFence?: ActionSuccessorFence,
   actionCarrierDisposition?: ActionSuccessorCarrierDisposition,
+  /**
+   * F086/F216: runs AFTER every target has real Queue custody and BEFORE any target is started.
+   * Projection must describe admitted siblings only — announcing the requested target list before
+   * admission is the exact "projection ahead of fact" defect this change exists to remove.
+   * Deliberately NOT awaited by the caller: see the call site: custody is durable by then, and
+   * awaiting a projection write in front of `tryAutoExecute` would turn a slow message store into
+   * a scheduling stall.
+   */
+  onAdmitted?: (admitted: CatId[]) => Promise<void>,
 ): Promise<void> {
   const { invocationQueue, queueProcessor } = deps;
   if (!invocationQueue || !queueProcessor) return;
@@ -344,6 +450,8 @@ async function dispatchViaQueue(
   );
 
   const unavailable: CatId[] = [];
+  /** Targets that actually obtained Queue custody — the only honest basis for a fan-out pill. */
+  const admitted: CatId[] = [];
   for (const catId of targetCatIds) {
     const enqueueOutcome = enqueueMultiMentionTarget({
       deps,
@@ -356,6 +464,8 @@ async function dispatchViaQueue(
       userId,
       ownerAuthProvenance,
       initiator,
+      cloudDispatchProvenance,
+      parentInvocationId,
       log,
       actionFence,
     });
@@ -364,6 +474,7 @@ async function dispatchViaQueue(
       break;
     }
     if (enqueueOutcome === 'unavailable') unavailable.push(catId);
+    if (enqueueOutcome === 'enqueued') admitted.push(catId);
   }
 
   await reconcileActionSuccessorEnqueue({
@@ -374,50 +485,85 @@ async function dispatchViaQueue(
     now: Date.now(),
   });
 
+  // Same-class sweep after 砚砚 R4: a target rejected at admission can NEVER produce a response, so
+  // the orchestrator has to hear about it or the whole group sits at `partial` until the timeout.
+  // R4 fixed exactly this on the legacy path; the Queue path had the identical hole, where
+  // `skipped` / `depth_limited` only fed the action-lease reconciliation.
+  const orch = getMultiMentionOrchestrator();
+  const rejected = targetCatIds.filter((catId) => !admitted.includes(catId));
+  for (const catId of rejected) {
+    orch.recordResponse(requestId, catId, '[dispatch unavailable: target was not admitted to the queue]');
+  }
+  if (rejected.length > 0) settleGroupIfComplete(deps, requestId, threadId, userId, log);
+
+  // Custody is durable here and start has not happened yet — the only correct window to describe
+  // the fan-out. Deliberately NOT awaited: the projection is downstream of durable custody, so it
+  // must never sit in front of `tryAutoExecute`. Awaiting it (even after custody) let a slow or
+  // never-settling message store stall every admitted sibling's start — the same "cannot gate
+  // scheduling" claim being false for a second time (砚砚 R2 P1). Fire-and-forget is the contract;
+  // failures are logged and can only lose a pill, never a dispatch.
+  if (onAdmitted) {
+    void onAdmitted(admitted).catch((err) => {
+      log.warn({ threadId, requestId, err }, 'parallel routing projection failed (custody + start unaffected)');
+    });
+  }
+
   await queueProcessor.tryAutoExecute?.(threadId);
 }
 
 // ── Legacy dispatch (direct routeExecution, fallback) ────────────────
-async function dispatchToTarget(
-  deps: MultiMentionRouteDeps,
-  requestId: string,
-  targetCatId: CatId,
-  question: string,
-  context: string | undefined,
-  threadId: string,
-  userId: string,
-  ownerAuthProvenance: OwnerAuthProvenance,
-  initiator: CatId,
-  log: FastifyBaseLogger,
-): Promise<void> {
+
+/** Custody handle produced by {@link admitLegacyTarget} and consumed by `dispatchToTarget`. */
+interface LegacyAdmission {
+  controller: AbortController;
+  invocationId: string;
+  /** Parsed once at admission and carried forward — no second parse of the same content (砚砚 R4 P2). */
+  intent: ReturnType<typeof parseIntent>;
+}
+
+/**
+ * One legacy target's ADMISSION half, split out of `dispatchToTarget` (砚砚 R3 P1).
+ *
+ * Requirement 2 applies to both dispatch families: for an explicit parallel fan-out every sibling
+ * must hold custody before ANY of them starts. The Queue path got that by enqueueing all targets
+ * before `tryAutoExecute`; the legacy path used to interleave admission with execution, so a fast
+ * first target could terminate while a later sibling had not yet created its invocation — and it
+ * can still drop out entirely here (pre-start cancel at the tracker gate, or a duplicate record).
+ * Hoisting admission lets the caller batch it, then project only what was admitted, then start.
+ *
+ * Returns null when the target did not obtain custody; the tracker slot is released in that case.
+ * On success the CALLER owns the slot and must pass the handle to `dispatchToTarget`, whose
+ * `finally` performs the (idempotent) release.
+ */
+async function admitLegacyTarget(input: {
+  deps: MultiMentionRouteDeps;
+  requestId: string;
+  targetCatId: CatId;
+  threadId: string;
+  userId: string;
+  intent: ReturnType<typeof parseIntent>;
+  log: FastifyBaseLogger;
+}): Promise<LegacyAdmission | null> {
+  const { deps, requestId, targetCatId, threadId, userId, intent, log } = input;
+  const { invocationRecordStore, invocationTracker } = deps;
   const orch = getMultiMentionOrchestrator();
-  const { router, invocationRecordStore, socketManager, invocationTracker } = deps;
 
-  // Build the message for this target
-  // Include multi-mention context as structured prefix so the target cat
-  // understands the request is from another cat, not the user directly.
-  const messageContent = [`[Multi-Mention from ${initiator}]`, question, ...(context ? ['---', context] : [])].join(
-    '\n\n',
-  );
-
-  const intent = parseIntent(messageContent, 1);
-
-  // Collect response text from the routing execution
-  let responseText = '';
-  const toolsUsed: string[] = [];
-  let invocationId: string | undefined;
-
-  // F122 AC-A9: Occupy tracker slot BEFORE create to close TOCTOU window.
-  // Entire create/execute lifecycle wrapped in outer try/finally for guaranteed release.
-  // F108 slot-aware: multi-mention dispatches register per (threadId, catId) slot.
+  // F122 AC-A9: occupy the tracker slot BEFORE create to close the TOCTOU window.
   const controller = invocationTracker?.start(threadId, targetCatId, userId, [targetCatId]) ?? new AbortController();
+  // 砚砚 R4 P1: hoisted so the catch can SEE a record it already created. Splitting admission out of
+  // `dispatchToTarget` moved the happy path but left that function's catch behind, so a throw after
+  // create (the state machine's canonical `queued → failed` pre-start failure, e.g. the
+  // `status: running` update failing) leaked a record stuck at `queued` forever AND never recorded a
+  // response — the whole group then sat at `partial` until the timeout fired. Extracting a function
+  // means extracting its failure obligations too, not just its success path.
+  let invocationId: string | undefined;
   try {
     if (controller.signal.aborted) {
       log.info({ requestId, targetCatId }, '[F086] Multi-mention dispatch canceled before start (deleting)');
-      return;
+      invocationTracker?.complete(threadId, targetCatId, controller);
+      return null;
     }
 
-    // Create invocation record (now protected by tracker slot)
     const createResult = await invocationRecordStore.create({
       threadId,
       userId,
@@ -429,18 +575,79 @@ async function dispatchToTarget(
 
     if (createResult.outcome === 'duplicate') {
       log.info({ requestId, targetCatId }, '[F086] Dispatch skipped: duplicate invocation');
-      return; // finally will release slot (AC-A12)
+      invocationTracker?.complete(threadId, targetCatId, controller);
+      return null;
     }
 
     invocationId = createResult.invocationId;
     invocationTracker?.bindExecutionId?.(threadId, [targetCatId], controller, invocationId);
-
-    await invocationRecordStore.update(invocationId, {
-      status: 'running',
-    });
-
+    await invocationRecordStore.update(invocationId, { status: 'running' });
     orch.registerDispatch(requestId, targetCatId, controller);
+    return { controller, invocationId, intent };
+  } catch (err) {
+    log.error({ requestId, targetCatId, err }, '[F086] Multi-mention admission failed');
+    // Converge the record we already created — otherwise it is orphaned at `queued`.
+    if (invocationId) {
+      try {
+        await invocationRecordStore.update(invocationId, {
+          status: controller.signal.aborted ? 'canceled' : 'failed',
+          ...(controller.signal.aborted ? {} : { error: 'admission_error' }),
+        });
+      } catch (updateErr) {
+        log.warn(
+          { requestId, targetCatId, invocationId, err: updateErr },
+          '[F086] Failed to converge InvocationRecord after admission error',
+        );
+      }
+    }
+    // Register the failure so the group can reach a terminal state on its own instead of
+    // hanging at `partial` until the timeout.
+    orch.recordResponse(
+      requestId,
+      targetCatId,
+      `[admission error: ${err instanceof Error ? err.message : String(err)}]`,
+    );
+    invocationTracker?.complete(threadId, targetCatId, controller);
+    return null;
+  }
+}
 
+async function dispatchToTarget(
+  deps: MultiMentionRouteDeps,
+  requestId: string,
+  targetCatId: CatId,
+  question: string,
+  context: string | undefined,
+  threadId: string,
+  userId: string,
+  ownerAuthProvenance: OwnerAuthProvenance,
+  initiator: CatId,
+  cloudDispatchProvenance: CloudDispatchProvenance | undefined,
+  log: FastifyBaseLogger,
+  /** Custody obtained by `admitLegacyTarget`. The caller admitted every sibling before any start. */
+  admission: LegacyAdmission,
+): Promise<void> {
+  const orch = getMultiMentionOrchestrator();
+  const { router, invocationRecordStore, socketManager, invocationTracker } = deps;
+
+  // Build the message for this target
+  // Include multi-mention context as structured prefix so the target cat
+  // understands the request is from another cat, not the user directly.
+  const messageContent = [`[Multi-Mention from ${initiator}]`, question, ...(context ? ['---', context] : [])].join(
+    '\n\n',
+  );
+
+  // Parsed once at admission; re-parsing the identical content here was dead duplication (砚砚 R4 P2).
+  const intent = admission.intent;
+
+  // Collect response text from the routing execution
+  let responseText = '';
+  const toolsUsed: string[] = [];
+  // Custody was established by `admitLegacyTarget` before ANY sibling started (requirement 2).
+  const { controller } = admission;
+  const invocationId: string | undefined = admission.invocationId;
+
+  try {
     let governanceErrorCode: string | undefined;
 
     try {
@@ -451,14 +658,14 @@ async function dispatchToTarget(
         userId,
         messageContent,
         threadId,
-        invocationId,
+        cloudDispatchProvenance?.sourceMessageId ?? invocationId,
         [targetCatId],
         intent,
         {
           ownerAuthProvenance,
           humanDispositionInvocationOrigin: 'callback',
           signal: controller.signal,
-          ...createA2ASlotTrackingBridge(invocationTracker, controller, createResult.invocationId),
+          ...createA2ASlotTrackingBridge(invocationTracker, controller, admission.invocationId),
           ...(deps.invocationQueue
             ? {
                 deferA2AEnqueue: (entry: Parameters<InvocationQueue['enqueue']>[0]) =>
@@ -466,6 +673,8 @@ async function dispatchToTarget(
               }
             : {}),
           parentInvocationId: invocationId,
+          ...(cloudDispatchProvenance ? { cloudDispatchProvenance } : {}),
+          requiresExactCloudDispatchProvenance: true,
           onPromptMessagesExposed: (input) => deps.queueProcessor?.markPromptMessagesSeen?.(input) ?? Promise.resolve(),
           // F222 P1: Multi-mention fallback dispatch is callback-authenticated cat-to-cat
           // work (callerCatId = record.catId), consistent with queue path source:'agent'.
@@ -478,12 +687,12 @@ async function dispatchToTarget(
             threadId,
             mode: intent.intent,
             targetCats: [targetCatId],
-            invocationId: createResult.invocationId,
+            invocationId: admission.invocationId,
           });
           intentModeBroadcast = true;
         }
         if (controller.signal.aborted) break;
-        if ((msg.type === 'done' || msg.type === 'error') && msg.catId) {
+        if (isTerminalDispositionEvent(msg) && msg.catId) {
           invocationTracker?.completeSlot?.(threadId, msg.catId, controller);
         }
 
@@ -491,6 +700,9 @@ async function dispatchToTarget(
         if (msg.catId === targetCatId) {
           if (msg.type === 'text' && msg.content) {
             responseText += msg.content;
+          } else if (msg.type === 'system_info' && msg.content) {
+            const visibleNotice = userFacingSystemInfoNoticeContent(msg.content, targetCatId);
+            if (visibleNotice) responseText = responseText ? `${responseText}\n${visibleNotice}` : visibleNotice;
           } else if (msg.type === 'tool_use' && msg.toolName) {
             toolsUsed.push(msg.toolName);
           }
@@ -538,11 +750,7 @@ async function dispatchToTarget(
       '[F086] Multi-mention response recorded',
     );
 
-    // If done (all responded), cancel timeout and flush
-    if (newStatus === 'done') {
-      cancelTimeout(requestId);
-      await flushResult(deps, requestId, threadId, userId, log);
-    }
+    settleGroupIfComplete(deps, requestId, threadId, userId, log);
   } catch (err) {
     log.error(
       { requestId, targetCatId, err: err instanceof Error ? err.message : String(err) },
@@ -572,6 +780,7 @@ async function dispatchToTarget(
       targetCatId,
       `[dispatch error: ${err instanceof Error ? err.message : String(err)}]`,
     );
+    settleGroupIfComplete(deps, requestId, threadId, userId, log);
   } finally {
     // F122 AC-A7: unconditional slot release — covers early return, registerDispatch
     // throw, routeExecution crash, and normal completion. InvocationTracker.complete()
@@ -581,6 +790,43 @@ async function dispatchToTarget(
 }
 
 // ── Result flush ─────────────────────────────────────────────────────
+/**
+ * INV-2 HOLDER — the ONLY place a multi-mention group may settle.
+ *
+ * State machine this owns:
+ *   group: open -> settling -> flushed        (never "waiting for the timeout to notice")
+ *
+ * Five review rounds produced the same class of defect at four different call sites: a branch
+ * decided on its own whether the group was done, cancelled the timer itself, and fired
+ * `flushResult` as a bare `void` — so a failing store surfaced as an unhandledRejection (砚砚 R5
+ * measured it: HTTP 200, then `unhandledRejection("flush store unavailable")`, and production has
+ * no global handler). Each round fixed one site and the next round's new branch copied the hole
+ * again. Enumerating branches loses to branches being added; owning the transition does not.
+ *
+ * Callers now state only WHAT happened (a response was recorded, targets were rejected); this
+ * function decides whether that completes the group. Detached by design — settling is downstream
+ * of custody and must never gate a dispatch — but never unguarded.
+ */
+function settleGroupIfComplete(
+  deps: MultiMentionRouteDeps,
+  requestId: string,
+  threadId: string,
+  userId: string,
+  log: FastifyBaseLogger,
+): void {
+  const orch = getMultiMentionOrchestrator();
+  if (orch.getStatus(requestId) !== 'done') return;
+  cancelTimeout(requestId);
+  void flushResult(deps, requestId, threadId, userId, log).catch((err) => {
+    // A summary write failure must not take the process down, and must not be silent either:
+    // the group is terminal, what got lost is its aggregate.
+    log.error(
+      { requestId, threadId, err: err instanceof Error ? err.message : String(err) },
+      '[F086] Multi-mention result flush failed — group is settled but its summary was not persisted',
+    );
+  });
+}
+
 async function flushResult(
   deps: MultiMentionRouteDeps,
   requestId: string,
@@ -861,6 +1107,13 @@ export function registerMultiMentionRoutes(app: FastifyInstance, deps: MultiMent
           if (admission.outcome === 'subject_terminal') {
             return reply.send({ status: admission.outcome, terminal: admission.terminal });
           }
+          if (admission.outcome === 'safe_wait') {
+            return reply.status(409).send({
+              status: 'action_carrier_unavailable',
+              reason: 'carrier_missing',
+              actionLease: admission.lease,
+            });
+          }
           if (admission.outcome !== 'replayed') {
             return reply.send({ status: admission.outcome, actionLease: admission.lease });
           }
@@ -891,6 +1144,14 @@ export function registerMultiMentionRoutes(app: FastifyInstance, deps: MultiMent
       ...(body.searchEvidenceRefs ? { searchEvidenceRefs: body.searchEvidenceRefs } : {}),
       ...(body.overrideReason ? { overrideReason: body.overrideReason } : {}),
     } satisfies MultiMentionCreateParams;
+
+    const cloudDispatchProvenance = await resolveCloudDispatchProvenance({
+      record,
+      messageStore: deps.messageStore,
+      question: body.question,
+      context: body.context,
+      log: request.log,
+    });
 
     const mmRequest = orch.create(createParams);
 
@@ -930,6 +1191,20 @@ export function registerMultiMentionRoutes(app: FastifyInstance, deps: MultiMent
         : undefined,
     );
 
+    // F086/F216: a real fan-out renders as "A ⇉ B（并行 N/M）", distinct from a serial leg's
+    // "A → B（串行 1/2）" / "A ⇢ B（串行 2/2·排队中）". Before this the parallel path emitted no
+    // pill at all, so the only multi-target projection users ever saw was the sequential one.
+    // The projection runs from inside the dispatch, keyed on ADMITTED targets only (砚砚 R1 P1).
+    const projectAdmittedFanOut = (admitted: CatId[]): Promise<void> =>
+      emitParallelRoutingPills({
+        ...(deps.messageStore ? { messageStore: deps.messageStore } : {}),
+        socketManager: deps.socketManager,
+        threadId: record.threadId,
+        fromCatId: callerCatId,
+        targetCatIds: admitted,
+        log: request.log,
+      });
+
     // Dispatch to all targets in parallel (fire and forget)
     // F122B B6: Use InvocationQueue when available, legacy direct dispatch as fallback
     if (deps.invocationQueue && deps.queueProcessor) {
@@ -943,12 +1218,55 @@ export function registerMultiMentionRoutes(app: FastifyInstance, deps: MultiMent
         record.userId,
         record.ownerAuthProvenance,
         callerCatId,
+        cloudDispatchProvenance,
+        record.invocationId,
         request.log,
         actionFence,
         actionCarrierDisposition,
+        projectAdmittedFanOut,
       );
     } else {
-      for (const targetCatId of targetCatIds) {
+      // Legacy direct-dispatch fallback, now TWO-PHASE (砚砚 R3 P1): admit every target first, then
+      // project only what was admitted, then start. Previously each target admitted itself inside
+      // its own fire-and-forget dispatch, so a fast sibling could terminate before a later one had
+      // an invocation — requirement 2 held on the Queue path only. Targets that drop out during
+      // admission (pre-start cancel / duplicate record) are simply never announced.
+      const legacyMessageContent = [
+        `[Multi-Mention from ${callerCatId}]`,
+        body.question,
+        ...(body.context ? ['---', body.context] : []),
+      ].join('\n\n');
+      const legacyIntent = parseIntent(legacyMessageContent, 1);
+      const admissions = await Promise.all(
+        targetCatIds.map(async (targetCatId) => ({
+          targetCatId,
+          admission: await admitLegacyTarget({
+            deps,
+            requestId: mmRequest.id,
+            targetCatId,
+            threadId: record.threadId,
+            userId: record.userId,
+            intent: legacyIntent,
+            log: request.log,
+          }),
+        })),
+      );
+      const admittedLegacy = admissions.flatMap((a) =>
+        a.admission ? [{ targetCatId: a.targetCatId, admission: a.admission }] : [],
+      );
+
+      void projectAdmittedFanOut(admittedLegacy.map((a) => a.targetCatId)).catch((err) => {
+        request.log.warn({ err, threadId: record.threadId }, 'parallel routing projection failed');
+      });
+
+      // 砚砚 R4 P1: admission failures already recorded their own failure response, so a group where
+      // every target failed is already terminal — settle it now instead of leaving the initiator
+      // waiting on the timeout timer.
+      if (admittedLegacy.length < targetCatIds.length) {
+        settleGroupIfComplete(deps, mmRequest.id, record.threadId, record.userId, request.log);
+      }
+
+      for (const { targetCatId, admission } of admittedLegacy) {
         void dispatchToTarget(
           deps,
           mmRequest.id,
@@ -959,7 +1277,9 @@ export function registerMultiMentionRoutes(app: FastifyInstance, deps: MultiMent
           record.userId,
           record.ownerAuthProvenance,
           callerCatId,
+          cloudDispatchProvenance,
           request.log,
+          admission,
         );
       }
     }

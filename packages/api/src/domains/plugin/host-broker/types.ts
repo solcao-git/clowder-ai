@@ -1,4 +1,5 @@
 import type { CandidateHello, Capability, HandshakeRejectReason, WireMethodName } from '@clowder-ai/plugin-contract';
+import type { StaticFeatureLedger } from './static-feature-ledger.js';
 
 export const HOST_BROKER_SCHEMA_VERSION = 1 as const;
 
@@ -69,6 +70,8 @@ export interface HostBrokerSnapshot {
   readonly sessions: readonly BrokerSessionRecord[];
   readonly runtimeLeases: readonly BrokerRuntimeLeaseRecord[];
   readonly calls: readonly BrokerCallRecord[];
+  /** Absent on pre-feature snapshots; added only when a static feature is used. */
+  readonly staticFeatures?: StaticFeatureLedger;
 }
 
 export type HostBrokerErrorCode =
@@ -80,6 +83,7 @@ export type HostBrokerErrorCode =
   | 'METHOD_NOT_REGISTERED'
   | 'INVALID_CALL_INPUT'
   | 'INVALID_CALL_RESULT'
+  | 'CAPABILITY_DENIED'
   | 'AUTHORITY_CHANGED'
   | 'CALL_CONFLICT'
   | 'CALL_IN_FLIGHT'
@@ -92,6 +96,7 @@ export class HostBrokerError extends Error {
     readonly code: HostBrokerErrorCode,
     message: string,
     readonly reason?: HandshakeRejectReason,
+    readonly sessionCloseReason?: string,
   ) {
     super(message);
     this.name = 'HostBrokerError';
@@ -114,6 +119,8 @@ export type BrokerValidationResult<Value> = { readonly valid: true; readonly val
 
 export interface BrokerMethodHandler<Input = unknown, Result = unknown> {
   readonly method: WireMethodName;
+  /** K-1 already owns messaging settlement; bypass the generic Broker call ledger. */
+  readonly settlementAuthority?: 'broker' | 'domain';
   validateInput(value: unknown): BrokerValidationResult<Input>;
   validateResult(value: unknown): value is Result;
   settlementKey(context: BrokerCallContext, input: Input): string;

@@ -75,6 +75,20 @@ describe('SessionSealer', () => {
       assert.equal(second.status, 'sealing');
     });
 
+    test('atomically admits exactly one concurrent active → sealing claim', async () => {
+      const { store, sealer } = await createFixtures();
+      const record = store.create(BASE_INPUT);
+
+      const results = await Promise.all([
+        sealer.requestSeal({ sessionId: record.id, reason: 'manual' }),
+        sealer.requestSeal({ sessionId: record.id, reason: 'manual' }),
+      ]);
+
+      assert.equal(results.filter((result) => result.accepted).length, 1);
+      assert.equal(store.get(record.id)?.status, 'sealing');
+      assert.equal(store.getActive('opus', 'thread-1'), null);
+    });
+
     test('rejects sealing already sealed session', async () => {
       const { store, sealer } = await createFixtures();
       const record = store.create(BASE_INPUT);
@@ -121,6 +135,24 @@ describe('SessionSealer', () => {
       assert.ok(updated.sealedAt > 0);
     });
 
+    test('reports a terminal partial seal when transcript finalization fails', async () => {
+      const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+      const { SessionSealer } = await import('../dist/domains/cats/services/session/SessionSealer.js');
+      const store = new SessionChainStore();
+      const sealer = new SessionSealer(store, {
+        flush: async () => {
+          throw new Error('disk unavailable');
+        },
+      });
+      const record = store.create(BASE_INPUT);
+
+      await sealer.requestSeal({ sessionId: record.id, reason: 'manual' });
+      const result = await sealer.finalize({ sessionId: record.id });
+
+      assert.deepEqual(result, { sealed: true, clean: false });
+      assert.equal(store.get(record.id)?.status, 'sealed');
+    });
+
     test('does nothing for non-sealing sessions', async () => {
       const { store, sealer } = await createFixtures();
       const record = store.create(BASE_INPUT);
@@ -160,14 +192,16 @@ describe('SessionSealer', () => {
       const hangingWriter = {
         flush: () => new Promise(() => {}), // never resolves
       };
-      const sealer = new SessionSealer(store, hangingWriter);
+      const sealer = new SessionSealer(store, hangingWriter, undefined, undefined, undefined, undefined, {
+        finalizeTimeoutMs: 10,
+      });
 
       const record = store.create(BASE_INPUT);
       await sealer.requestSeal({ sessionId: record.id, reason: 'threshold' });
 
-      // Monkey-patch timeout for test speed (30s is too long for test)
-      // We test the structural guarantee: finalize always reaches terminal state
+      const startedAt = Date.now();
       await sealer.finalize({ sessionId: record.id });
+      assert.ok(Date.now() - startedAt < 500, 'injected timeout should avoid waiting for the 30s production budget');
 
       const updated = store.get(record.id);
       assert.equal(updated?.status, 'sealed', 'session should reach sealed even if transcript flush hangs');
@@ -295,6 +329,31 @@ describe('SessionSealer', () => {
   });
 
   describe('postSealHook guard (F231 AC-C3 / KD-10)', () => {
+    test('returns the terminal seal result without waiting for an unbounded best-effort hook', async () => {
+      const { store, sealer } = await createFixtures();
+      const record = store.create(BASE_INPUT);
+      let releaseHook;
+      let hookStarted = false;
+      sealer.registerPostSealHook(async () => {
+        hookStarted = true;
+        await new Promise((resolve) => {
+          releaseHook = resolve;
+        });
+      });
+
+      await sealer.requestSeal({ sessionId: record.id, reason: 'manual' });
+      const outcome = await Promise.race([
+        sealer.finalize({ sessionId: record.id }).then((value) => ({ kind: 'done', value })),
+        new Promise((resolve) => setTimeout(() => resolve({ kind: 'timeout' }), 50)),
+      ]);
+
+      assert.equal(outcome.kind, 'done', 'terminal persistence must not inherit hook latency');
+      assert.deepEqual(outcome.value, { sealed: true, clean: true });
+      assert.equal(hookStarted, true);
+      releaseHook();
+      await new Promise((resolve) => setImmediate(resolve));
+    });
+
     test('hooks fire after successful finalize terminal write', async () => {
       const { store, sealer } = await createFixtures();
       const record = store.create(BASE_INPUT);

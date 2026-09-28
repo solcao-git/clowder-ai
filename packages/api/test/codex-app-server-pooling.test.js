@@ -13,16 +13,22 @@ class AsyncInbox {
   #values = [];
   #waiters = [];
   #closed = false;
+  #failure = null;
 
   push(value) {
     const waiter = this.#waiters.shift();
-    if (waiter) waiter({ value, done: false });
+    if (waiter) waiter.resolve({ value, done: false });
     else this.#values.push(value);
   }
 
   close() {
     this.#closed = true;
-    for (const waiter of this.#waiters.splice(0)) waiter({ value: undefined, done: true });
+    for (const waiter of this.#waiters.splice(0)) waiter.resolve({ value: undefined, done: true });
+  }
+
+  fail(error) {
+    this.#failure = error;
+    for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
   }
 
   [Symbol.asyncIterator]() {
@@ -30,8 +36,9 @@ class AsyncInbox {
       next: () => {
         const value = this.#values.shift();
         if (value !== undefined) return Promise.resolve({ value, done: false });
+        if (this.#failure) return Promise.reject(this.#failure);
         if (this.#closed) return Promise.resolve({ value: undefined, done: true });
-        return new Promise((resolve) => this.#waiters.push(resolve));
+        return new Promise((resolve, reject) => this.#waiters.push({ resolve, reject }));
       },
     };
   }
@@ -116,6 +123,38 @@ class ActiveWriterWire extends PoolWire {
   }
 }
 
+class OversizedResumeWire extends PoolWire {
+  constructor(previousThreadId, replacementThreadId) {
+    super(replacementThreadId);
+    this.previousThreadId = previousThreadId;
+  }
+
+  async write(message) {
+    if (message.method === 'thread/resume') {
+      this.writes.push(message);
+      this.inbox.push({ id: message.id, error: { code: -32600, message: 'Max payload size exceeded' } });
+      return;
+    }
+    return super.write(message);
+  }
+}
+
+class CarrierKilledByOversizedResumeWire extends PoolWire {
+  constructor(previousThreadId) {
+    super(previousThreadId);
+    this.previousThreadId = previousThreadId;
+  }
+
+  async write(message) {
+    if (message.method === 'thread/resume') {
+      this.writes.push(message);
+      this.inbox.fail(new Error('Max payload size exceeded'));
+      return;
+    }
+    return super.write(message);
+  }
+}
+
 class FakeHostPool {
   constructor() {
     this.calls = [];
@@ -151,6 +190,34 @@ process.env.CAT_CAFE_MCP_CREDS_DIR = credsDir;
 after(() => {
   delete process.env.CAT_CAFE_MCP_CREDS_DIR;
   rmSync(credsDir, { recursive: true, force: true });
+});
+
+test('capability source deadline covers host acquisition before native RPC starts', async () => {
+  let acquisitionSignal;
+  const appServerHostPool = {
+    createSession: async (options) => {
+      acquisitionSignal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => reject(new Error('acquisition aborted')), { once: true });
+      });
+    },
+  };
+  const service = new CodexAgentService({
+    carrierMode: 'app_server',
+    appServerHostPool,
+    model: 'gpt-5.6-sol',
+    l0CompilerFn: fakeL0Compiler,
+  });
+
+  await assert.rejects(
+    service.requestNativeCapabilitySource({
+      invocationId: 'marketplace-deadline',
+      timeoutMs: 10,
+      cwd: '/workspace',
+    }),
+    /authoritative_native_capability_source_timeout/,
+  );
+  assert.equal(acquisitionSignal?.aborted, true);
 });
 
 function callbackEnv(invocationId, callbackToken) {
@@ -332,6 +399,76 @@ test('CodexAgentService exposes active-writer refusal without minting a replacem
     /thread native-old already has an active writer/,
     'typed diagnostics must not expose raw upstream active-writer text',
   );
+});
+
+test('CodexAgentService carries oversized native replacement provenance on the pre-turn session_init', async () => {
+  const wire = new OversizedResumeWire('native-oversized', 'native-cold');
+  const service = new CodexAgentService({
+    carrierMode: 'app_server',
+    cliCommand: process.execPath,
+    l0CompilerFn: fakeL0Compiler,
+    model: 'gpt-5.6-sol',
+  });
+
+  const output = await drain(
+    service.invoke('continue from cold navigation', {
+      invocationId: 'invocation-oversized-rollover',
+      sessionId: 'native-oversized',
+      agentCarrierSessionFactory: async () => wire,
+    }),
+  );
+
+  const init = output.find((message) => message.type === 'session_init');
+  assert.equal(init.sessionId, 'native-cold');
+  assert.equal(init.sessionReplacement?.cause, 'native_resume_rejected');
+  assert.equal(init.sessionReplacement?.previousNativeThreadId, 'native-oversized');
+  assert.equal(init.sessionReplacement?.rejection, 'max_payload_size_exceeded');
+  assert.equal(wire.writes.filter((message) => message.method === 'turn/start').length, 1);
+});
+
+test('CodexAgentService replaces an oversized resume on a fresh carrier before turn/start', async () => {
+  const deadResumeWire = new CarrierKilledByOversizedResumeWire('native-oversized');
+  const coldStartWire = new PoolWire('native-cold');
+  const wires = [deadResumeWire, coldStartWire];
+  const factoryOptions = [];
+  const service = new CodexAgentService({
+    carrierMode: 'app_server',
+    cliCommand: process.execPath,
+    l0CompilerFn: fakeL0Compiler,
+    model: 'gpt-5.6-sol',
+  });
+
+  const output = await drain(
+    service.invoke('continue from cold navigation', {
+      invocationId: 'invocation-oversized-carrier-rollover',
+      sessionId: 'native-oversized',
+      agentCarrierSessionFactory: async (options) => {
+        factoryOptions.push(options);
+        return wires.shift();
+      },
+    }),
+  );
+
+  assert.equal(factoryOptions.length, 2, 'the dead resume carrier must receive one bounded replacement attempt');
+  assert.equal(factoryOptions[0].sessionId, 'native-oversized');
+  assert.equal(factoryOptions[1].sessionId, undefined, 'replacement must acquire a fresh carrier');
+
+  const init = output.find((message) => message.type === 'session_init');
+  assert.equal(init.sessionId, 'native-cold');
+  assert.equal(init.sessionReplacement?.cause, 'native_resume_rejected');
+  assert.equal(init.sessionReplacement?.previousNativeThreadId, 'native-oversized');
+  assert.equal(init.sessionReplacement?.rejection, 'max_payload_size_exceeded');
+  assert.equal(
+    output.some((message) => message.type === 'error'),
+    false,
+  );
+
+  assert.equal(deadResumeWire.writes.filter((message) => message.method === 'thread/resume').length, 1);
+  assert.equal(deadResumeWire.writes.filter((message) => message.method === 'thread/start').length, 0);
+  assert.equal(deadResumeWire.writes.filter((message) => message.method === 'turn/start').length, 0);
+  assert.equal(coldStartWire.writes.filter((message) => message.method === 'thread/resume').length, 0);
+  assert.equal(coldStartWire.writes.filter((message) => message.method === 'thread/start').length, 1);
+  assert.equal(coldStartWire.writes.filter((message) => message.method === 'turn/start').length, 1);
 });
 
 test('CodexAgentService surfaces one checkpoint card when an in-flight tool blocks capacity recovery', async () => {

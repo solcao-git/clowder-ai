@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CodexAppServerClient } from '../dist/domains/cats/services/agents/providers/CodexAppServerClient.js';
 import { runCodexAppServerWithRecovery } from '../dist/domains/cats/services/agents/providers/CodexAppServerRunner.js';
+import { buildCodexAppServerThreadParams } from '../dist/domains/cats/services/agents/providers/codex-app-server-client-helpers.js';
+import { CodexAppServerRpcError } from '../dist/domains/cats/services/agents/providers/codex-app-server-rpc-error.js';
 import { createDirectAgentCarrierSession } from '../dist/domains/cats/services/agents/providers/DirectAgentCarrierSession.js';
 import { captureCodexActiveWriterDetection } from '../dist/domains/cats/services/runtime-session/CodexSessionReplacementProvenance.js';
 
@@ -20,6 +22,10 @@ async function collectFailure(iterable) {
   } catch (error) {
     return { values, error };
   }
+}
+
+function frozenPrompt(prompt) {
+  return { kind: 'frozen', prompt };
 }
 
 async function waitFor(predicate, timeoutMs = 1_000) {
@@ -66,44 +72,73 @@ class AsyncInbox {
 }
 
 class ProtocolWire {
-  constructor() {
+  constructor(options = {}) {
     this.inbox = new AsyncInbox();
     this.writes = [];
     this.terminateCalls = 0;
     this.closeCalls = 0;
     this.experimentalApiEnabled = false;
+    this.rejectApprovalsReviewer = options.rejectApprovalsReviewer ?? false;
+    this.rejectOutputSchema = options.rejectOutputSchema ?? false;
+    this.turnId = options.turnId ?? 'turn-1';
   }
 
   read() {
     return this.inbox;
   }
 
+  respondThread(message, threadId) {
+    if (this.rejectApprovalsReviewer && message.params.approvalsReviewer) {
+      this.inbox.push({
+        id: message.id,
+        error: { code: -32602, message: 'approvalsReviewer is unavailable for this host' },
+      });
+      return;
+    }
+    this.inbox.push({ id: message.id, result: { thread: { id: threadId } } });
+  }
+
+  respondTurn(message) {
+    if (this.rejectOutputSchema && message.params.outputSchema) {
+      this.inbox.push({
+        id: message.id,
+        error: { code: -32602, message: 'outputSchema is not supported by the selected model' },
+      });
+      return;
+    }
+    if (message.params.additionalContext && !this.experimentalApiEnabled) {
+      this.inbox.push({
+        id: message.id,
+        error: {
+          code: -32600,
+          message: 'turn/start.additionalContext requires experimentalApi capability',
+        },
+      });
+      return;
+    }
+    this.inbox.push({ id: message.id, result: { turn: { id: this.turnId, status: 'inProgress' } } });
+  }
+
   async write(message) {
     this.writes.push(message);
-    if (message.method === 'initialize') {
-      this.experimentalApiEnabled = message.params.capabilities?.experimentalApi === true;
-      this.inbox.push({ id: message.id, result: {} });
+    switch (message.method) {
+      case 'initialize':
+        this.experimentalApiEnabled = message.params.capabilities?.experimentalApi === true;
+        this.inbox.push({ id: message.id, result: {} });
+        break;
+      case 'thread/start':
+        this.respondThread(message, 'thread-1');
+        break;
+      case 'thread/resume':
+        this.respondThread(message, message.params.threadId);
+        break;
+      case 'turn/start':
+        this.respondTurn(message);
+        break;
+      case 'turn/interrupt':
+        this.inbox.push({ id: message.id, result: {} });
+        break;
     }
-    if (message.method === 'thread/start') {
-      this.inbox.push({ id: message.id, result: { thread: { id: 'thread-1' } } });
-    }
-    if (message.method === 'thread/resume') {
-      this.inbox.push({ id: message.id, result: { thread: { id: message.params.threadId } } });
-    }
-    if (message.method === 'turn/start') {
-      if (message.params.additionalContext && !this.experimentalApiEnabled) {
-        this.inbox.push({
-          id: message.id,
-          error: {
-            code: -32600,
-            message: 'turn/start.additionalContext requires experimentalApi capability',
-          },
-        });
-      } else {
-        this.inbox.push({ id: message.id, result: { turn: { id: 'turn-1', status: 'inProgress' } } });
-      }
-    }
-    if (message.method === 'turn/interrupt') this.inbox.push({ id: message.id, result: {} });
   }
 
   async terminate() {
@@ -116,6 +151,191 @@ class ProtocolWire {
     this.inbox.close();
   }
 }
+
+test('F306 preserves every native approvalsReviewer route literal without a Clowder AI reviewer taxonomy', () => {
+  for (const approvalsReviewer of ['user', 'auto_review', 'guardian_subagent']) {
+    assert.equal(buildCodexAppServerThreadParams({ approvalsReviewer }).approvalsReviewer, approvalsReviewer);
+  }
+});
+
+test('F306 keeps sticky controls single-writer while mapping approved native parameters', async () => {
+  const wire = new ProtocolWire();
+  const client = new CodexAppServerClient({ wire });
+  const run = collect(
+    client.run({
+      prompt: frozenPrompt('structured answer'),
+      thread: { kind: 'start' },
+      model: 'gpt-test',
+      cwd: '/tmp/f306-workspace',
+      sandbox: 'workspace-write',
+      approvalPolicy: 'on-request',
+      serviceTier: 'fast',
+      approvalsReviewer: 'auto_review',
+      outputSchema: {
+        type: 'object',
+        properties: { answer: { type: 'string' } },
+        required: ['answer'],
+        additionalProperties: false,
+      },
+    }),
+  );
+
+  await waitFor(() => wire.writes.some((message) => message.method === 'turn/start'));
+  const threadStart = wire.writes.find((message) => message.method === 'thread/start');
+  const turnStart = wire.writes.find((message) => message.method === 'turn/start');
+
+  assert.deepEqual(
+    {
+      model: threadStart.params.model,
+      cwd: threadStart.params.cwd,
+      sandbox: threadStart.params.sandbox,
+      approvalPolicy: threadStart.params.approvalPolicy,
+      serviceTier: threadStart.params.serviceTier,
+      approvalsReviewer: threadStart.params.approvalsReviewer,
+    },
+    {
+      model: 'gpt-test',
+      cwd: '/tmp/f306-workspace',
+      sandbox: 'workspace-write',
+      approvalPolicy: 'on-request',
+      serviceTier: 'fast',
+      approvalsReviewer: 'auto_review',
+    },
+  );
+  for (const stickyField of [
+    'model',
+    'effort',
+    'cwd',
+    'sandboxPolicy',
+    'approvalPolicy',
+    'serviceTier',
+    'approvalsReviewer',
+  ]) {
+    assert.equal(
+      Object.hasOwn(turnStart.params, stickyField),
+      false,
+      `${stickyField} must have exactly one writer outside turn/start`,
+    );
+  }
+  assert.deepEqual(turnStart.params.outputSchema, {
+    type: 'object',
+    properties: { answer: { type: 'string' } },
+    required: ['answer'],
+    additionalProperties: false,
+  });
+  assert.equal(Object.hasOwn(threadStart.params, 'outputSchema'), false);
+  assert.equal(Object.hasOwn(threadStart.params, 'personality'), false);
+  assert.equal(Object.hasOwn(turnStart.params, 'personality'), false);
+
+  wire.inbox.push({
+    method: 'turn/completed',
+    params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } },
+  });
+  await run;
+});
+
+test('F306 preserves typed upstream rejection for approvalsReviewer without replacement fallback', async () => {
+  const wire = new ProtocolWire({ rejectApprovalsReviewer: true });
+  const client = new CodexAppServerClient({ wire });
+  const outcomePromise = collectFailure(
+    client.run({
+      prompt: frozenPrompt('answer'),
+      thread: { kind: 'resume', threadId: 'thread-existing' },
+      approvalsReviewer: 'auto_review',
+    }),
+  );
+
+  await waitFor(() => wire.writes.some((message) => message.method === 'thread/resume'));
+  await delay(5);
+  const turnStart = wire.writes.find((message) => message.method === 'turn/start');
+  if (turnStart) {
+    wire.inbox.push({
+      method: 'turn/completed',
+      params: { threadId: 'thread-existing', turn: { id: 'turn-1', status: 'completed' } },
+    });
+  }
+  const outcome = await outcomePromise;
+
+  assert.equal(outcome.error instanceof CodexAppServerRpcError, true);
+  assert.equal(outcome.error?.method, 'thread/resume');
+  assert.equal(outcome.error?.code, -32602);
+  assert.equal(outcome.error?.message, 'approvalsReviewer is unavailable for this host');
+  assert.equal(
+    wire.writes.some((message) => message.method === 'thread/start'),
+    false,
+  );
+});
+
+test('F306 preserves typed upstream rejection for outputSchema at turn/start', async () => {
+  const wire = new ProtocolWire({ rejectOutputSchema: true });
+  const client = new CodexAppServerClient({ wire });
+  const outcomePromise = collectFailure(
+    client.run({
+      prompt: frozenPrompt('answer'),
+      thread: { kind: 'start' },
+      outputSchema: { type: 'object' },
+    }),
+  );
+
+  await waitFor(() => wire.writes.some((message) => message.method === 'turn/start'));
+  const turnStart = wire.writes.find((message) => message.method === 'turn/start');
+  if (!turnStart.params.outputSchema) {
+    wire.inbox.push({
+      method: 'turn/completed',
+      params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } },
+    });
+  }
+  const outcome = await outcomePromise;
+
+  assert.equal(outcome.error instanceof CodexAppServerRpcError, true);
+  assert.equal(outcome.error?.method, 'turn/start');
+  assert.equal(outcome.error?.code, -32602);
+  assert.equal(outcome.error?.message, 'outputSchema is not supported by the selected model');
+});
+
+test('F299 app-server awaits durable request evidence before turn/start', async () => {
+  const wire = new ProtocolWire();
+  let recorded;
+  const client = new CodexAppServerClient({ wire });
+  const outputPromise = collect(
+    client.run({
+      prompt: frozenPrompt('app-server-message'),
+      thread: { kind: 'start' },
+      developerInstructions: 'native-l0',
+      prepareRequest: (body) => ({
+        v: 1,
+        message: { body },
+        nativeInstructions: [{ body: 'native-l0' }],
+        runtime: { provider: 'openai', carrier: 'app_server', model: 'gpt-test' },
+        tools: { finalSurface: 'unknown' },
+        providerNativeVisibility: 'unknown',
+      }),
+      beforeProviderLaunch: async (request) => {
+        assert.equal(
+          wire.writes.some((message) => message.method === 'turn/start'),
+          false,
+        );
+        recorded = request;
+        await Promise.resolve();
+        return {
+          requestGenerationId: 'a779c7b0-f305-4e96-af35-f61a79217f30',
+          generationOrdinal: 1,
+          sessionId: 'session-1',
+        };
+      },
+    }),
+  );
+
+  await waitFor(() => wire.writes.some((message) => message.method === 'turn/start'));
+  const turnStart = wire.writes.find((message) => message.method === 'turn/start');
+  assert.equal(recorded.message.body, 'app-server-message');
+  assert.equal(turnStart.params.input[0].text, recorded.message.body);
+  wire.inbox.push({
+    method: 'turn/completed',
+    params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } },
+  });
+  await outputPromise;
+});
 
 test('direct app-server carrier frames JSONL on LF only', async () => {
   const childScript = `
@@ -170,7 +390,7 @@ test('app-server pump failure rejects only the invocation without an unhandled r
 
   try {
     await assert.rejects(async () => {
-      for await (const _event of client.run({ prompt: 'work', thread: { kind: 'start' } })) {
+      for await (const _event of client.run({ prompt: frozenPrompt('work'), thread: { kind: 'start' } })) {
         // Drain until the transport fails.
       }
     }, /transport exploded/);
@@ -218,7 +438,7 @@ test('app-server EOF during an in-flight request write does not leak an unhandle
   process.on('unhandledRejection', onUnhandled);
 
   try {
-    const outcome = collectFailure(client.run({ prompt: 'work', thread: { kind: 'start' } }));
+    const outcome = collectFailure(client.run({ prompt: frozenPrompt('work'), thread: { kind: 'start' } }));
     await writeStarted;
     closeRead();
     await delay(0);
@@ -239,7 +459,7 @@ test('active-turn cancel evicts the host after authoritative interrupted termina
   const client = new CodexAppServerClient({ wire });
   const outputPromise = collect(
     client.run({
-      prompt: 'work',
+      prompt: frozenPrompt('work'),
       thread: { kind: 'start' },
       signal: controller.signal,
       interruptGraceMs: 50,
@@ -277,7 +497,7 @@ test('interrupt grace expiry escalates to the carrier terminate fallback', async
   const client = new CodexAppServerClient({ wire, onLifecycle: (snapshot) => lifecycle.push(snapshot) });
   const run = collect(
     client.run({
-      prompt: 'work',
+      prompt: frozenPrompt('work'),
       thread: { kind: 'start' },
       signal: controller.signal,
       interruptGraceMs: 10,
@@ -298,7 +518,9 @@ test('interrupt grace expiry escalates to the carrier terminate fallback', async
 test('app-server timeout remains disabled at zero and positive opt-in uses protocol interrupt', async () => {
   const manualWire = new ProtocolWire();
   const manualClient = new CodexAppServerClient({ wire: manualWire });
-  const manualRun = collect(manualClient.run({ prompt: 'work', thread: { kind: 'start' }, timeoutMs: 0 }));
+  const manualRun = collect(
+    manualClient.run({ prompt: frozenPrompt('work'), thread: { kind: 'start' }, timeoutMs: 0 }),
+  );
   await waitFor(() => manualWire.writes.some((message) => message.method === 'turn/start'));
   await delay(25);
   assert.equal(
@@ -317,7 +539,7 @@ test('app-server timeout remains disabled at zero and positive opt-in uses proto
   const timeoutClient = new CodexAppServerClient({ wire: timeoutWire });
   const timeoutRun = collect(
     timeoutClient.run({
-      prompt: 'work',
+      prompt: frozenPrompt('work'),
       thread: { kind: 'start' },
       timeoutMs: 10,
       interruptGraceMs: 50,
@@ -339,7 +561,7 @@ test('authoritative terminal result survives a cleanup failure', async () => {
   };
   const lifecycle = [];
   const client = new CodexAppServerClient({ wire, onLifecycle: (snapshot) => lifecycle.push(snapshot) });
-  const run = collect(client.run({ prompt: 'work', thread: { kind: 'start' } }));
+  const run = collect(client.run({ prompt: frozenPrompt('work'), thread: { kind: 'start' } }));
   await waitFor(() => wire.writes.some((message) => message.method === 'turn/start'));
   wire.inbox.push({
     method: 'turn/completed',
@@ -368,7 +590,9 @@ test('F291 app-server preserves Fast and explicit Standard on thread start/resum
   ]) {
     const wire = new ProtocolWire();
     const client = new CodexAppServerClient({ wire });
-    const run = collect(client.run({ prompt: 'work', thread: testCase.thread, serviceTier: testCase.serviceTier }));
+    const run = collect(
+      client.run({ prompt: frozenPrompt('work'), thread: testCase.thread, serviceTier: testCase.serviceTier }),
+    );
     await waitFor(() => wire.writes.some((message) => message.method === 'turn/start'));
     const request = wire.writes.find((message) => message.method === testCase.method);
     assert.equal(Object.hasOwn(request.params, 'serviceTier'), true);
@@ -383,7 +607,7 @@ test('F291 app-server preserves Fast and explicit Standard on thread start/resum
 
   const inheritWire = new ProtocolWire();
   const inheritClient = new CodexAppServerClient({ wire: inheritWire });
-  const inheritRun = collect(inheritClient.run({ prompt: 'work', thread: { kind: 'start' } }));
+  const inheritRun = collect(inheritClient.run({ prompt: frozenPrompt('work'), thread: { kind: 'start' } }));
   await waitFor(() => inheritWire.writes.some((message) => message.method === 'turn/start'));
   const inheritStart = inheritWire.writes.find((message) => message.method === 'thread/start');
   assert.equal(Object.hasOwn(inheritStart.params, 'serviceTier'), false);
@@ -397,7 +621,7 @@ test('F291 app-server preserves Fast and explicit Standard on thread start/resum
 test('early generator return releases the carrier before cleanup lifecycle can be abandoned', async () => {
   const wire = new ProtocolWire();
   const client = new CodexAppServerClient({ wire });
-  const iterator = client.run({ prompt: 'work', thread: { kind: 'start' } });
+  const iterator = client.run({ prompt: frozenPrompt('work'), thread: { kind: 'start' } });
 
   try {
     while (!wire.writes.some((message) => message.method === 'turn/start')) {
@@ -417,7 +641,7 @@ test('post-accept stream end transitions through failed before cleanup', async (
   const wire = new ProtocolWire();
   const lifecycle = [];
   const client = new CodexAppServerClient({ wire, onLifecycle: (snapshot) => lifecycle.push(snapshot) });
-  const run = collect(client.run({ prompt: 'work', thread: { kind: 'start' } }));
+  const run = collect(client.run({ prompt: frozenPrompt('work'), thread: { kind: 'start' } }));
 
   await waitFor(() => wire.writes.some((message) => message.method === 'turn/start'));
   wire.inbox.close();
@@ -430,7 +654,7 @@ test('post-accept stream end transitions through failed before cleanup', async (
   assert.match(lifecycle.find((snapshot) => snapshot.stage === 'failed').failureReason, /stream ended/);
 });
 
-test('pre-turn transport failure retries once without changing a requested thread identity', async () => {
+test('pre-turn transport recovery preserves thread identity and typed capability policy without replaying a card', async () => {
   const first = new ProtocolWire();
   first.read = () => ({
     [Symbol.asyncIterator]() {
@@ -440,15 +664,55 @@ test('pre-turn transport failure retries once without changing a requested threa
   const second = new ProtocolWire();
   const wires = [first, second];
   let factoryCalls = 0;
+  const interactionRequests = [];
   const run = collect(
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wires[factoryCalls++],
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-retry' },
-      runInput: { prompt: 'continue', thread: { kind: 'resume', threadId: 'thread-existing' } },
+      runInput: {
+        prompt: frozenPrompt('continue'),
+        thread: { kind: 'resume', threadId: 'thread-existing' },
+        runtimeInteraction: {
+          owner: {
+            userId: 'user-1',
+            threadId: 'cat-thread-1',
+            catId: 'codex-sol',
+            invocationId: 'inv-retry',
+          },
+          declaredMcpServerNames: ['pencil'],
+          port: {
+            request: async (request) => {
+              interactionRequests.push(request);
+              return { kind: 'decision', decisionId: 'decline' };
+            },
+          },
+        },
+      },
       retryBudget: 1,
     }),
   );
   await waitFor(() => second.writes.some((message) => message.method === 'turn/start'));
+  second.inbox.push({
+    id: 91,
+    method: 'mcpServer/elicitation/request',
+    params: {
+      serverName: 'cua_repl',
+      threadId: 'thread-existing',
+      turnId: 'turn-1',
+      mode: 'form',
+      message: 'Allow Computer Use to use "Pencil"?',
+      requestedSchema: { type: 'object', properties: {}, additionalProperties: false },
+      _meta: {
+        codex_approval_kind: 'mcp_tool_call',
+        connector_id: 'computer-use',
+        tool_name: 'snapshot',
+        tool_params: { app: 'dev.pencil.desktop' },
+      },
+    },
+  });
+  await waitFor(() => second.writes.some((message) => message.id === 91));
+  assert.equal(interactionRequests.length, 0);
+  assert.equal(second.writes.find((message) => message.id === 91)?.result?.action, 'accept');
   second.inbox.push({
     method: 'turn/completed',
     params: { threadId: 'thread-existing', turn: { id: 'turn-1', status: 'completed' } },
@@ -506,7 +770,7 @@ test('exact active-writer resume failure backs off once and preserves the native
         return wires[factoryCalls++];
       },
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-active-writer' },
-      runInput: { prompt: 'continue safely', thread: { kind: 'resume', threadId: '019f-old' } },
+      runInput: { prompt: frozenPrompt('continue safely'), thread: { kind: 'resume', threadId: '019f-old' } },
       retryBudget: 1,
       activeWriterRetryDelayMs: 1,
     }),
@@ -580,14 +844,14 @@ test('active-writer diagnostics classify a reused healthy affinity host as a loc
     }
     return firstWrite(message);
   };
-  const second = new ProtocolWire();
+  const second = new ProtocolWire({ turnId: 'turn-new' });
   const wires = [first, second];
   let factoryCalls = 0;
   const run = collect(
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wires[factoryCalls++],
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-local-lease' },
-      runInput: { prompt: 'continue', thread: { kind: 'resume', threadId: 'local-old' } },
+      runInput: { prompt: frozenPrompt('continue'), thread: { kind: 'resume', threadId: 'local-old' } },
       retryBudget: 1,
       activeWriterRetryDelayMs: 1,
     }),
@@ -627,14 +891,14 @@ test('active-writer diagnostics remain external-or-unknown when thread/read has 
     }
     return firstWrite(message);
   };
-  const second = new ProtocolWire();
+  const second = new ProtocolWire({ turnId: 'turn-new' });
   const wires = [first, second];
   let factoryCalls = 0;
   const run = collect(
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wires[factoryCalls++],
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-unknown-owner' },
-      runInput: { prompt: 'continue', thread: { kind: 'resume', threadId: 'unknown-old' } },
+      runInput: { prompt: frozenPrompt('continue'), thread: { kind: 'resume', threadId: 'unknown-old' } },
       retryBudget: 1,
       activeWriterRetryDelayMs: 1,
     }),
@@ -694,7 +958,7 @@ test('active-writer wording after provider output fails closed without replay', 
     runCodexAppServerWithRecovery({
       sessionFactory: async () => (factoryCalls++ === 0 ? first : second),
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-active-output' },
-      runInput: { prompt: 'do not replay', thread: { kind: 'resume', threadId: '019f-output' } },
+      runInput: { prompt: frozenPrompt('do not replay'), thread: { kind: 'resume', threadId: '019f-output' } },
       retryBudget: 1,
       activeWriterRetryDelayMs: 1,
     }),
@@ -757,7 +1021,7 @@ test('a repeated active-writer refusal fails closed without falling through or s
         return wire;
       },
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-active-bounded' },
-      runInput: { prompt: 'continue safely', thread: { kind: 'resume', threadId: '019f-old' } },
+      runInput: { prompt: frozenPrompt('continue safely'), thread: { kind: 'resume', threadId: '019f-old' } },
       retryBudget: 2,
       activeWriterRetryDelayMs: 1,
     }),
@@ -779,7 +1043,7 @@ test('model-capacity failure retries the accepted turn on the same thread withou
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wires[factoryCalls++],
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-capacity-retry' },
-      runInput: { prompt: 'do safe work', thread: { kind: 'start' } },
+      runInput: { prompt: frozenPrompt('do safe work'), thread: { kind: 'start' } },
       recoveryAnchor: {
         threadId: 'cat-thread-7',
         invocationId: 'inv-capacity-retry',
@@ -855,7 +1119,7 @@ test('model-capacity failure without exact Clowder AI task coordinates blocks in
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wire,
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-missing-anchor' },
-      runInput: { prompt: 'ambiguous internal work', thread: { kind: 'start' } },
+      runInput: { prompt: frozenPrompt('ambiguous internal work'), thread: { kind: 'start' } },
       modelCapacityRetryDelaysMs: [0],
     }),
   );
@@ -881,14 +1145,14 @@ test('model-capacity failure without exact Clowder AI task coordinates blocks in
 
 test('model-capacity recovery after completed tools resumes the exact invocation checkpoint', async () => {
   const first = new ProtocolWire();
-  const second = new ProtocolWire();
+  const second = new ProtocolWire({ turnId: 'turn-2' });
   const wires = [first, second];
   let factoryCalls = 0;
   const run = collect(
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wires[factoryCalls++],
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-checkpoint' },
-      runInput: { prompt: 'review pull request 42', thread: { kind: 'start' } },
+      runInput: { prompt: frozenPrompt('review pull request 42'), thread: { kind: 'start' } },
       recoveryAnchor: {
         threadId: 'cat-thread-7',
         invocationId: 'inv-checkpoint',
@@ -968,15 +1232,15 @@ test('model-capacity recovery after completed tools resumes the exact invocation
 
 test('repeated model-capacity attempts reuse one hidden recovery context without adding user messages', async () => {
   const first = new ProtocolWire();
-  const second = new ProtocolWire();
-  const third = new ProtocolWire();
+  const second = new ProtocolWire({ turnId: 'turn-2' });
+  const third = new ProtocolWire({ turnId: 'turn-3' });
   const wires = [first, second, third];
   let factoryCalls = 0;
   const run = collect(
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wires[factoryCalls++],
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-capacity-repeat' },
-      runInput: { prompt: 'do safe work', thread: { kind: 'start' } },
+      runInput: { prompt: frozenPrompt('do safe work'), thread: { kind: 'start' } },
       recoveryAnchor: {
         threadId: 'cat-thread-repeat',
         invocationId: 'inv-capacity-repeat',
@@ -1033,7 +1297,7 @@ test('model-capacity failure after a tool starts fails closed without replay', a
     runCodexAppServerWithRecovery({
       sessionFactory: async () => (factoryCalls++ === 0 ? first : second),
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-capacity-tool' },
-      runInput: { prompt: 'do side effects', thread: { kind: 'start' } },
+      runInput: { prompt: frozenPrompt('do side effects'), thread: { kind: 'start' } },
       retryBudget: 1,
       modelCapacityRetryDelaysMs: [0],
     }),
@@ -1073,7 +1337,7 @@ test('model-capacity failure after terminal tools without a plan blocks instead 
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wire,
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-no-plan' },
-      runInput: { prompt: 'work on one exact task', thread: { kind: 'start' } },
+      runInput: { prompt: frozenPrompt('work on one exact task'), thread: { kind: 'start' } },
       recoveryAnchor: {
         threadId: 'cat-thread-7',
         invocationId: 'inv-no-plan',
@@ -1127,7 +1391,7 @@ test('model-capacity retry budget is bounded and exposes only the final failure'
     runCodexAppServerWithRecovery({
       sessionFactory: async () => wires[factoryCalls++],
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-capacity-bounded' },
-      runInput: { prompt: 'do safe work', thread: { kind: 'start' } },
+      runInput: { prompt: frozenPrompt('do safe work'), thread: { kind: 'start' } },
       recoveryAnchor: {
         threadId: 'cat-thread-7',
         invocationId: 'inv-capacity-bounded',
@@ -1173,7 +1437,7 @@ test('explicit pre-turn timeout does not restart the transport', async () => {
         return wire;
       },
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-timeout' },
-      runInput: { prompt: 'work', thread: { kind: 'start' }, timeoutMs: 10 },
+      runInput: { prompt: frozenPrompt('work'), thread: { kind: 'start' }, timeoutMs: 10 },
       retryBudget: 1,
     }),
   );
@@ -1191,7 +1455,7 @@ test('accepted turns fail closed without transport restart or prompt replay', as
     runCodexAppServerWithRecovery({
       sessionFactory: async () => (factoryCalls++ === 0 ? first : second),
       sessionOptions: { command: 'codex', args: ['app-server', '--stdio'], invocationId: 'inv-no-replay' },
-      runInput: { prompt: 'do side effects', thread: { kind: 'start' } },
+      runInput: { prompt: frozenPrompt('do side effects'), thread: { kind: 'start' } },
       clientDeps: { onLifecycle: (snapshot) => lifecycle.push(snapshot) },
       retryBudget: 1,
     }),

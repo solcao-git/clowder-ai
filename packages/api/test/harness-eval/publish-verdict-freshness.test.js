@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { InMemoryFreshnessClosureStore } from '../../dist/domains/cats/services/freshness/FreshnessClosureStore.js';
+import { InMemoryFreshnessClosureStore } from '../../dist/domains/cats/services/freshness/closure/FreshnessClosureStore.js';
 import { FreshnessReplayProviderImpl } from '../../dist/infrastructure/harness-eval/freshness/freshness-replay-provider.js';
 import { loadEvalHubSummary } from '../../dist/infrastructure/harness-eval/hub/eval-hub-read-model.js';
 import { createFreshnessGeneratorAdapter } from '../../dist/infrastructure/harness-eval/publish-verdict/freshness-generator-adapter.js';
@@ -67,6 +67,26 @@ const sourceRefs = {
   windowEndMs: 2_000,
 };
 
+function matureProvider(store = new InMemoryFreshnessClosureStore()) {
+  return new FreshnessReplayProviderImpl({
+    store,
+    fixtureRoot,
+    queueLifecycleSource: {
+      async listOwnerQueueCustodyLifecycles() {
+        return [];
+      },
+    },
+    attentionEventLog: {
+      async queryWindowBetween(startMs, endMs) {
+        return {
+          events: [],
+          coverage: { status: 'complete', completeFromMs: startMs, observedThroughMs: endMs },
+        };
+      },
+    },
+  });
+}
+
 before(() => {
   mkdirSync(join(harnessFeedbackRoot, 'eval-domains'), { recursive: true });
   mkdirSync(join(harnessFeedbackRoot, 'verdicts'), { recursive: true });
@@ -105,10 +125,7 @@ describe('publish_verdict eval:freshness', () => {
       evidenceRefs: ['append:message-final'],
       now: 1_300,
     });
-    const provider = new FreshnessReplayProviderImpl({
-      store,
-      fixtureRoot,
-    });
+    const provider = matureProvider(store);
     const generator = createFreshnessGeneratorAdapter(provider);
     let isolatedRoot;
     const gitPublisher = {
@@ -130,7 +147,7 @@ describe('publish_verdict eval:freshness', () => {
 
     const result = await handlePublishVerdict(
       { harnessFeedbackRoot, generator, gitPublisher },
-      { packet: freshnessPacket(), domain: 'eval:freshness', catId: 'gpt52', sourceRefs },
+      { packet: freshnessPacket(), domain: 'eval:freshness', catId: 'gpt52', ownerUserId: 'user-1', sourceRefs },
     );
 
     assert.ok(!('error' in result), JSON.stringify(result));
@@ -204,9 +221,7 @@ describe('publish_verdict eval:freshness', () => {
   });
 
   it('publishes an empty replay window as no-data with healthy=false', async () => {
-    const generator = createFreshnessGeneratorAdapter(
-      new FreshnessReplayProviderImpl({ store: new InMemoryFreshnessClosureStore(), fixtureRoot }),
-    );
+    const generator = createFreshnessGeneratorAdapter(matureProvider());
     const isolatedRoot = join(root, 'isolated-no-data');
     const gitPublisher = {
       async publishOnIsolatedWorktree(opts) {
@@ -227,6 +242,7 @@ describe('publish_verdict eval:freshness', () => {
         packet: freshnessPacket({ id: 'vhp-freshness-no-data' }),
         domain: 'eval:freshness',
         catId: 'gpt52',
+        ownerUserId: 'user-1',
         sourceRefs: { kind: 'freshness-closure-replay', windowStartMs: 3_000, windowEndMs: 4_000 },
       },
     );

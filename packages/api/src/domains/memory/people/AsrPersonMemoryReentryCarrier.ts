@@ -1,6 +1,7 @@
 import {
   asrPersonMemoryDynamicSceneEntryV1Schema,
   writeOpportunityGenerationId,
+  writeOpportunityPresentationRetryCarrierV1Schema,
   writeOpportunityReentryCarrierV1Schema,
 } from '@cat-cafe/shared';
 import type { IMessageStore, StoredMessage } from '../../cats/services/stores/ports/MessageStore.js';
@@ -8,9 +9,34 @@ import type { BoundAsrPersonMemoryScene } from './AsrPersonMemoryOpportunityProm
 import { eligibleOwnerMessage } from './PersonMemorySourceBundleResolver.js';
 
 function sameOpportunityBody(original: Record<string, unknown>, reentered: Record<string, unknown>): boolean {
-  const { opportunityId: _oldId, generation: _oldGeneration, eligibleAt: _oldEligibleAt, ...oldBody } = original;
-  const { opportunityId: _newId, generation: _newGeneration, eligibleAt: _newEligibleAt, ...newBody } = reentered;
+  const {
+    opportunityId: _oldId,
+    generation: _oldGeneration,
+    eligibleAt: _oldEligibleAt,
+    scope: _oldScope,
+    consumer: _oldConsumer,
+    ...oldBody
+  } = original;
+  const {
+    opportunityId: _newId,
+    generation: _newGeneration,
+    eligibleAt: _newEligibleAt,
+    scope: _newScope,
+    consumer: _newConsumer,
+    ...newBody
+  } = reentered;
   return JSON.stringify(oldBody) === JSON.stringify(newBody);
+}
+
+function reentryCarriers(message: StoredMessage) {
+  const candidates = [
+    ...(Array.isArray(message.extra?.writeOpportunityReentries) ? message.extra.writeOpportunityReentries : []),
+    ...(message.extra?.writeOpportunityReentry ? [message.extra.writeOpportunityReentry] : []),
+  ].slice(0, 8);
+  return candidates.flatMap((candidate) => {
+    const parsed = writeOpportunityReentryCarrierV1Schema.safeParse(candidate);
+    return parsed.success ? [parsed.data] : [];
+  });
 }
 
 /**
@@ -24,9 +50,94 @@ export async function bindAsrPersonMemoryReentryFromSchedulerMessage(input: {
   triggerMessage: StoredMessage;
   ownerUserId: string;
   threadId: string;
+  targetCatId: string;
   messageStore: Pick<IMessageStore, 'getById'>;
 }): Promise<readonly BoundAsrPersonMemoryScene[]> {
-  const carrier = writeOpportunityReentryCarrierV1Schema.safeParse(input.triggerMessage.extra?.writeOpportunityReentry);
+  const carriers = reentryCarriers(input.triggerMessage);
+  if (
+    carriers.length === 0 ||
+    input.triggerMessage.userId !== 'scheduler' ||
+    input.triggerMessage.catId !== null ||
+    input.triggerMessage.threadId !== input.threadId ||
+    input.triggerMessage.deletedAt !== undefined ||
+    input.triggerMessage._tombstone ||
+    input.triggerMessage.extra?.scheduler?.hiddenTrigger !== true
+  ) {
+    return [];
+  }
+  const bound: BoundAsrPersonMemoryScene[] = [];
+  for (const carrier of carriers) {
+    const source = await input.messageStore.getById(carrier.sourceMessageRef.messageId);
+    if (
+      !eligibleOwnerMessage(source, { ownerUserId: input.ownerUserId }) ||
+      source.threadId !== carrier.sourceMessageRef.threadId
+    ) {
+      continue;
+    }
+    const original = (source.extra?.dynamicSceneEntries ?? [])
+      .map((candidate) => asrPersonMemoryDynamicSceneEntryV1Schema.safeParse(candidate))
+      .find(
+        (candidate) => candidate.success && candidate.data.opportunity.opportunityId === carrier.sourceOpportunityId,
+      );
+    if (!original?.success) continue;
+
+    const previous = original.data.opportunity;
+    const next = carrier.scene.opportunity;
+    const legacyScope =
+      source.threadId === input.threadId &&
+      previous.scope.threadId === input.threadId &&
+      next.scope.threadId === input.threadId &&
+      next.consumer.catId === previous.consumer.catId &&
+      next.consumer.catId === input.targetCatId;
+    const delegatedScope =
+      previous.scope.threadId === source.threadId &&
+      next.scope.threadId === input.threadId &&
+      next.consumer.catId === input.targetCatId;
+    if (
+      previous.scope.ownerUserId !== input.ownerUserId ||
+      previous.generation !== 1 ||
+      previous.opportunityId !== writeOpportunityGenerationId(previous.dedupeLineage, 1) ||
+      next.scope.ownerUserId !== input.ownerUserId ||
+      (!legacyScope && !delegatedScope) ||
+      next.generation !== carrier.priorGeneration + 1 ||
+      next.opportunityId !== writeOpportunityGenerationId(previous.dedupeLineage, next.generation) ||
+      next.dedupeLineage !== previous.dedupeLineage ||
+      !sameOpportunityBody(previous, next)
+    ) {
+      continue;
+    }
+
+    bound.push({
+      scene: carrier.scene,
+      source: {
+        kind: 'message',
+        threadId: source.threadId,
+        ...(source.threadId !== input.threadId ? { presentationThreadId: input.threadId } : {}),
+        sourceMessageId: source.id,
+        authorUserId: source.userId,
+        authorRole: 'owner',
+        visibility: 'verified_live_owner_message',
+      },
+    });
+  }
+  return bound;
+}
+
+/**
+ * Re-bind one unchanged generation after F296 could not present it on the original carrier.
+ * The trigger contains only durable refs; authority and scene content are re-read from the exact
+ * live owner message, so deleting/editing the original or changing its consumer fails closed.
+ */
+export async function bindAsrPersonMemoryPresentationRetryFromSchedulerMessage(input: {
+  triggerMessage: StoredMessage;
+  ownerUserId: string;
+  threadId: string;
+  targetCatId: string;
+  messageStore: Pick<IMessageStore, 'getById'>;
+}): Promise<readonly BoundAsrPersonMemoryScene[]> {
+  const carrier = writeOpportunityPresentationRetryCarrierV1Schema.safeParse(
+    input.triggerMessage.extra?.writeOpportunityPresentationRetry,
+  );
   if (
     !carrier.success ||
     input.triggerMessage.userId !== 'scheduler' ||
@@ -41,9 +152,12 @@ export async function bindAsrPersonMemoryReentryFromSchedulerMessage(input: {
   }
 
   const source = await input.messageStore.getById(carrier.data.sourceMessageRef.messageId);
+  const meetingArtifact = source?.extra?.meetingArtifact;
   if (
     !eligibleOwnerMessage(source, { ownerUserId: input.ownerUserId }) ||
-    source.threadId !== carrier.data.sourceMessageRef.threadId
+    source.threadId !== carrier.data.sourceMessageRef.threadId ||
+    meetingArtifact?.trust !== 'untrusted_external' ||
+    meetingArtifact.instructionPolicy !== 'data_only'
   ) {
     return [];
   }
@@ -52,29 +166,25 @@ export async function bindAsrPersonMemoryReentryFromSchedulerMessage(input: {
     .find(
       (candidate) => candidate.success && candidate.data.opportunity.opportunityId === carrier.data.sourceOpportunityId,
     );
-  if (!original?.success) return [];
-
-  const previous = original.data.opportunity;
-  const next = carrier.data.scene.opportunity;
   if (
-    previous.scope.ownerUserId !== input.ownerUserId ||
-    previous.scope.threadId !== input.threadId ||
-    previous.generation !== 1 ||
-    previous.opportunityId !== writeOpportunityGenerationId(previous.dedupeLineage, 1) ||
-    next.scope.ownerUserId !== input.ownerUserId ||
-    next.scope.threadId !== input.threadId ||
-    next.consumer.catId !== previous.consumer.catId ||
-    next.generation !== carrier.data.priorGeneration + 1 ||
-    next.opportunityId !== writeOpportunityGenerationId(previous.dedupeLineage, next.generation) ||
-    next.dedupeLineage !== previous.dedupeLineage ||
-    !sameOpportunityBody(previous, next)
+    !original?.success ||
+    original.data.opportunity.scope.ownerUserId !== input.ownerUserId ||
+    original.data.opportunity.scope.threadId !== input.threadId ||
+    original.data.opportunity.consumer.catId !== input.targetCatId ||
+    original.data.opportunity.generation !== 1 ||
+    original.data.opportunity.opportunityId !==
+      writeOpportunityGenerationId(original.data.opportunity.dedupeLineage, 1) ||
+    original.data.opportunity.sourceCoordinates.some(
+      (coordinate) =>
+        coordinate.artifactId !== meetingArtifact.intakeId || coordinate.sourceHandle !== meetingArtifact.sourceHandle,
+    )
   ) {
     return [];
   }
 
   return [
     {
-      scene: carrier.data.scene,
+      scene: original.data,
       source: {
         kind: 'message',
         threadId: source.threadId,

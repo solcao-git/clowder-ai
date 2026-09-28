@@ -728,30 +728,42 @@ test('spawnCli cleans up on consumer break (early return)', async () => {
 });
 
 test('spawnCli passes cwd and env to spawn', async () => {
+  const previousPwd = process.env.PWD;
+  const previousInitCwd = process.env.INIT_CWD;
+  process.env.PWD = '/runtime/cat-cafe/packages/api';
+  process.env.INIT_CWD = '/runtime/cat-cafe';
   const proc = createMockProcess();
   const spawnFn = createMockSpawnFn(proc);
+  try {
+    const promise = collect(
+      spawnCli(
+        {
+          command: 'claude',
+          args: ['-p', 'hello'],
+          cwd: '/some/project',
+          env: { CUSTOM_VAR: 'value' },
+        },
+        { spawnFn },
+      ),
+    );
 
-  const promise = collect(
-    spawnCli(
-      {
-        command: 'claude',
-        args: ['-p', 'hello'],
-        cwd: '/some/project',
-        env: { CUSTOM_VAR: 'value' },
-      },
-      { spawnFn },
-    ),
-  );
+    proc.stdout.end();
+    proc._emitter.emit('exit', 0, null);
+    await promise;
 
-  proc.stdout.end();
-  proc._emitter.emit('exit', 0, null);
-  await promise;
-
-  const spawnCall = spawnFn.mock.calls[0];
-  assert.equal(spawnCall.arguments[0], 'claude');
-  assert.deepEqual(spawnCall.arguments[1], ['-p', 'hello']);
-  assert.equal(spawnCall.arguments[2].cwd, '/some/project');
-  assert.equal(spawnCall.arguments[2].env.CUSTOM_VAR, 'value');
+    const spawnCall = spawnFn.mock.calls[0];
+    assert.equal(spawnCall.arguments[0], 'claude');
+    assert.deepEqual(spawnCall.arguments[1], ['-p', 'hello']);
+    assert.equal(spawnCall.arguments[2].cwd, '/some/project');
+    assert.equal(spawnCall.arguments[2].env.PWD, '/some/project');
+    assert.equal(spawnCall.arguments[2].env.INIT_CWD, '/some/project');
+    assert.equal(spawnCall.arguments[2].env.CUSTOM_VAR, 'value');
+  } finally {
+    if (previousPwd === undefined) delete process.env.PWD;
+    else process.env.PWD = previousPwd;
+    if (previousInitCwd === undefined) delete process.env.INIT_CWD;
+    else process.env.INIT_CWD = previousInitCwd;
+  }
 });
 
 test('spawnCli removes inherited env vars when override is null', async () => {
@@ -1902,6 +1914,29 @@ test('F212 AC-A1: __cliError includes cliDiagnostics with reasonCode for known s
   assert.equal(err.cliDiagnostics.debugRef.command, 'codex');
   assert.equal(err.cliDiagnostics.debugRef.exitCode, 1);
   assert.equal(err.cliDiagnostics.debugRef.invocationId, 'inv-A1');
+});
+
+test('#1325: spawnCli forwards managed argv provenance and fails closed without it', async () => {
+  const run = async (options) => {
+    const proc = createMockProcess({ exitOnKill: false });
+    const spawnFn = createMockSpawnFn(proc);
+    const promise = collect(spawnCli(options, { spawnFn }));
+    proc.stderr.write("error: unknown option '--agent-file'\n");
+    proc.stdout.end();
+    proc._emitter.emit('exit', 1, null);
+    const results = await promise;
+    return results.find((result) => result?.__cliError)?.cliDiagnostics;
+  };
+
+  const managed = await run({
+    command: '/usr/local/bin/kimi',
+    args: ['--agent-file', '/tmp/agent.md'],
+    managedArgvFlags: ['--agent-file'],
+  });
+  assert.equal(managed?.reasonCode, 'incompatible_cli_arguments');
+
+  const operatorOwned = await run({ command: 'gemini', args: ['--agent-file', '/tmp/operator.md'] });
+  assert.notEqual(operatorOwned?.reasonCode, 'incompatible_cli_arguments');
 });
 
 test('F212 AC-A1: __cliError for unknown stderr has cliDiagnostics with sanitized safeExcerpt (#857)', async () => {

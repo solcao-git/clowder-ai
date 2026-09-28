@@ -12,27 +12,46 @@ import { defineMcpCanonicalFactory, defineMcpMigrationFactory } from '../tool-go
  */
 
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import type {
   ActionSuccessorRequestMetadata,
   CallbackAuthFailureReason,
+  CustodyAdmissionRequestV1,
   DispatchGateState,
+  EntrustedWorkClosureSpecV1,
+  EntrustedWorkTerminalClosureV1,
+  EntrustedWorkUpdateActionV1,
+  EntrustedWorkV1,
   SuggestedCrossPostAction,
 } from '@cat-cafe/shared';
 import {
   ACTION_SUBJECT_REF_DESCRIPTION,
+  acceptedRevisionSchema,
+  acceptedSourceRefSchema,
   actionSuccessorMetadataSchema,
   CALLBACK_AUTH_FAILURE_REASONS,
+  custodyAdmissionRequestV1Schema,
   DEVELOPMENT_SOP_STAGE_IDS,
   dispatchProposedActionInputSchema,
   EXECUTABLE_ACTION_SUCCESSOR_CONTRACT_DESCRIPTION,
+  entrustedWorkClosureSpecV1Schema,
+  entrustedWorkTerminalActionV1Schema,
+  entrustedWorkUpdateActionV1Schema,
+  entrustedWorkV1Schema,
   executableActionSuccessorMetadataSchema,
   extractFeatureIds,
+  GITHUB_ISSUE_WAIT_PREDICATE_LIMIT,
+  GITHUB_PR_WAIT_PREDICATE_LIMIT,
   isCallbackAuthFailureReason,
+  isValidAcceptedSource,
+  isValidReviewSubjectRef,
   isValidRichBlock,
+  localReviewVerdictSchema,
   normalizeRichBlock,
+  reviewSubjectRefSchema,
   SOP_DEFINITION_IDS,
+  taskFeatureIdSchema,
 } from '@cat-cafe/shared';
+import { hasUsableAgentKeyCredentials, resolveAgentKeySecretFromEnv } from '@cat-cafe/shared/utils';
 import { z } from 'zod';
 import { sendCallbackRequest } from './callback-outbox.js';
 import { extractReasonTag } from './callback-retry.js';
@@ -104,6 +123,22 @@ const SYNTHESIZED_AUDIO_CALLBACK_TRANSPORT: CallbackTransportOptions = {
   fetchTimeoutMs: SYNTHESIZED_AUDIO_CALLBACK_FETCH_TIMEOUT_MS,
 };
 
+interface LocalReviewAnchorInput {
+  reviewSubjectRef?: string | undefined;
+  acceptedSourceRef?: string | undefined;
+  acceptedRevision?: string | undefined;
+}
+
+function hasCompleteLocalReviewAnchor(input: LocalReviewAnchorInput): boolean {
+  if (!input.reviewSubjectRef || !isValidReviewSubjectRef(input.reviewSubjectRef)) return false;
+  if (!input.acceptedSourceRef || !input.acceptedRevision) return false;
+  return isValidAcceptedSource(input.acceptedSourceRef, input.acceptedRevision);
+}
+
+function hasAnyLocalReviewAnchor(input: LocalReviewAnchorInput): boolean {
+  return Boolean(input.reviewSubjectRef || input.acceptedSourceRef || input.acceptedRevision);
+}
+
 function requiresInlineAudioSynthesis(block: unknown): boolean {
   if (!block) return false;
   if (typeof block !== 'object') return false;
@@ -113,47 +148,14 @@ function requiresInlineAudioSynthesis(block: unknown): boolean {
   return record.kind === 'audio' && text.length > 0 && url.length === 0;
 }
 
-function readAgentKeyFile(path: string | undefined): string | undefined {
-  if (!path) return undefined;
-  try {
-    return readFileSync(path, 'utf-8').trim();
-  } catch {
-    // sidecar missing = no agent-key (not an error)
-    return undefined;
-  }
-}
-
-function parseAgentKeyFileMap(raw: string | undefined): Record<string, string> {
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const files: Record<string, string> = {};
-    for (const [catId, filePath] of Object.entries(parsed)) {
-      if (typeof filePath === 'string' && filePath.trim()) {
-        files[catId] = filePath.trim();
-      }
-    }
-    return files;
-  } catch {
-    return {};
-  }
-}
+// readAgentKeyFile / parseAgentKeyFileMap moved to @cat-cafe/shared/utils
+// (agent-key-credentials), and the resolver core itself now lives there as
+// resolveAgentKeySecretFromEnv — availability decisions and actual callback
+// auth share one implementation, including the bound-identity restriction,
+// precedence, and literal single-FILE path normalization (#1494 round 2).
 
 function resolveAgentKeySecret(options?: AgentKeyOptions): string | undefined {
-  const requestedCatId = options?.agentKeyCatId?.trim();
-  const variantMapRaw = process.env.CAT_CAFE_AGENT_KEY_FILES?.trim();
-  if (requestedCatId) {
-    const variantFiles = parseAgentKeyFileMap(variantMapRaw);
-    return readAgentKeyFile(variantFiles[requestedCatId]);
-  }
-
-  if (variantMapRaw) return undefined;
-
-  const agentKeySecret = process.env.CAT_CAFE_AGENT_KEY_SECRET;
-  if (agentKeySecret) return agentKeySecret;
-
-  return readAgentKeyFile(process.env.CAT_CAFE_AGENT_KEY_FILE);
+  return resolveAgentKeySecretFromEnv(process.env, options);
 }
 
 export function getCallbackConfig(options?: AgentKeyOptions): CallbackConfig | null {
@@ -311,17 +313,13 @@ const agentKeyCatIdSchema = z
 type AgentKeySelectable = { agentKeyCatId?: string | undefined };
 type WithAgentKey<T> = T & AgentKeySelectable;
 
-const agentKeyInputShape = {
-  agentKeyCatId: agentKeyCatIdSchema,
-};
-
 function agentKeyOptions(input: AgentKeySelectable): { agentKeyCatId?: string | undefined } {
   return { agentKeyCatId: input.agentKeyCatId };
 }
 
 const PROPOSED_ACTION_EXECUTABLE_CONTRACT_DESCRIPTION =
-  'Executable pairs are closed: review + reviewer + review_delivered requires pr:<owner>/<repo>#<positive-number>; ' +
-  'implement + implementer + task_done requires subject:task:<taskId>. Other family, slot, predicate, or subject combinations are rejected before publication.';
+  'Executable proposed action pairs are closed: external review + reviewer + review_delivered requires pr:<owner>/<repo>#<positive-number>; ' +
+  'implement + implementer + task_done requires subject:task:<taskId>. Local cat review uses an ordinary durable handoff with localReviewVerdict + reviewedHeadSha + accepted-source fields.';
 
 const postMessageThreadIdSchema = z.string().min(1);
 
@@ -380,13 +378,35 @@ export const postMessageInputSchema = {
       'Invocation-token same-thread coordination lifecycle. Use active for a real handoff and terminal for the final result. ' +
         'A courtesy reply to terminal is persisted without waking the prior cat.',
     ),
+  localReviewVerdict: localReviewVerdictSchema
+    .optional()
+    .describe(
+      'Durable local-review fact. Requires clientMessageId, exact reviewedHeadSha, reviewSubjectRef, acceptedSourceRef, acceptedRevision, and an ordinary routed @author handoff. It is independent of action lease, coordination generation, and issuer route. Public prose is presentation only.',
+    ),
+  reviewedHeadSha: z
+    .string()
+    .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
+    .optional()
+    .describe(
+      'Reviewer-authored exact lowercase 40- or 64-character Git OID. Required with localReviewVerdict; merge-gate compares it with the current HEAD.',
+    ),
+  reviewSubjectRef: reviewSubjectRefSchema
+    .optional()
+    .describe('Stable review subject, for example pr:owner/repo#123. Required with localReviewVerdict.'),
+  acceptedSourceRef: acceptedSourceRefSchema
+    .optional()
+    .describe(
+      'Accepted feature-document path or immutable threadId#messageId source. Required with localReviewVerdict.',
+    ),
+  acceptedRevision: acceptedRevisionSchema
+    .optional()
+    .describe('Exact feature Git OID or source message id corresponding to acceptedSourceRef.'),
   action: executableActionSuccessorMetadataSchema
     .optional()
     .describe(
       'Optional same-thread structured successor identity. New dispatches require mode=single; a parallel holder may use returnToPredecessor with one predecessor target to record only its rejected-ownership terminal. Requires explicit clientMessageId and exactly one targetCats entry. ' +
         'Use claimOrigin=existing_standing plus groundingEvidenceRef to claim verified standing through the same custody CAS. ' +
         'New claims require terminalPredicate typed parameters; server catalog owns completion semantics, and carrier exit/text never counts as action success. ' +
-        'A completed review lease can continue on a fresh exact HEAD only with reviewReentry reason behavioral_delta, stale_or_blocking, or explicit_matrix_route plus durable evidenceRef; omit reviewReentry for the initial review. ' +
         'A mismatched current holder returns with returnToPredecessor={leaseId, expectedGeneration, groundingEvidenceRef}; targetCats must name the persisted predecessor. ' +
         'Use multi_mention for deliberate parallel review/ideation. ' +
         EXECUTABLE_ACTION_SUCCESSOR_CONTRACT_DESCRIPTION +
@@ -413,11 +433,11 @@ export type PostMessageRegistrationPrincipal = 'invocation' | 'agent-key' | 'unc
  * has no current thread and must advertise it as required.
  */
 export function projectPostMessageInputSchema(principal: PostMessageRegistrationPrincipal): Record<string, unknown> {
-  const { threadId: _threadId, ...common } = postMessageInputSchema;
-  if (principal === 'invocation') return common;
+  const { threadId: _threadId, ...invocationCommon } = postMessageInputSchema;
+  if (principal === 'invocation') return invocationCommon;
   if (principal === 'agent-key') {
     return {
-      ...common,
+      ...invocationCommon,
       threadId: postMessageThreadIdSchema.describe(
         'Target thread ID. Required for agent-key auth because a persistent agent has no current invocation thread.',
       ),
@@ -458,6 +478,12 @@ export const getThreadContextInputSchema = {
     .optional()
     .default(100)
     .describe('Number of recent messages to retrieve (default: 100, max: 200)'),
+  cursor: z
+    .string()
+    .min(1)
+    .max(4096)
+    .optional()
+    .describe('Opaque nextCursor from the immediately preceding read with the same thread, filters, and mode.'),
   threadId: z
     .string()
     .min(1)
@@ -495,10 +521,20 @@ export const getThreadContextInputSchema = {
     .optional()
     .describe(
       'Response projection mode. "anchor" (DEFAULT — omit for normal browsing): token-lean previews with drillDown pointers to full content. ' +
-        '"full": returns complete message bodies (no truncation, no drillDown). ' +
-        'Use "full" for bulk/export AND whenever a freshness catch asks you to consume the contiguous unread set: only full exposes same-target queued bodies and advances queued-read evidence. ' +
+        '"full": returns complete message bodies inside a bounded aggregate page; use nextCursor when hasMore=true. A persisted message larger than the page is returned as an honest anchor with a precise drill pointer; a transient queued body without a persisted message anchor remains unseen and says to retry after persistence. ' +
+        'An oversized workflow SOP is likewise returned as an honest anchor that points to cat_cafe_get_workflow_sop instead of overflowing the aggregate envelope. ' +
+        'Use "full" whenever a freshness catch asks you to consume the contiguous unread set: current-thread reads prefer the unread delta, and only complete bodies advance queued-read evidence. ' +
         'GOTCHA: anchor previews are not a freshness closure and cannot prove queued messages were handled.',
     ),
+  agentKeyCatId: agentKeyCatIdSchema,
+};
+
+export const getWorkflowSopInputSchema = {
+  threadId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Thread whose linked canonical workflow SOP should be read. Omit for the current invocation thread.'),
   agentKeyCatId: agentKeyCatIdSchema,
 };
 
@@ -608,7 +644,12 @@ export const createTaskInputSchema = {
 
 export const updateTaskInputSchema = {
   taskId: z.string().min(1).describe('The ID of the task to update'),
-  status: z.enum(['todo', 'doing', 'blocked', 'done']).optional().describe('New task status'),
+  status: z
+    .enum(['todo', 'doing', 'blocked', 'done'])
+    .optional()
+    .describe(
+      'New task status. Entrusted work rejects status=done here; its Task owner requires an evidence-backed typed closure action.',
+    ),
   why: z.string().max(1000).optional().describe('Optional note explaining the status change'),
   // F193-E1 P1-4 fix: allow patching dispatchGate on existing tasks
   dispatchGate: z
@@ -637,6 +678,70 @@ export const updateTaskInputSchema = {
     )
     .optional()
     .describe('Resolve a previously-missing dispatch gate on this task.'),
+};
+
+export const admitEntrustedWorkInputSchema = {
+  title: z.string().trim().min(1).max(200).describe('Title for the canonical entrusted-work Task'),
+  why: z.string().max(1000).optional().describe('Why this work was entrusted and why the Task owns it'),
+  admission: custodyAdmissionRequestV1Schema.describe(
+    'Explicit, accepted-offer, or registered-source admission basis with stable source and idempotency coordinates',
+  ),
+  closure: entrustedWorkClosureSpecV1Schema
+    .optional()
+    .describe('Required closure condition and expected signal; omission returns needs_clarification'),
+  time: entrustedWorkV1Schema.shape.time
+    .optional()
+    .describe(
+      'Canonical source-backed businessDeadline/reviewBy facts. Required when the source states an unambiguous time; admission.timeHints alone never reaches Schedule.',
+    ),
+  artifactRefs: z.array(z.string().trim().min(1).max(1000)).max(64).optional(),
+};
+
+export const closeEntrustedWorkInputSchema = {
+  taskId: z.string().min(1).describe('Entrusted-work Task ID'),
+  expectedRevision: entrustedWorkTerminalActionV1Schema.shape.expectedRevision.describe(
+    'Current entrusted-work revision used for compare-and-set closure',
+  ),
+  closure: entrustedWorkTerminalActionV1Schema.shape.closure.describe(
+    'Evidence-backed satisfied closure or typed cancelled/abandoned disposition',
+  ),
+};
+
+export const updateEntrustedWorkInputSchema = {
+  taskId: entrustedWorkUpdateActionV1Schema.shape.taskId.describe('Entrusted-work Task ID'),
+  expectedRevision: entrustedWorkUpdateActionV1Schema.shape.expectedRevision.describe(
+    'Current entrusted-work revision used for compare-and-set update',
+  ),
+  status: entrustedWorkUpdateActionV1Schema.shape.status.describe(
+    'Optional Task progress: todo, doing, or blocked; completion requires close_entrusted_work',
+  ),
+  time: entrustedWorkUpdateActionV1Schema.shape.time.describe(
+    'Optional businessDeadline/reviewBy patch; null clears one exact Task-owned time fact',
+  ),
+  artifactRefs: entrustedWorkUpdateActionV1Schema.shape.artifactRefs.describe(
+    'Optional complete replacement of canonical Artifact refs; values are deduplicated and sorted',
+  ),
+};
+
+export const offerCustodyInputSchema = {
+  sourceMessageId: z.string().trim().min(1).max(1_000).describe('Exact source message to carry the offer'),
+  reasonCode: z
+    .enum(['future_deliverable', 'follow_up_commitment', 'time_bound_obligation'])
+    .describe('Bounded recognition reason; venting and casual mentions are intentionally absent'),
+  agentKeyCatId: agentKeyCatIdSchema,
+};
+
+export const retryCustodyAdmissionInputSchema = {
+  sourceMessageId: z.string().trim().min(1).max(1_000),
+  sourceMessageRevision: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  offerId: z.string().trim().min(1).max(1_000),
+  title: z.string().trim().min(1).max(200),
+  why: z.string().max(1_000).optional(),
+  intendedOutcome: z.string().trim().min(1).max(4_000),
+  closure: entrustedWorkClosureSpecV1Schema,
+  time: entrustedWorkV1Schema.shape.time.optional(),
+  artifactRefs: z.array(z.string().trim().min(1).max(1_000)).max(64).optional(),
+  agentKeyCatId: agentKeyCatIdSchema,
 };
 
 export const crossPostMessageInputSchema = {
@@ -696,6 +801,29 @@ export const crossPostMessageInputSchema = {
         'Not available to agent-key target-thread writes because they have no source relay provenance. ' +
         'GOTCHA: Do not combine coordination with effectClass="assign_work"; approval proposals intentionally do not carry relay provenance.',
     ),
+  localReviewVerdict: localReviewVerdictSchema
+    .optional()
+    .describe(
+      'Durable local-review fact. Requires clientMessageId, exact reviewedHeadSha, reviewSubjectRef, acceptedSourceRef, acceptedRevision, and ordinary targetCats or a line-start @author. It is independent of action lease, coordination generation, and issuer route; public prose is never parsed.',
+    ),
+  reviewedHeadSha: z
+    .string()
+    .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
+    .optional()
+    .describe(
+      'Reviewer-authored exact lowercase 40- or 64-character Git OID. Required with localReviewVerdict; merge-gate compares it with the current HEAD.',
+    ),
+  reviewSubjectRef: reviewSubjectRefSchema
+    .optional()
+    .describe('Stable review subject, for example pr:owner/repo#123. Required with localReviewVerdict.'),
+  acceptedSourceRef: acceptedSourceRefSchema
+    .optional()
+    .describe(
+      'Accepted feature-document path or immutable threadId#messageId source. Required with localReviewVerdict.',
+    ),
+  acceptedRevision: acceptedRevisionSchema
+    .optional()
+    .describe('Exact feature Git OID or source message id corresponding to acceptedSourceRef.'),
   action: executableActionSuccessorMetadataSchema
     .optional()
     .describe(
@@ -704,7 +832,6 @@ export const crossPostMessageInputSchema = {
         'mode=parallel requires at least two targets plus parallelIntent. A duplicate active action returns safe_wait. ' +
         'Use claimOrigin=existing_standing plus groundingEvidenceRef for a verified self-claim. ' +
         'New claims require terminalPredicate typed parameters; server catalog owns completion semantics and exact revision freshness. ' +
-        'A completed review lease can continue on a fresh exact HEAD only with reviewReentry reason behavioral_delta, stale_or_blocking, or explicit_matrix_route plus durable evidenceRef; omit reviewReentry for the initial review. ' +
         'Use returnToPredecessor for rejected custody: single mode returns the generation to the persisted predecessor; parallel mode records only the rejecting holder terminal and does not enqueue a whole-lease return. ' +
         EXECUTABLE_ACTION_SUCCESSOR_CONTRACT_DESCRIPTION +
         ' ' +
@@ -736,6 +863,9 @@ export const listTasksInputSchema = {
     .enum(['work', 'pr_tracking'])
     .optional()
     .describe('Optional task kind filter (work = manual tasks, pr_tracking = PR automation)'),
+  featureId: taskFeatureIdSchema
+    .optional()
+    .describe('Exact bounded feature ID filter matched against canonical TaskItem.relatedFeatureId (for example F313)'),
   taskId: z
     .string()
     .min(1)
@@ -790,12 +920,45 @@ async function _executePostMessage(
     coordination?:
       | { phase: 'active' | 'terminal'; id?: string | undefined; subjectRef?: string | undefined }
       | undefined;
+    localReviewVerdict?: 'approved' | 'changes_requested' | 'commented' | undefined;
+    reviewedHeadSha?: string | undefined;
+    reviewSubjectRef?: string | undefined;
+    acceptedSourceRef?: string | undefined;
+    acceptedRevision?: string | undefined;
     action?: ActionSuccessorRequestMetadata | undefined;
     proposedAction?: ActionSuccessorRequestMetadata | undefined;
     acknowledgeHeld?: boolean | undefined;
   },
   transportOptions?: CallbackTransportOptions,
 ): Promise<ToolResult> {
+  if (input.localReviewVerdict) {
+    if (!input.clientMessageId) {
+      return errorResult(
+        'post_message localReviewVerdict requires clientMessageId. Example: clientMessageId="review-owner-repo-1371-head".',
+      );
+    }
+    if (input.action || input.proposedAction || input.coordination) {
+      return errorResult(
+        'post_message localReviewVerdict must use ordinary A2A without action, proposedAction, or coordination.',
+      );
+    }
+    if (!input.reviewedHeadSha) {
+      return errorResult('post_message localReviewVerdict requires the exact reviewedHeadSha.');
+    }
+    if (!hasCompleteLocalReviewAnchor(input)) {
+      return errorResult(
+        'post_message localReviewVerdict requires reviewSubjectRef plus a valid acceptedSourceRef and acceptedRevision.',
+      );
+    }
+  }
+  if (input.reviewedHeadSha && !input.localReviewVerdict) {
+    return errorResult(
+      'post_message reviewedHeadSha requires localReviewVerdict. Example: localReviewVerdict="approved", reviewedHeadSha="<exact lowercase Git OID>".',
+    );
+  }
+  if (!input.localReviewVerdict && hasAnyLocalReviewAnchor(input)) {
+    return errorResult('post_message accepted-source fields require localReviewVerdict.');
+  }
   // F174 Phase E (AC-E2/E5): explicit kind:'none' policy. There's no useful
   // local fallback for post_message — losing the message is preferable to
   // re-creating server state on a stale invocation. Cats see the structured
@@ -814,6 +977,11 @@ async function _executePostMessage(
           ...(input.targetCats?.length ? { targetCats: input.targetCats } : {}),
           ...(input.effectClass ? { effectClass: input.effectClass } : {}),
           ...(input.coordination ? { coordination: input.coordination } : {}),
+          ...(input.localReviewVerdict ? { localReviewVerdict: input.localReviewVerdict } : {}),
+          ...(input.reviewedHeadSha ? { reviewedHeadSha: input.reviewedHeadSha } : {}),
+          ...(input.reviewSubjectRef ? { reviewSubjectRef: input.reviewSubjectRef } : {}),
+          ...(input.acceptedSourceRef ? { acceptedSourceRef: input.acceptedSourceRef } : {}),
+          ...(input.acceptedRevision ? { acceptedRevision: input.acceptedRevision } : {}),
           ...(input.action ? { action: input.action } : {}),
           ...(input.proposedAction ? { proposedAction: input.proposedAction } : {}),
           ...(input.acknowledgeHeld ? { acknowledgeHeld: true } : {}),
@@ -879,8 +1047,11 @@ async function _executePostMessage(
     const original = (result.content[0] as { text: string }).text;
     const reason = parseAuthFailureReason(original);
     const reasonHint = ((): string => {
-      if (reason === 'expired' || reason === 'unknown_invocation') {
-        return '这次 callback 凭证已过期或对应的 invocation 已不在 registry（可能 API 重启过）。';
+      if (reason === 'unknown_invocation') {
+        return '这次 invocation 从未存在，或它的终态 tombstone 已经过保留期。';
+      }
+      if (reason && ['completed', 'failed', 'interrupted', 'replaced', 'revoked', 'canceled'].includes(reason)) {
+        return `这次 exact TurnExecution 已终结（${reason}），callback credential 不会复活。`;
       }
       if (reason === 'invalid_token') {
         return '这次 callback token 与 invocation 不匹配（客户端可能传错了凭证）。';
@@ -928,6 +1099,11 @@ export async function handlePostMessage(
     coordination?:
       | { phase: 'active' | 'terminal'; id?: string | undefined; subjectRef?: string | undefined }
       | undefined;
+    localReviewVerdict?: 'approved' | 'changes_requested' | 'commented' | undefined;
+    reviewedHeadSha?: string | undefined;
+    reviewSubjectRef?: string | undefined;
+    acceptedSourceRef?: string | undefined;
+    acceptedRevision?: string | undefined;
     agentKeyCatId?: string | undefined;
     action?: ActionSuccessorRequestMetadata | undefined;
     acknowledgeHeld?: boolean | undefined;
@@ -1005,6 +1181,7 @@ export async function handleAckMentions(input: WithAgentKey<{ upToMessageId: str
 
 export async function handleGetThreadContext(input: {
   limit?: number | undefined;
+  cursor?: string | undefined;
   threadId?: string | undefined;
   messageId?: string | undefined;
   before?: number | undefined;
@@ -1018,6 +1195,7 @@ export async function handleGetThreadContext(input: {
     '/api/callbacks/thread-context',
     {
       ...(input.limit ? { limit: String(input.limit) } : {}),
+      ...(input.cursor ? { cursor: input.cursor } : {}),
       ...(input.threadId ? { threadId: input.threadId } : {}),
       ...(input.messageId ? { messageId: input.messageId } : {}),
       ...(input.before !== undefined ? { before: String(input.before) } : {}),
@@ -1027,6 +1205,19 @@ export async function handleGetThreadContext(input: {
       ...(input.responseMode ? { responseMode: input.responseMode } : {}),
     },
     { agentKeyCatId: input.agentKeyCatId },
+  );
+}
+
+export async function handleGetWorkflowSop(input: {
+  threadId?: string | undefined;
+  agentKeyCatId?: string | undefined;
+}): Promise<ToolResult> {
+  return callbackGet(
+    '/api/callbacks/get-workflow-sop',
+    {
+      ...(input.threadId ? { threadId: input.threadId } : {}),
+    },
+    agentKeyOptions(input),
   );
 }
 
@@ -1176,6 +1367,128 @@ export async function handleUpdateTask(input: {
   });
 }
 
+export async function handleAdmitEntrustedWork(input: {
+  title: string;
+  why?: string | undefined;
+  admission: CustodyAdmissionRequestV1;
+  closure?: EntrustedWorkClosureSpecV1 | undefined;
+  time?: EntrustedWorkV1['time'] | undefined;
+  artifactRefs?: string[] | undefined;
+  agentKeyCatId?: string | undefined;
+}): Promise<ToolResult> {
+  return withDegradation({
+    toolName: 'admit_entrusted_work',
+    primary: () =>
+      callbackPost(
+        '/api/callbacks/admit-entrusted-work',
+        {
+          title: input.title,
+          ...(input.why !== undefined ? { why: input.why } : {}),
+          admission: input.admission,
+          ...(input.closure !== undefined ? { closure: input.closure } : {}),
+          ...(input.time !== undefined ? { time: input.time } : {}),
+          ...(input.artifactRefs !== undefined ? { artifactRefs: input.artifactRefs } : {}),
+        },
+        agentKeyOptions(input),
+      ),
+    policy: { kind: 'none' },
+  });
+}
+
+export async function handleCloseEntrustedWork(input: {
+  taskId: string;
+  expectedRevision: number;
+  closure: EntrustedWorkTerminalClosureV1;
+  agentKeyCatId?: string | undefined;
+}): Promise<ToolResult> {
+  return withDegradation({
+    toolName: 'close_entrusted_work',
+    primary: () =>
+      callbackPost(
+        '/api/callbacks/close-entrusted-work',
+        {
+          taskId: input.taskId,
+          expectedRevision: input.expectedRevision,
+          closure: input.closure,
+        },
+        agentKeyOptions(input),
+      ),
+    policy: { kind: 'none' },
+  });
+}
+
+export async function handleUpdateEntrustedWork(
+  input: EntrustedWorkUpdateActionV1 & { agentKeyCatId?: string | undefined },
+): Promise<ToolResult> {
+  return withDegradation({
+    toolName: 'update_entrusted_work',
+    primary: () =>
+      callbackPost(
+        '/api/callbacks/update-entrusted-work',
+        {
+          taskId: input.taskId,
+          expectedRevision: input.expectedRevision,
+          ...(input.status !== undefined ? { status: input.status } : {}),
+          ...(input.time !== undefined ? { time: input.time } : {}),
+          ...(input.artifactRefs !== undefined ? { artifactRefs: input.artifactRefs } : {}),
+        },
+        agentKeyOptions(input),
+      ),
+    policy: { kind: 'none' },
+  });
+}
+
+export async function handleOfferCustody(input: {
+  sourceMessageId: string;
+  reasonCode: 'future_deliverable' | 'follow_up_commitment' | 'time_bound_obligation';
+  agentKeyCatId?: string | undefined;
+}): Promise<ToolResult> {
+  return withDegradation({
+    toolName: 'offer_custody',
+    primary: () =>
+      callbackPost(
+        '/api/callbacks/custody-offers',
+        { sourceMessageId: input.sourceMessageId, reasonCode: input.reasonCode },
+        agentKeyOptions(input),
+      ),
+    policy: { kind: 'none' },
+  });
+}
+
+export async function handleRetryCustodyAdmission(input: {
+  sourceMessageId: string;
+  sourceMessageRevision: string;
+  offerId: string;
+  title: string;
+  why?: string | undefined;
+  intendedOutcome: string;
+  closure: EntrustedWorkClosureSpecV1;
+  time?: EntrustedWorkV1['time'] | undefined;
+  artifactRefs?: string[] | undefined;
+  agentKeyCatId?: string | undefined;
+}): Promise<ToolResult> {
+  return withDegradation({
+    toolName: 'retry_custody_admission',
+    primary: () =>
+      callbackPost(
+        '/api/callbacks/custody-offers/retry-admission',
+        {
+          sourceMessageId: input.sourceMessageId,
+          sourceMessageRevision: input.sourceMessageRevision,
+          offerId: input.offerId,
+          title: input.title,
+          ...(input.why !== undefined ? { why: input.why } : {}),
+          intendedOutcome: input.intendedOutcome,
+          closure: input.closure,
+          ...(input.time !== undefined ? { time: input.time } : {}),
+          ...(input.artifactRefs !== undefined ? { artifactRefs: input.artifactRefs } : {}),
+        },
+        agentKeyOptions(input),
+      ),
+    policy: { kind: 'none' },
+  });
+}
+
 export async function handleCreateTask(input: {
   title: string;
   why?: string | undefined;
@@ -1260,6 +1573,11 @@ export async function handleCrossPostMessage(input: {
   agentKeyCatId?: string | undefined;
   effectClass?: 'fyi' | 'coordinate' | 'investigate' | 'assign_work' | undefined;
   coordination?: { phase: 'active' | 'terminal'; id?: string | undefined; subjectRef?: string | undefined } | undefined;
+  localReviewVerdict?: 'approved' | 'changes_requested' | 'commented' | undefined;
+  reviewedHeadSha?: string | undefined;
+  reviewSubjectRef?: string | undefined;
+  acceptedSourceRef?: string | undefined;
+  acceptedRevision?: string | undefined;
   action?: ActionSuccessorRequestMetadata | undefined;
   proposedAction?: ActionSuccessorRequestMetadata | undefined;
   acknowledgeHeld?: boolean | undefined;
@@ -1297,6 +1615,30 @@ export async function handleCrossPostMessage(input: {
         'Pass targetCats: ["catHandle"] OR add a line-start @catHandle in content. ' +
         'Without routing, the cross-thread message would land in the target thread but trigger no cat session.',
     );
+  }
+  if (input.localReviewVerdict) {
+    if (!input.clientMessageId) {
+      return errorResult('cross_post_message localReviewVerdict requires clientMessageId.');
+    }
+    if (!input.reviewedHeadSha) {
+      return errorResult('cross_post_message localReviewVerdict requires the exact reviewedHeadSha.');
+    }
+    if (!hasCompleteLocalReviewAnchor(input)) {
+      return errorResult(
+        'cross_post_message localReviewVerdict requires reviewSubjectRef plus a valid acceptedSourceRef and acceptedRevision.',
+      );
+    }
+    if (input.action || input.proposedAction || input.coordination) {
+      return errorResult(
+        'cross_post_message localReviewVerdict must use ordinary A2A without action, proposedAction, or coordination.',
+      );
+    }
+  }
+  if (input.reviewedHeadSha && !input.localReviewVerdict) {
+    return errorResult('cross_post_message reviewedHeadSha requires localReviewVerdict.');
+  }
+  if (!input.localReviewVerdict && hasAnyLocalReviewAnchor(input)) {
+    return errorResult('cross_post_message accepted-source fields require localReviewVerdict.');
   }
   if (input.action) {
     const parsedAction = executableActionSuccessorMetadataSchema.safeParse(input.action);
@@ -1340,6 +1682,11 @@ export async function handleCrossPostMessage(input: {
     ...(input.targetCats?.length ? { targetCats: input.targetCats } : {}),
     ...(input.effectClass ? { effectClass: input.effectClass } : {}),
     ...(input.coordination ? { coordination: input.coordination } : {}),
+    ...(input.localReviewVerdict ? { localReviewVerdict: input.localReviewVerdict } : {}),
+    ...(input.reviewedHeadSha ? { reviewedHeadSha: input.reviewedHeadSha } : {}),
+    ...(input.reviewSubjectRef ? { reviewSubjectRef: input.reviewSubjectRef } : {}),
+    ...(input.acceptedSourceRef ? { acceptedSourceRef: input.acceptedSourceRef } : {}),
+    ...(input.acceptedRevision ? { acceptedRevision: input.acceptedRevision } : {}),
     ...(input.action ? { action: input.action } : {}),
     ...(input.proposedAction ? { proposedAction: input.proposedAction } : {}),
     ...(input.acknowledgeHeld ? { acknowledgeHeld: true } : {}),
@@ -1378,11 +1725,10 @@ function validateCrossPostProposedAction(input: {
   if (
     input.proposedAction.replace ||
     input.proposedAction.returnToPredecessor ||
-    input.proposedAction.reviewReentry ||
     input.proposedAction.claimOrigin === 'existing_standing'
   ) {
     return errorResult(
-      'cross_post_message proposedAction supports only a new structured transfer; use direct action for replacement, return, re-entry, or existing standing.',
+      'cross_post_message proposedAction supports only a new structured transfer; use direct action for replacement, return, or existing standing.',
     );
   }
   if (input.proposedAction.mode === 'single' && input.targetCats.length !== 1) {
@@ -1399,6 +1745,7 @@ export async function handleListTasks(input: {
   catId?: string | undefined;
   status?: 'todo' | 'doing' | 'blocked' | 'done' | undefined;
   kind?: 'work' | 'pr_tracking' | undefined;
+  featureId?: string | undefined;
   taskId?: string | undefined;
   agentKeyCatId?: string | undefined;
 }): Promise<ToolResult> {
@@ -1409,6 +1756,7 @@ export async function handleListTasks(input: {
       ...(input.catId ? { catId: input.catId } : {}),
       ...(input.status ? { status: input.status } : {}),
       ...(input.kind ? { kind: input.kind } : {}),
+      ...(input.featureId ? { featureId: input.featureId } : {}),
       ...(input.taskId ? { taskId: input.taskId } : {}),
     },
     agentKeyOptions(input),
@@ -1431,9 +1779,8 @@ export const createRichBlockInputSchema = {
 /**
  * #84: Route A → Route B fallback for rich block creation.
  *
- * F174 Phase E refactor: the typed-reason auth path (expired /
- * unknown_invocation) now flows through `withDegradation` framework so
- * other write-class tools can declare the same policy uniformly. The
+ * Unknown registry state flows through `withDegradation`; authoritative
+ * terminal dispositions do not. The
  * legacy 403 / "not configured" path predates Phase A typed reasons and
  * stays inline (preserves pre-Phase-A behavior, marks DEGRADED:true).
  */
@@ -1460,11 +1807,7 @@ export async function handleCreateRichBlock(input: {
   }
   const block = parsed;
   const hasInvocationCreds = getInvocationAuthSignal().hasFullCredentials;
-  const hasAgentKeyCreds = !!(
-    process.env.CAT_CAFE_AGENT_KEY_SECRET ||
-    process.env.CAT_CAFE_AGENT_KEY_FILE ||
-    process.env.CAT_CAFE_AGENT_KEY_FILES
-  );
+  const hasAgentKeyCreds = hasUsableAgentKeyCredentials(process.env);
 
   const ccRichText = `\`\`\`cc_rich\n${JSON.stringify({ v: 1, blocks: [block] })}\n\`\`\``;
   // Inline TTS is a long-running, non-idempotent server operation. The voice
@@ -1497,7 +1840,7 @@ export async function handleCreateRichBlock(input: {
       );
     }
     return errorResult(
-      `Rich block creation failed (callback token expired or missing). As a workaround, include this in your message text:\n\n${ccRichText}`,
+      `Rich block creation failed (callback credential unavailable). As a workaround, include this in your message text:\n\n${ccRichText}`,
     );
   };
 
@@ -1571,42 +1914,17 @@ export async function handleGenerateDocument(input: {
   return result;
 }
 
-export const requestPermissionInputSchema = {
-  action: z.string().min(1).describe('The action requiring permission (e.g. "git_commit", "file_delete")'),
-  reason: z.string().min(1).describe('Why you need this permission'),
-  context: z.string().max(5000).optional().describe('Optional additional context for the request'),
-};
-
-export const checkPermissionStatusInputSchema = {
-  requestId: z.string().min(1).describe('The requestId returned from a previous request_permission call'),
-};
-
-export async function handleRequestPermission(input: {
-  action: string;
-  reason: string;
-  context?: string | undefined;
-  agentKeyCatId?: string | undefined;
-}): Promise<ToolResult> {
-  return callbackPost(
-    '/api/callbacks/request-permission',
-    {
-      action: input.action,
-      reason: input.reason,
-      ...(input.context ? { context: input.context } : {}),
-    },
-    agentKeyOptions(input),
-  );
-}
-
-export async function handleCheckPermissionStatus(input: WithAgentKey<{ requestId: string }>): Promise<ToolResult> {
-  return callbackGet(
-    '/api/callbacks/permission-status',
-    {
-      requestId: input.requestId,
-    },
-    agentKeyOptions(input),
-  );
-}
+/**
+ * #1392 AC-3: a positive audience — the GitHub logins whose comments may wake the owner, compared
+ * case-insensitively. Required on PR comment predicates, optional on `issue_comment_added`; never
+ * empty, because an empty list matches nobody and the wait would never fire. A blank login names
+ * nobody either, so logins are trimmed before that check, exactly as the server does.
+ */
+const githubWaitAuthorLoginsSchema = z
+  .array(z.string().trim().min(1))
+  .min(1)
+  .max(20)
+  .describe('GitHub logins whose comments may wake you, compared case-insensitively. Never empty.');
 
 const githubWaitPredicateInputSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('pr_head_changed') }).strict(),
@@ -1625,6 +1943,8 @@ const githubWaitPredicateInputSchema = z.discriminatedUnion('kind', [
     .strict(),
   z.object({ kind: z.literal('pr_ci_terminal') }).strict(),
   z.object({ kind: z.literal('pr_became_conflicting') }).strict(),
+  z.object({ kind: z.literal('pr_conversation_comment_added'), authorLogins: githubWaitAuthorLoginsSchema }).strict(),
+  z.object({ kind: z.literal('pr_inline_comment_added'), authorLogins: githubWaitAuthorLoginsSchema }).strict(),
 ]);
 
 // F280: server-bound typed wait registration — baseline and owner are never caller input.
@@ -1634,38 +1954,106 @@ export const registerPrTrackingInputSchema = {
   when: z
     .array(githubWaitPredicateInputSchema)
     .min(1)
-    .max(4)
-    .describe('One to four typed conditions, evaluated as flat any-of against a server-frozen live baseline.'),
+    .max(GITHUB_PR_WAIT_PREDICATE_LIMIT)
+    .optional()
+    .describe(
+      `ADVANCED, and usually omit it. One to ${GITHUB_PR_WAIT_PREDICATE_LIMIT} typed conditions for a precise wait. Omitting this is the normal path: the server then arms every condition the PR raises about itself — review decision, CI terminal and conflict, plus a new HEAD unless you are the PR author (as the author, that push is your own) — AND both comment surfaces, with an audience it derives from your role on that PR. As its author you hear every reply that is not your own, bots included; as a reviewer you hear the PR author's replies, with bots and pure summon commands filtered. Supply this only when you need something narrower or need a condition with its own anchor, such as pr_review_thread_changed; a comment predicate you write here still requires its own explicit \`authorLogins\`. Duplicate kinds, unknown kinds and conditions missing their required parameters are rejected. At most one of \`when\` or \`goal\`.`,
+    ),
+  goal: z
+    .object({
+      kind: z.literal('await_reply_from'),
+      authorLogins: z.array(z.string().trim().min(1)).min(1).max(20),
+    })
+    .strict()
+    .optional()
+    .describe(
+      'OPTIONAL narrowing, not a precondition. Comments already wake you by default; add this only to hear from specific people and nobody else. It narrows the audience the server derives from your role on both comment surfaces rather than replacing it: both rules apply, so a comment wakes you only when the derived rule admits it AND you named its author. Naming someone that rule already excludes therefore matches nobody instead of adding them — as the PR author, naming yourself; as a reviewer, naming anyone but the PR author. An empty one is refused rather than widened to everyone. What was actually armed, and what will be filtered, comes back to you in `await.continuation.when` and `notification`. At most one of `when` or `goal`.',
+    ),
   nextStep: z
     .string()
     .min(1)
     .max(500)
-    .describe('What to do after a match. Display-only text; never parsed as wake policy.'),
+    .optional()
+    .describe(
+      'Optional note to yourself, shown with the wake. Omit it and the server writes a deterministic one. Display-only either way: the matcher never reads it, and it decides nothing.',
+    ),
   expiresAt: z
     .number()
     .int()
     .positive()
-    .describe('Unix timestamp in milliseconds when responsibility expires without deleting history.'),
+    .optional()
+    .describe(
+      'Optional absolute deadline, Unix ms. Omit it and tracking has no time-based termination. ' +
+        'If supplied it must be in the future, it is returned in the registration response, and reaching it ' +
+        'ends tracking with an explicit terminal outcome. History is never deleted.',
+    ),
+  autoRenew: z
+    .boolean()
+    .optional()
+    .describe(
+      'Default true: after a match, tracking re-arms automatically with a fresh baseline, so you do not ' +
+        'register again. Set false for a single-fire wait that ends after its first match.',
+    ),
 };
+
+// Registering tracking reads a live GitHub baseline (several paginated reads) and installs the next
+// wait generation, so it is not idempotent. A replay reruns all of it against the same slow GitHub:
+// it either loses the generation race or registers again with a later baseline, which absorbs
+// whatever arrived in between. Either way the caller hears "timed out" although a registration
+// landed. So, as with publish_verdict, the original POST is never replayed. Its one attempt stays
+// under the shortest host deadline for a tool call (Antigravity's McpToolExecutor defaults to 60 s),
+// so the caller always gets this handler's answer, note included, and never the host's timeout.
+const TRACKING_REGISTRATION_TRANSPORT: CallbackTransportOptions = {
+  retryDelaysMs: [],
+  fetchTimeoutMs: 50_000,
+};
+
+/**
+ * Failures that leave the registration's outcome unknown. A request that failed in transport may
+ * have been processed anyway, and an HTTP 5xx proves nothing about the write: the route may have
+ * failed after its CAS, or a gateway in front of CAT_CAFE_API_URL may have answered after the
+ * upstream committed. A 4xx refuses before the write (a 408 is a request the server never fully
+ * received), so it keeps its plain text and any F174 hint.
+ */
+const UNKNOWN_REGISTRATION_OUTCOME = /^(?:Callback request failed:|Callback failed \(5\d\d\))/;
+
+/**
+ * Say that such a failure may still have registered, rather than let the caller read it as
+ * "nothing happened" and register again.
+ */
+function withUnknownRegistrationOutcome(result: ToolResult): ToolResult {
+  const block = result.content[0];
+  if (!result.isError || block?.type !== 'text' || !UNKNOWN_REGISTRATION_OUTCOME.test(block.text)) return result;
+  const note =
+    'The registration may still have been applied. Check cat_cafe_list_tasks for this subject ' +
+    '(its await generation and baseline capture time) before registering again.';
+  return { ...result, content: [{ type: 'text', text: `${block.text}\n\n${note}` }] };
+}
 
 export async function handleRegisterPrTracking(input: {
   repoFullName: string;
   prNumber: number;
-  when: Array<
-    | { kind: 'pr_head_changed' }
-    | { kind: 'pr_review_result_available'; triggerCommentId?: number }
-    | { kind: 'pr_review_decision_changed' }
-    | { kind: 'pr_review_thread_changed'; reviewThreadIds: string[] }
-    | { kind: 'pr_ci_terminal' }
-    | { kind: 'pr_became_conflicting' }
-  >;
-  nextStep: string;
-  expiresAt: number;
+  when:
+    | Array<
+        | { kind: 'pr_head_changed' }
+        | { kind: 'pr_review_result_available'; triggerCommentId?: number }
+        | { kind: 'pr_review_decision_changed' }
+        | { kind: 'pr_review_thread_changed'; reviewThreadIds: string[] }
+        | { kind: 'pr_ci_terminal' }
+        | { kind: 'pr_became_conflicting' }
+        | { kind: 'pr_conversation_comment_added'; authorLogins: string[] }
+        | { kind: 'pr_inline_comment_added'; authorLogins: string[] }
+      >
+    | undefined;
+  goal?: { kind: 'await_reply_from'; authorLogins: string[] } | undefined;
+  nextStep?: string | undefined;
+  expiresAt?: number;
+  autoRenew?: boolean;
   agentKeyCatId?: string | undefined;
 }): Promise<ToolResult> {
   // F174 Phase E (AC-E2/E5): explicit kind:'none'. PR tracking is one-shot
   // registration, no useful local fallback. Surface `[degrade]` hint.
-  return withDegradation({
+  const result = await withDegradation({
     toolName: 'register_pr_tracking',
     primary: () =>
       callbackPost(
@@ -1673,14 +2061,19 @@ export async function handleRegisterPrTracking(input: {
         {
           repoFullName: input.repoFullName,
           prNumber: input.prNumber,
-          when: input.when,
-          nextStep: input.nextStep,
-          expiresAt: input.expiresAt,
+          // #1392 AC-7: forward whichever the caller supplied and let the route enforce "exactly one".
+          // Serializing an absent `when` as null would turn a goal-only call into a contradiction.
+          ...(input.when !== undefined ? { when: input.when } : {}),
+          ...(input.goal !== undefined ? { goal: input.goal } : {}),
+          ...(input.nextStep !== undefined ? { nextStep: input.nextStep } : {}),
+          ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+          ...(input.autoRenew !== undefined ? { autoRenew: input.autoRenew } : {}),
         },
-        agentKeyOptions(input),
+        { ...agentKeyOptions(input), ...TRACKING_REGISTRATION_TRANSPORT },
       ),
     policy: { kind: 'none' },
   });
+  return withUnknownRegistrationOutcome(result);
 }
 
 // F202 Phase 2D (AC-D3): Register issue tracking
@@ -1690,30 +2083,50 @@ export const registerIssueTrackingInputSchema = {
   when: z
     .array(
       z.discriminatedUnion('kind', [
-        z.object({ kind: z.literal('issue_comment_added') }).strict(),
+        z
+          .object({ kind: z.literal('issue_comment_added'), authorLogins: githubWaitAuthorLoginsSchema.optional() })
+          .strict(),
         z.object({ kind: z.literal('issue_author_commented') }).strict(),
       ]),
     )
     .min(1)
-    .max(4)
-    .describe('One to four typed issue conditions, evaluated as flat any-of against a server-frozen baseline.'),
+    .max(GITHUB_ISSUE_WAIT_PREDICATE_LIMIT)
+    .optional()
+    .describe(
+      `ADVANCED, and usually omit it. One to ${GITHUB_ISSUE_WAIT_PREDICATE_LIMIT} typed issue conditions, evaluated as flat any-of against a server-frozen baseline. Omitting this is the normal path: the server arms every comment on the issue that is not your own.`,
+    ),
   nextStep: z
     .string()
     .min(1)
     .max(500)
-    .describe('What to do after a match. Display-only text; never parsed as wake policy.'),
-  expiresAt: z.number().int().positive().describe('Unix timestamp in milliseconds when responsibility expires.'),
+    .optional()
+    .describe(
+      'Optional note to yourself, shown with the wake. Omit it and the server writes a deterministic one. Display-only either way: the matcher never reads it, and it decides nothing.',
+    ),
+  expiresAt: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('Optional absolute deadline, Unix ms. Omit it and tracking has no time-based termination.'),
+  autoRenew: z
+    .boolean()
+    .optional()
+    .describe('Default true: tracking re-arms after each match. Set false for a single-fire wait.'),
 };
 
 export async function handleRegisterIssueTracking(input: {
   repoFullName: string;
   issueNumber: number;
-  when: Array<{ kind: 'issue_comment_added' } | { kind: 'issue_author_commented' }>;
-  nextStep: string;
-  expiresAt: number;
+  when?:
+    | Array<{ kind: 'issue_comment_added'; authorLogins?: string[] } | { kind: 'issue_author_commented' }>
+    | undefined;
+  nextStep?: string | undefined;
+  expiresAt?: number;
+  autoRenew?: boolean;
   agentKeyCatId?: string | undefined;
 }): Promise<ToolResult> {
-  return withDegradation({
+  const result = await withDegradation({
     toolName: 'register_issue_tracking',
     primary: () =>
       callbackPost(
@@ -1721,14 +2134,18 @@ export async function handleRegisterIssueTracking(input: {
         {
           repoFullName: input.repoFullName,
           issueNumber: input.issueNumber,
-          when: input.when,
-          nextStep: input.nextStep,
-          expiresAt: input.expiresAt,
+          // #1392 AC-7: forward `when` only when the caller wrote one. Serializing an absent list as
+          // null would turn "arm the normal default" into a schema violation at the route.
+          ...(input.when !== undefined ? { when: input.when } : {}),
+          ...(input.nextStep !== undefined ? { nextStep: input.nextStep } : {}),
+          ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+          ...(input.autoRenew !== undefined ? { autoRenew: input.autoRenew } : {}),
         },
-        agentKeyOptions(input),
+        { ...agentKeyOptions(input), ...TRACKING_REGISTRATION_TRANSPORT },
       ),
     policy: { kind: 'none' },
   });
+  return withUnknownRegistrationOutcome(result);
 }
 
 // F202 Phase 2C (AC-C3): Unregister tracking task by subjectKey
@@ -2048,7 +2465,6 @@ export const multiMentionInputSchema = {
         'Action-scoped calls require idempotencyKey. Fallback uses replace with the active leaseId+generation and succeeds only after server-recorded terminal/unavailable/cancel evidence. ' +
         'A grounded existing holder may self-claim with claimOrigin=existing_standing + groundingEvidenceRef. ' +
         'New claims require terminalPredicate typed parameters; server-side Evidence→Verdict, not response text, ends the action. ' +
-        'A completed review lease can continue on a fresh exact HEAD only with reviewReentry reason behavioral_delta, stale_or_blocking, or explicit_matrix_route plus durable evidenceRef; omit reviewReentry for the initial review. ' +
         'A mismatched single holder may atomically return to the persisted predecessor with returnToPredecessor; in parallel mode the same disposition terminates only the rejecting holder. Failed single-return delivery stays pending for recovery. ' +
         EXECUTABLE_ACTION_SUCCESSOR_CONTRACT_DESCRIPTION +
         ' ' +
@@ -2248,13 +2664,19 @@ export const proposeThreadInputSchema = {
     .max(4000)
     .optional()
     .describe(
-      'Optional first message body posted as the source cat (AC-AA4 source attribution) into the new thread on approve. Server injects routing credentials (threadId + @handle) into the header so downstream cats can cross-post back. For zts212653/clowder-ai PR proposals, the server also injects the opensource-ops maintainer five questions gate and real GitHub author/fix-custody boundary.',
+      'Optional first message body posted as the source cat (AC-AA4 source attribution) into the new thread on approve. Server injects routing credentials (threadId + @handle) into the header so downstream cats can cross-post back. The server does NOT infer external PR identity, author role, maintainer policy, or auto-inject the opensource-ops skill; if the child thread will handle a GitHub PR/issue, the first cat must load the opensource-ops skill and perform its own grounding.',
     ),
   reportingMode: z
     .enum(['none', 'final-only', 'state-transitions', 'blocking-ack'])
     .optional()
     .describe(
       'Optional F128 reporting contract for the sub-thread (AC-AA1: default is final-only). final-only (default): report a summary once on completion via cross_post with routing credentials. none (autonomous): downstream self-governs, no required report-back (only escalate operator/blocker/irreversible/cross-feature conflict per house rules). state-transitions: report at each phase boundary. blocking-ack: wait for source-thread ack at each blocker. Triage/dispatch → none; fork-and-return needing a summary → final-only.',
+    ),
+  declaredWorkMode: z
+    .enum(['subtask', 'parallel', 'investigation', 'standalone'])
+    .optional()
+    .describe(
+      'Optional F277 placement role. subtask: sustained child work under the source thread; parallel: sustained same-group parallel workstream; investigation: one-off related investigation; standalone: keep the exact birth/source audit but do not continuously group it with the source thread. This is independent from reportingMode and can be changed by the user before approval.',
     ),
   parentThreadId: z.string().min(1).optional().describe('Optional parent thread ID. Defaults to the current thread.'),
   projectPath: z
@@ -2279,6 +2701,7 @@ export async function handleProposeThread(input: {
   preferredCats?: string[] | undefined;
   initialMessage?: string | undefined;
   reportingMode?: 'none' | 'final-only' | 'state-transitions' | 'blocking-ack' | undefined;
+  declaredWorkMode?: 'subtask' | 'parallel' | 'investigation' | 'standalone' | undefined;
   parentThreadId?: string | undefined;
   projectPath?: string | undefined;
   clientRequestId?: string | undefined;
@@ -2294,6 +2717,7 @@ export async function handleProposeThread(input: {
   if (input.preferredCats?.length) body.preferredCats = input.preferredCats;
   if (input.initialMessage) body.initialMessage = input.initialMessage;
   if (input.reportingMode) body.reportingMode = input.reportingMode;
+  if (input.declaredWorkMode) body.declaredWorkMode = input.declaredWorkMode;
   if (input.parentThreadId) body.parentThreadId = input.parentThreadId;
   if (input.projectPath) body.projectPath = input.projectPath;
 
@@ -2409,10 +2833,25 @@ export async function handleProposeSessionHandoff(input: {
 
 export const readProfileInputSchema = {
   agentKeyCatId: agentKeyCatIdSchema,
+  layer: z
+    .enum(['primer', 'corpus'])
+    .optional()
+    .describe(
+      "Which profile layer to read. 'primer' (default) = this persona's relationship primer; 'corpus' = owner-wide shared facts (all personas see the same content). Omit for the default primer.",
+    ),
 };
 
-export async function handleReadProfile(input: { agentKeyCatId?: string | undefined }): Promise<ToolResult> {
-  return callbackGet('/api/callbacks/profile', undefined, agentKeyOptions(input));
+export async function handleReadProfile(input: {
+  layer?: 'primer' | 'corpus' | undefined;
+  agentKeyCatId?: string | undefined;
+}): Promise<ToolResult> {
+  const params: Record<string, string> = {};
+  if (input.layer) params.layer = input.layer;
+  return callbackGet(
+    '/api/callbacks/profile',
+    Object.keys(params).length > 0 ? params : undefined,
+    agentKeyOptions(input),
+  );
 }
 
 export const proposeProfileUpdateInputSchema = {
@@ -2421,7 +2860,7 @@ export const proposeProfileUpdateInputSchema = {
     .min(1)
     .max(20000)
     .describe(
-      'The COMPLETE new persona primer content (whole-file replacement, NOT a diff/patch). On approval the server derives your authenticated relationshipKey and writes this verbatim into relationship/{relationshipKey}-primer.md. Include everything you want kept — anything you omit is dropped.',
+      'The COMPLETE new content (whole-file replacement, NOT a diff/patch). For primer: writes to relationship/{relationshipKey}-primer.md; for corpus: writes to corpus/shared-facts.md. Include everything you want kept — anything you omit is dropped.',
     ),
   rationale: z
     .string()
@@ -2434,6 +2873,12 @@ export const proposeProfileUpdateInputSchema = {
     .enum(['cat-declared', 'cvo-instructed'])
     .describe(
       "Where the relationship signal came from (provenance). 'cat-declared' = you observed/inferred it from the interaction; 'cvo-instructed' = the operator explicitly asked you to remember it. AC-C1 is manual-entry only (no auto-classifier).",
+    ),
+  targetLayer: z
+    .enum(['primer', 'corpus'])
+    .optional()
+    .describe(
+      "Which profile layer to target. 'primer' (default) = this persona's relationship primer (per-cat); 'corpus' = owner-wide shared facts (all personas see the same content, one file). Use corpus for personal facts that are independent of persona relationship (birthday, preferences, background). Omit for the default primer.",
     ),
   sourceMessageId: z
     .string()
@@ -2454,6 +2899,7 @@ export async function handleProposeProfileUpdate(input: {
   afterContent: string;
   rationale: string;
   signalKind: 'cat-declared' | 'cvo-instructed';
+  targetLayer?: 'primer' | 'corpus' | undefined;
   sourceMessageId?: string | undefined;
   clientRequestId?: string | undefined;
   agentKeyCatId?: string | undefined;
@@ -2464,6 +2910,7 @@ export async function handleProposeProfileUpdate(input: {
     afterContent: input.afterContent,
     rationale: input.rationale,
     signalKind: input.signalKind,
+    ...(input.targetLayer ? { targetLayer: input.targetLayer } : {}),
     ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
     clientRequestId: input.clientRequestId ?? randomUUID(),
   };
@@ -2493,8 +2940,12 @@ const proactiveMemoryAbstentionToolset = createProactiveMemoryAbstentionTool(cal
 const deferredPersonMemoryToolset = createDeferredPersonMemoryTool(callbackPost);
 export const { handleProposePersonMemory } = personMemoryProposalToolset;
 export const { handleRecordProactiveMemoryAbstention } = proactiveMemoryAbstentionToolset;
-export const { handleDeferPersonMemoryDelta, handleWithdrawDeferredPersonMemory, handleForgetDeferredPersonMemory } =
-  deferredPersonMemoryToolset;
+export const {
+  handleDeferPersonMemoryDelta,
+  handleDisposeDeferredPersonMemory,
+  handleWithdrawDeferredPersonMemory,
+  handleForgetDeferredPersonMemory,
+} = deferredPersonMemoryToolset;
 export const {
   handleGetPersonMemoryProposalStatus,
   handleRecallPersonRelationship,
@@ -2681,10 +3132,25 @@ export async function handleProposeTaste(input: {
 
 // ============ Thread Cats Discovery ============
 
-export const getThreadCatsInputSchema = {};
+export const getThreadCatsInputSchema = {
+  threadId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      'Thread to inspect. Invocation callers may omit for their current thread; agent-key callers must provide it.',
+    ),
+  agentKeyCatId: agentKeyCatIdSchema,
+};
 
-export async function handleGetThreadCats(input: AgentKeySelectable = {}): Promise<ToolResult> {
-  return callbackGet('/api/callbacks/thread-cats', undefined, agentKeyOptions(input));
+export async function handleGetThreadCats(input: AgentKeySelectable & { threadId?: string } = {}): Promise<ToolResult> {
+  return callbackGet(
+    '/api/callbacks/thread-cats',
+    input.threadId ? { threadId: input.threadId } : undefined,
+    agentKeyOptions(input),
+  );
 }
 
 // F155: Guide Engine
@@ -2813,6 +3279,14 @@ export async function handleHoldBall(input: {
   }
 
   return result;
+}
+
+/**
+ * F167 #1449 Slice 1 — Task-ID-independent hold observability.
+ * No input required; threadId + catId come from invocation auth.
+ */
+export async function handleGetHoldStatus(): Promise<ToolResult> {
+  return callbackGet('/api/callbacks/hold-ball/current');
 }
 
 export async function handleCompleteManagedHold(input: { disposition: 'handled' | 'completed' }): Promise<ToolResult> {
@@ -2961,8 +3435,11 @@ export const callbackTools = [
       'Output: the message is persisted in the principal-selected thread; routed targets are queued, and action conflicts return safe_wait without creating work. ' +
       'GOTCHA: action requires explicit clientMessageId + exactly one targetCats entry; ordinary single-cat notifications do not need action. ' +
       'For a direct Claim/Release chain, pass coordination.phase=active on work hops and terminal on the final delivery; terminal recipients may clean-stop without another @. ' +
+      'A terminal id or bound subject that conflicts with the incoming coordination fails with HTTP 409 before message persistence or wake; start genuinely new work with phase=active. ' +
+      'For a local review result, route an ordinary @author message with localReviewVerdict + exact reviewedHeadSha + reviewSubjectRef + acceptedSourceRef + acceptedRevision + clientMessageId. This durable fact needs no action lease, coordination generation, replacement, or issuer route. Public prose is never parsed. ' +
       'Existing standing uses claimOrigin="existing_standing" + groundingEvidenceRef; rejected custody uses returnToPredecessor and targets the persisted predecessor. ' +
       'GOTCHA: structured action metadata currently requires invocation-token auth; agent-key callers fail closed with the non-retryable action_agent_key_unsupported status and never send an unfenced fallback. ' +
+      'F247: gpt-pro agent-key returns copy only replyTo=sourceMessageId from the runtime delta; the server admits it only when an exact server-custodied dispatch grant exists. ' +
       'By default, a later provider final remains a separate durable message. Set streamDisposition="replace_final" only when this callback is the canonical replacement for that same final response. ' +
       'To hand off without structured action identity, write @猫名 on its own line at the START of the line (sentence-internal @mention does NOT route). ' +
       'GOTCHA: This tool uses callback credentials that expire — if it fails with 401, fall back to line-start @mention in your response text. ' +
@@ -3011,14 +3488,14 @@ export const callbackTools = [
       runtimeProfiles: ['full'],
     },
   }),
-  defineTool({
+  defineCanonicalTool({
     name: 'cat_cafe_get_thread_context',
     description:
       'Read messages from one thread, with token-lean anchor previews by default and optional full bodies, ranked keywords, or a bounded window around messageId. ' +
       'Use when: browsing the current conversation, reading a different known threadId, finding relevant messages inside that thread, opening context around a known messageId, or a freshness notice asks you to catch up. ' +
       'NOT for: finding features, decisions, plans, lessons, or unknown threads across project knowledge; use search_evidence or list_threads first. ' +
-      'Output: threadId plus ordered messages; anchor mode includes drillDown pointers to cat_cafe_get_message, responseMode="full" returns complete bodies and includes same-target queued bodies, and ranked keyword reads include scanCapped. ' +
-      'GOTCHA: keyword ranking is best-effort over a bounded recent scan; scanCapped=true means older history may contain additional matches. Anchor mode does not consume queued bodies or close freshness responsibility; for a freshness catch, use responseMode="full" with no catId/keyword/messageId filters. Pass threadId only to read a different thread; omit it for the current thread.',
+      'Output: a bounded aggregate envelope with threadId, ordered messages, hasMore, and nextCursor when continuation is required; anchor mode includes drillDown pointers, while responseMode="full" returns complete bodies per ordinary item and includes same-target queued bodies. ' +
+      'GOTCHA: keyword ranking is best-effort over a bounded recent scan; scanCapped=true means older history may contain additional matches. A single item larger than the full-page budget falls back to an honest anchor; drill an oversized workflow SOP with cat_cafe_get_workflow_sop using the returned threadId. Anchor mode does not consume queued bodies or close freshness responsibility; for a freshness catch, use responseMode="full" with no catId/keyword/messageId filters and follow nextCursor until hasMore=false. Pass threadId only to read a different thread; omit it for the current thread.',
     inputSchema: getThreadContextInputSchema,
     handler: handleGetThreadContext,
     governance: {
@@ -3028,6 +3505,30 @@ export const callbackTools = [
       authority: 'callback-thread',
       risk: { level: 'read', openWorld: false },
       runtimeProfiles: ['full', 'agent-key', 'desktop:fable-phase0', 'desktop:cloud-pro-phase0'],
+    },
+  }),
+  defineCanonicalTool({
+    name: 'cat_cafe_get_workflow_sop',
+    description:
+      'Read the complete canonical workflow SOP linked to an owner-visible thread. ' +
+      'Use when: cat_cafe_get_thread_context returns an oversized workflowSop anchor and you need the resume capsule or checks. ' +
+      'NOT for: updating workflow state (use cat_cafe_update_workflow), browsing messages, or guessing a backlog item from a feature ID. ' +
+      'Output: threadId, backlogItemId, and the persisted workflowSop including resumeCapsule, checks, version, and update provenance. ' +
+      'GOTCHA: thread ownership is resolved from callback or agent-key identity; agent-key callers must provide threadId and the matching agentKeyCatId.',
+    inputSchema: getWorkflowSopInputSchema,
+    handler: handleGetWorkflowSop,
+    governance: {
+      implementationExport: 'handleGetWorkflowSop',
+      resourceFamily: 'task-workflow',
+      action: 'read',
+      authority: 'callback-thread',
+      risk: { level: 'read', openWorld: false },
+      runtimeProfiles: ['full', 'agent-key', 'desktop:fable-phase0', 'desktop:cloud-pro-phase0'],
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'progressive-disclosure',
+        admissionRef: 'file:docs/features/F236-anchor-first-context-entry.md',
+      },
     },
   }),
   // D15: cat_cafe_search_messages removed — superseded by search_evidence + get_thread_context
@@ -3064,12 +3565,13 @@ export const callbackTools = [
       runtimeProfiles: ['full', 'agent-key', 'desktop:fable-phase0', 'desktop:cloud-pro-phase0'],
     },
   }),
-  defineTool({
+  defineCanonicalTool({
     name: 'cat_cafe_get_thread_cats',
     description:
-      'Discover which cats are in the current thread: participants (with activity stats), routable cats, and availability. ' +
-      'Use BEFORE multi_mention / start_vote / @mentions to find valid catIds — do NOT guess catIds from memory. ' +
-      'Returns: participants (catId, displayName, lastMessageAt, messageCount), routableNow, routableNotJoined, notRoutable.',
+      'Discover recipient catIds in an authorized thread. Use before choosing targetCats or starting a root collaboration. ' +
+      'Output: historical participants, routableNow (joined), routableNotJoined, and notRoutable from the shared registered-service and roster projection. ' +
+      'NOT an online/idle/quota probe or a delivery guarantee; dispatch revalidates availability. ' +
+      'Agent-key callers must supply threadId. Do not infer targets from private session chains or automatically target yourself.',
     inputSchema: getThreadCatsInputSchema,
     handler: handleGetThreadCats,
     governance: {
@@ -3078,7 +3580,7 @@ export const callbackTools = [
       action: 'read',
       authority: 'callback-thread',
       risk: { level: 'read', openWorld: false },
-      runtimeProfiles: ['full'],
+      runtimeProfiles: ['full', 'agent-key', 'desktop:cloud-pro-phase0'],
     },
   }),
   defineTool({
@@ -3143,12 +3645,15 @@ export const callbackTools = [
       'GOTCHA: Requires threadId — use feat_index/list_threads plus thread truth to verify the exact owning thread; never guess a nearby thread. ' +
       'PAW-FEEL: The original [爪感差: ...] message is already collected. Cross-post only a marker-free sourceMessageId reference to a verified owner; if none exists, use cat_cafe_propose_thread (F128). New responsibility uses effectClass=assign_work plus proposedAction for Approval Hub review. ' +
       'GOTCHA: For Claim/Release coordination, pass coordination.phase=active on Claim/work hops and terminal on Release. ' +
+      'A terminal id or bound subject that conflicts with the incoming coordination fails with HTTP 409 before message persistence or wake; start genuinely new work with phase=active. ' +
+      'For a local review result, route one ordinary @author cross-post with localReviewVerdict + exact reviewedHeadSha + reviewSubjectRef + acceptedSourceRef + acceptedRevision + clientMessageId. This durable fact needs no action lease, coordination generation, replacement, or issuer route; prose is never parsed. ' +
       'The server carries a stable id across active hops; a direct courtesy ACK after terminal is recorded without waking another cat. ' +
       'If terminal reveals genuinely new work, start a new coordination with phase=active instead of ACKing the closed chain. ' +
       'GOTCHA: For a direct named external action, pass action + explicit clientMessageId + targetCats. For operator-gated new responsibility, pass proposedAction with effectClass=assign_work instead; action and assign_work remain mutually exclusive. ' +
       'Output: direct action admission posts and queues one fenced carrier; assign_work publishes one pending approval card and posts nothing to the target until approval atomically acquires the fence. ' +
       'Existing standing reuses the same CAS via claimOrigin="existing_standing" + groundingEvidenceRef. returnToPredecessor sends a rejected single generation to the server-persisted predecessor; parallel mode records only the rejecting holder terminal. ' +
       'Structured action metadata currently requires invocation-token auth; agent-key callers fail closed with the non-retryable action_agent_key_unsupported status and never send an unfenced fallback. ' +
+      'F247: gpt-pro agent-key returns carry only the exact replyTo from the runtime delta; authorization stays in server custody. ' +
       'Fallback must use replace with the active leaseId/generation after server-recorded terminal evidence. Use mode=parallel + parallelIntent only for deliberate independent review, #ideate, or explicit operator fan-out. ' +
       'TIP: The sub-thread "## 主 Thread" header includes exact routing credentials (threadId + targetCats/handle) — copy them directly.',
     inputSchema: crossPostMessageInputSchema,
@@ -3162,12 +3667,14 @@ export const callbackTools = [
       runtimeProfiles: ['full', 'agent-key', 'desktop:fable-phase0', 'desktop:cloud-pro-phase0'],
     },
   }),
-  defineTool({
+  defineCanonicalTool({
     name: 'cat_cafe_list_tasks',
     description:
-      'List tasks with optional threadId/catId/status filters for global task discovery. ' +
-      'Use when you need to see what tasks exist, who owns them, or what is blocked. ' +
-      'TIP: Filter by status="blocked" to find tasks that need attention.',
+      'Read a bounded list of durable tasks with optional threadId/catId/status/kind filters, or exact featureId matching canonical TaskItem.relatedFeatureId. ' +
+      'Use when: you need to see what tasks exist, who owns them, what is blocked, or which work belongs to one feature. ' +
+      'NOT for: creating or changing tasks (use cat_cafe_create_task or cat_cafe_update_task). ' +
+      'Output: up to 50 tasks plus totalMatched/truncated; feature-filtered reads also return a content-free queryRef for owner verification. ' +
+      'GOTCHA: overview why fields can be anchored; pass taskId to retrieve one task with its full untruncated why.',
     inputSchema: listTasksInputSchema,
     handler: handleListTasks,
     governance: {
@@ -3177,12 +3684,18 @@ export const callbackTools = [
       authority: 'callback-owner',
       risk: { level: 'read', openWorld: false },
       runtimeProfiles: ['full'],
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'authority-boundary',
+        admissionRef: 'file:docs/features/F313-analysis-to-outcome-closure-command.md',
+      },
     },
   }),
-  defineTool({
+  defineCanonicalTool({
     name: 'cat_cafe_update_task',
     description:
       'Update a task you own: mark as doing/blocked/done, or resolve a missing dispatch gate. ' +
+      'Entrusted work cannot be marked done through this generic tool; use its typed, evidence-backed closure action. ' +
       'GOTCHA: You can only update tasks assigned to you (your catId). ' +
       'TIP: Include a "why" note when marking as blocked — it helps others understand the situation. ' +
       'F193-E1: Pass dispatchGate to resolve a "missing" dispatch gate (e.g. after cross_posting to the owning thread).',
@@ -3195,6 +3708,125 @@ export const callbackTools = [
       authority: 'callback-owner',
       risk: { level: 'write', openWorld: false },
       runtimeProfiles: ['full'],
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'side-effect-boundary',
+        admissionRef: 'file:docs/features/F310-growing-real-delegation.md',
+      },
+    },
+  }),
+  defineCanonicalTool({
+    name: 'cat_cafe_admit_entrusted_work',
+    description:
+      'Ask the canonical Task owner to admit or resume explicitly entrusted work. ' +
+      'The same idempotencyKey always returns the same Task coordinates; it never creates a sibling Task. ' +
+      'Accepted offers remain pending until this action returns a typed admitted/resumed/needs_clarification result. ' +
+      'Authorized-source admission fails closed unless its producer grant is registered and current.',
+    inputSchema: admitEntrustedWorkInputSchema,
+    handler: handleAdmitEntrustedWork,
+    governance: {
+      implementationExport: 'handleAdmitEntrustedWork',
+      resourceFamily: 'task-workflow',
+      action: 'create',
+      authority: 'callback-owner',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full'],
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'authority-boundary',
+        admissionRef: 'file:docs/features/F310-growing-real-delegation.md',
+      },
+    },
+  }),
+  defineCanonicalTool({
+    name: 'cat_cafe_close_entrusted_work',
+    description:
+      'Close entrusted work through the canonical Task owner using the current revision. ' +
+      'Satisfied closure requires evidence; cancelled or abandoned closure requires typed actor, authority, disposition, and time provenance. ' +
+      'Generic update_task status=done is intentionally rejected for entrusted work.',
+    inputSchema: closeEntrustedWorkInputSchema,
+    handler: handleCloseEntrustedWork,
+    governance: {
+      implementationExport: 'handleCloseEntrustedWork',
+      resourceFamily: 'task-workflow',
+      action: 'complete',
+      authority: 'callback-owner',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full'],
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'destructive-boundary',
+        admissionRef: 'file:docs/features/F310-growing-real-delegation.md',
+      },
+    },
+  }),
+  defineCanonicalTool({
+    name: 'cat_cafe_update_entrusted_work',
+    description:
+      'Update the current open entrusted-work Task using its exact revision. ' +
+      'Use this when work starts, blocks, resumes, or canonical business time or Artifact ownership becomes known; the same Task remains the owner and its revision advances once. ' +
+      'Artifact refs replace the canonical set and are deduplicated/sorted; null clears one time fact. ' +
+      'No-op, stale, foreign-owner, and terminal updates fail closed; generic update_task remains forbidden.',
+    inputSchema: updateEntrustedWorkInputSchema,
+    handler: handleUpdateEntrustedWork,
+    governance: {
+      implementationExport: 'handleUpdateEntrustedWork',
+      resourceFamily: 'task-workflow',
+      action: 'update',
+      authority: 'callback-owner',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full'],
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'authority-boundary',
+        admissionRef: 'file:docs/features/F310-growing-real-delegation.md',
+      },
+    },
+  }),
+  defineCanonicalTool({
+    name: 'cat_cafe_offer_custody',
+    description:
+      'Use when: the exact source conversation contains a plausible future obligation but the human has not explicitly entrusted it. ' +
+      'NOT for: explicit entrustment or registered authorized sources (use cat_cafe_admit_entrusted_work), venting/casual mentions (make no durable mutation), or creating a global reminder. ' +
+      'Output: records or rereads one source-owned custodyOfferV1 bound to the immutable message revision; terminal replay never opens a second prompt. ' +
+      'GOTCHA: this is only an offer. No Task, Schedule, or Needs Me item exists until the human accepts and the Task owner returns admitted/resumed.',
+    inputSchema: offerCustodyInputSchema,
+    handler: handleOfferCustody,
+    governance: {
+      implementationExport: 'handleOfferCustody',
+      resourceFamily: 'source-custody',
+      action: 'create',
+      authority: 'callback-thread',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full', 'agent-key'],
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'resource-entry',
+        admissionRef: 'file:docs/features/F310-growing-real-delegation.md',
+      },
+    },
+  }),
+  defineCanonicalTool({
+    name: 'cat_cafe_retry_custody_admission',
+    description:
+      'Use when: an accepted source-owned custody offer currently has a typed needs_clarification result and the same conversation now supplies the missing Task contract. ' +
+      'NOT for: pending/declined/dismissed offers, a different source revision, or explicit new work (use cat_cafe_admit_entrusted_work). ' +
+      "Output: retries the canonical Task owner with the offer's original idempotency key and updates only the exact source admission result. " +
+      'GOTCHA: stale refs and key/state mismatches fail closed; never create a sibling Task or a source-independent clarification inbox.',
+    inputSchema: retryCustodyAdmissionInputSchema,
+    handler: handleRetryCustodyAdmission,
+    governance: {
+      implementationExport: 'handleRetryCustodyAdmission',
+      resourceFamily: 'source-custody',
+      action: 'update',
+      authority: 'callback-thread',
+      risk: { level: 'write', openWorld: false },
+      runtimeProfiles: ['full', 'agent-key'],
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'resource-entry',
+        admissionRef: 'file:docs/features/F310-growing-real-delegation.md',
+      },
     },
   }),
   defineTool({
@@ -3227,6 +3859,8 @@ export const callbackTools = [
     description:
       'Create a rich block (card, diff, checklist, file, media_gallery, audio, interactive, or html_widget) attached to the current message. ' +
       'Use card for status/decisions, diff for code changes, checklist for inline todos, file for existing documents/audio/video, media_gallery for images, audio for voice, interactive for user selection/confirmation, html_widget for custom inline HTML. ' +
+      'Use this when the user wants to see, hear, or interact with the result directly in Clowder AI Chat (for example: show me, draw an HTML demo, or send a screenshot); the user does not need to say "rich text". Use html_widget for a self-contained HTML/demo, media_gallery for existing screenshots/images, and browser-preview for a complex localhost or multi-page app. ' +
+      'NOT for discussing or editing HTML without a visible-delivery request. ' +
       'Use this for long structured replies/reports with lists, tables, code blocks, diffs, status fields, or multi-step checklists; F192 rich-messaging wakeup treats plain long Markdown with these signals and no rich block as a miss. ' +
       'NOT for: persistent task tracking across sessions (use create_task for 🧶 毛线球). NOT for: document generation/export (use generate_document). ' +
       'Output: block rendered inline in the current message. ' +
@@ -3265,48 +3899,15 @@ export const callbackTools = [
       runtimeProfiles: ['full'],
     },
   }),
-  defineTool({
-    name: 'cat_cafe_request_permission',
-    description:
-      'Request permission from the user before performing a sensitive action (e.g. git_commit, file_delete). ' +
-      'Returns granted/denied immediately if a rule exists, or pending with a requestId if the user needs to approve. ' +
-      'WORKFLOW: request_permission → if pending → wait → check_permission_status with the returned requestId.',
-    inputSchema: requestPermissionInputSchema,
-    handler: handleRequestPermission,
-    governance: {
-      implementationExport: 'handleRequestPermission',
-      resourceFamily: 'permission',
-      action: 'command',
-      authority: 'callback-owner',
-      risk: { level: 'write', openWorld: false },
-      runtimeProfiles: ['full'],
-    },
-  }),
-  defineTool({
-    name: 'cat_cafe_check_permission_status',
-    description:
-      'Check the status of a previously submitted permission request. ' +
-      'Use the requestId returned from request_permission. Returns granted/denied/pending.',
-    inputSchema: checkPermissionStatusInputSchema,
-    handler: handleCheckPermissionStatus,
-    governance: {
-      implementationExport: 'handleCheckPermissionStatus',
-      resourceFamily: 'permission',
-      action: 'read',
-      authority: 'callback-owner',
-      risk: { level: 'read', openWorld: false },
-      runtimeProfiles: ['full'],
-    },
-  }),
   defineCanonicalTool({
     name: 'cat_cafe_register_pr_tracking',
     description:
-      'Register one explicit, bounded PR wait for the current task owner. ' +
-      'Use when: you can name the exact typed GitHub condition that changes your next action, such as a new HEAD, review result, terminal executable CI, anchored review thread change, or new conflict. ' +
-      'NOT for: generic PR activity, bare @codex review chatter, arbitrary comments, another cat’s responsibility, or a different PR subject. ' +
-      'Output: validates subject/owner, freezes a live GitHub baseline, and atomically installs the next generation. Registration history is baseline, never a wake. ' +
+      'Register continuous tracking of one PR for the current task owner. ' +
+      'Use when: you want to hear about what happens on a PR — its review decision, CI, conflicts, a new HEAD unless you are the PR author, and the replies people leave on it. Naming the subject is the whole call. ' +
+      'NOT for: another cat’s responsibility, or a different PR subject. ' +
+      'Output: validates subject/owner, freezes a live GitHub baseline, atomically installs the next generation, and answers with what was armed and which audience was applied (`notification`). Registration history is baseline, never a wake. ' +
       'GOTCHA: For exact-HEAD external PR review, run the Review Entry Mode Classifier before registration: formal instructions containing a no-comment / do-not-comment-on-GitHub directive fail closed; only explicit advisory_read_only may stay private, and advisory must never claim review-complete. ' +
-      'GOTCHA: `when` is 1–4 flat any-of typed predicates. `nextStep` is display-only and never parsed. `expiresAt` is required and does not delete task history.',
+      `GOTCHA: \`repoFullName\` + \`prNumber\` is the whole normal call — omit \`when\`, \`goal\` and \`nextStep\`. The server then arms every condition the PR raises about itself, plus a new HEAD unless you are the PR author (as the author, that push is your own), AND both comment surfaces, with the audience your role gives you: as the PR author, every reply that is not your own, bots included; as a reviewer with checkable grounds, the PR author's replies with bots and pure summon commands filtered. If it cannot establish identity it delivers every comment flagged rather than filtering on a rule it could not verify — read \`notification.perspective\`. \`goal\` optionally narrows the comment audience to people you name. \`when\` is the advanced path: up to ${GITHUB_PR_WAIT_PREDICATE_LIMIT} flat any-of typed predicates, one per distinct condition in the catalog, where \`pr_conversation_comment_added\` and \`pr_inline_comment_added\` still require a non-empty \`authorLogins\`; there is no omitted-means-anyone form on that path. \`nextStep\` is display-only and never parsed. \`expiresAt\` is optional: omit it for no time-based termination; supply it for a visible deadline. It never deletes task history.`,
     inputSchema: registerPrTrackingInputSchema,
     handler: handleRegisterPrTracking,
     governance: {
@@ -3321,11 +3922,11 @@ export const callbackTools = [
   defineCanonicalTool({
     name: 'cat_cafe_register_issue_tracking',
     description:
-      'Register one explicit, bounded GitHub issue wait for the current task owner. ' +
-      'Use when: you can name the exact typed issue condition that changes your next action: any new comment, or a comment by the exact issue author. ' +
-      'NOT for: generic issue activity, actor-type guessing, source prose, another cat’s responsibility, or a different issue subject. ' +
-      'Output: validates subject/owner, freezes a live issue baseline, and atomically installs the next generation. Registration history is baseline, never a wake. ' +
-      'GOTCHA: `when` is a bounded typed predicate set. `nextStep` is display-only and never parsed. `expiresAt` is required and does not delete task history.',
+      'Register continuous tracking of one GitHub issue for the current task owner. ' +
+      'Use when: you want to hear about new comments on an issue. Naming the subject is the whole call. ' +
+      'NOT for: actor-type guessing, source prose, another cat’s responsibility, or a different issue subject. ' +
+      'Output: validates subject/owner, freezes a live issue baseline, atomically installs the next generation, and answers with what was armed and which audience was applied (`notification`). Registration history is baseline, never a wake. ' +
+      'GOTCHA: `repoFullName` + `issueNumber` is the whole normal call — omit `when` and `nextStep`. The server then wakes you on every comment that is not your own. `when` is the advanced path: a bounded typed predicate set for a narrower wait. `nextStep` is display-only and never parsed. `expiresAt` is optional: omit it for no time-based termination; supply it for a visible deadline. It never deletes task history.',
     inputSchema: registerIssueTrackingInputSchema,
     handler: handleRegisterIssueTracking,
     governance: {
@@ -3352,7 +3953,6 @@ export const callbackTools = [
       authority: 'callback-owner',
       risk: { level: 'destructive', openWorld: false },
       runtimeProfiles: ['full'],
-      targetExposure: 'profile-gated',
     },
   }),
   defineTool({
@@ -3516,7 +4116,7 @@ export const callbackTools = [
     },
   }),
   // F128: Cat-initiated thread proposal (user approves before thread is created)
-  defineTool({
+  defineCanonicalTool({
     name: 'cat_cafe_propose_thread',
     description:
       'Propose a new thread to the user. Returns proposalId, NOT a threadId — the thread is only created after the user approves the proposal card. Use sparingly: ' +
@@ -3526,9 +4126,8 @@ export const callbackTools = [
       'WRITING @-mentions in `initialMessage`: use the SAME stable handle you use in the current thread (e.g. `@砚砚`, `@opus46`, `@gemini`) — NOT the raw catId form like `@cat-rcs85pvn`. ' +
       'Server normalizes known catIds to stable handles defensively, but always prefer the handle form so the proposal card reads naturally to the user. ' +
       'preferredCats accepts catIds (returned by cat_cafe_get_thread_cats). DISPATCH MODEL: when the user approves, the server wakes ONLY the FIRST cat in preferredCats (the chain starter). Subsequent cats are woken by the chain-driven @-mentions cats write in their own replies. ORDER preferredCats EXACTLY as you want the chain to start (e.g. for 接龙/轮转, put the first 棒 cat first). ' +
-      'FORK-AND-RETURN pattern (thread-orchestration skill Step 5c): use `reportingMode` to set the report-back contract. Ask yourself: "做完后源 thread 是否需要结果回来？" — YES (most cases) → omit reportingMode or set `final-only` (default); NO, downstream self-governs → set `none`; need phase updates → `state-transitions`; need blocking ack → `blocking-ack`. Server auto-injects a "## 主 Thread" header with routing credentials (threadId + targetCats/handle) so the last cat knows exactly where and whom to cross-post to. ' +
-      'OPEN-SOURCE PR HARD GUARD: when title/reason/initialMessage references a zts212653/clowder-ai PR, the server automatically injects an `opensource-ops` maintainer five questions gate plus the real GitHub author/fix-custody boundary. Findings stay with the external author by default; do not route fixes to household cats unless explicit Strategy B authority is recorded. ' +
-      'FORMAL EXTERNAL PR OUTPUT: a proposal that names exactly one clowder-ai PR with formal review intent persists that canonical context. On approval, exactly one preferredCat becomes the child owner and receives PR metadata. It does NOT auto-register a wait: the reviewer registers one explicit typed predicate only after work is actually blocked on an external condition. Advisory, triage, arbitrary-link, multi-PR, and zero/multi-owner proposals follow the same no-auto-wait rule. ' +
+      'FORK-AND-RETURN pattern (thread-orchestration skill Step 5c): use `reportingMode` to set the report-back contract. Ask yourself: "做完后源 thread 是否需要结果回来？" — YES (most cases) → omit reportingMode or set `final-only` (default); NO, downstream self-governs → set `none`; need phase updates → `state-transitions`; need blocking ack → `blocking-ack`. On approval the initial message is prefixed with a "## 主 Thread" header carrying routing credentials (threadId + targetCats/handle) so the last cat knows exactly where and whom to cross-post to. ' +
+      'OPEN-SOURCE PR GUIDANCE: when title/reason/initialMessage references a GitHub PR or issue, the child thread should load the `opensource-ops` skill. The server does NOT infer external PR identity, author role, maintainer policy, or auto-inject the opensource-ops skill. Ground the provider object and author in the child workspace, route findings to the external author by default, and only dispatch fixes to local cats with explicit operator or maintainer authorization and provenance. ' +
       'PROJECT OWNERSHIP: if the current/source thread is default/未分类/eval/lobby but the child will do repo or implementation work, pass `projectPath` explicitly. Omit only when the child should inherit the current project, or when it is intentionally meta/eval/unclassified. ' +
       'INTENT — default vs #ideate: by default dispatch wakes only the first preferredCat (serial chain-starter). If you genuinely want PARALLEL independent ideation (everyone replies at once, no chain), tag the message with `#ideate`. With #ideate, dispatch wakes ALL preferredCats simultaneously.',
     inputSchema: proposeThreadInputSchema,
@@ -3584,14 +4183,15 @@ export const callbackTools = [
       runtimeProfiles: ['full'],
     },
   }),
-  // F231 Phase C: Cat-initiated profile-update proposal (operator approves before the primer is written)
-  defineTool({
+  // F231 Phase E: Promoted to canonical — corpus layer widens input schema (targetLayer + layer)
+  defineCanonicalTool({
     name: 'cat_cafe_read_profile',
     description:
-      'Read YOUR CURRENT authenticated relationship persona primer through the stable cat-cafe-profile://relationship/current URI. ' +
-      'Use when: L0 shows that URI, you are starting a session and need relationship context, or you need to verify the currently effective primer before proposing an update. ' +
+      'Read YOUR CURRENT authenticated profile layer through the stable cat-cafe-profile:// URI. ' +
+      'Supports two layers: primer (default, per-persona relationship) and corpus (owner-wide shared facts, all personas see the same content). ' +
+      'Use when: L0 shows the profile URI, you are starting a session and need relationship or owner context, or you need to verify the currently effective content before proposing an update. ' +
       'NOT for: searching project knowledge or old threads (use search_evidence), reading arbitrary workspace files (use read_file_slice), or reading another user/cat/persona. ' +
-      'Output: the current persona relationshipKey and complete primer content; this is read-only and does not change profile state. ' +
+      'Output: the current content + revision (sha256 hash); this is read-only and does not change profile state. ' +
       'GOTCHA: identity is derived from callback/agent-key authentication. There is intentionally no userId, catId, path, or relationshipKey input, so do not try to target another profile.',
     inputSchema: readProfileInputSchema,
     handler: handleReadProfile,
@@ -3604,17 +4204,18 @@ export const callbackTools = [
       runtimeProfiles: ['full', 'agent-key', 'desktop:fable-phase0', 'desktop:cloud-pro-phase0'],
     },
   }),
-  defineTool({
+  defineCanonicalTool({
     name: 'cat_cafe_propose_profile_update',
     description:
-      'Propose an update to YOUR CURRENT authenticated relationship-persona primer — the "养熟循环" digest entry point (F231 KD-12/KD-18). ' +
-      'Output: returns a proposalId, NOT a written file; the primer is only written after operator approval (reject/expire = nothing changes). ' +
+      'Propose an update to a profile layer — the "养熟循环" digest entry point (F231 KD-12/KD-18). ' +
+      'Supports two layers: primer (default, per-persona relationship primer) and corpus (owner-wide shared facts visible to all personas). ' +
+      'Output: returns a proposalId, NOT a written file; the content is only written after operator approval (reject/expire = nothing changes). ' +
       'Use when: the content is a durable fact about the authenticated person or this persona-operator relationship — personal context, preferred address, or a relationship-specific communication boundary. ' +
+      'Use targetLayer:corpus for owner-wide personal facts independent of persona relationship (birthday, background, preferences that all cats should know). ' +
       'NOT for reusable judgments about what makes output, design, expression, architecture, or systems good (use cat_cafe_propose_taste), repeated operational/tool/process rules (use code-as-harness), or one-off context. ' +
       'A correction, praise, or Magic Word does not choose the lane; semantic content does. ' +
-      'afterContent is the COMPLETE new primer (whole-file replacement, not a diff) — include everything you want kept. ' +
-      'The target is ALWAYS relationship/{relationshipKey}-primer.md, derived server-side from your authenticated cat/persona — you cannot target another user/persona or the shared capsule. ' +
-      'Use cat_cafe_read_profile first when preserving existing content matters. GOTCHA: models sharing one persona also share this primer, so afterContent must preserve relevant family continuity. signalKind records provenance: cat-declared vs cvo-instructed.',
+      'afterContent is the COMPLETE new content (whole-file replacement, not a diff) — include everything you want kept. ' +
+      'Use cat_cafe_read_profile first when preserving existing content matters. GOTCHA: models sharing one persona also share the primer, so afterContent must preserve relevant family continuity. signalKind records provenance: cat-declared vs cvo-instructed.',
     inputSchema: proposeProfileUpdateInputSchema,
     handler: handleProposeProfileUpdate,
     governance: {
@@ -3779,11 +4380,11 @@ export const callbackTools = [
       '"let me think" / "I\'ll hold for now" → hesitation not hold, pick 接/退/升; ' +
       'review/analysis done → MUST @ author, conclusion ≠ endpoint; status updates → use post_message. ' +
       'Output: system schedules a one-shot wake-up after wakeAfterMs; you get re-invoked with reason + nextStep as trigger context. ' +
-      'GOTCHA: max 3 holds per (thread, cat) within a rolling ~1h window — 4th call returns 429, you MUST pass (@ another cat or @co-creator). ' +
+      'GOTCHA: max 3 holds per (thread, cat) within a sliding ~1h window (anchored to last successful hold) — 4th call returns 429 with retryAt/retryAfterMs, you MUST pass (@ another cat or @co-creator). ' +
       'GOTCHA: the counter is process-local best-effort (in-memory on the API node); API restart or multi-instance deploys may reset it, so do not treat the 429 as a hard security boundary — treat it as a self-discipline guardrail. ' +
       'GOTCHA: hold is an EXCEPTION state, not a default exit. Most turns should end with @ someone, not hold. ' +
       'GOTCHA (F167 Phase M): only hold for harness-INVISIBLE waits — external conditions nothing will call you back about (cloud review verdict, remote CI, external webhook). Background work the harness already tracks (a background Bash command, a spawned task) AUTO-RE-INVOKES you on completion; holding for that just stacks a redundant wake on top. Ask "will something call me back already?" — if yes, do NOT hold. A co-creator or another cat sending a message into this thread IS such a callback (it re-invokes you), so "waiting for co-creator to answer" must be @co-creator, never a hold. ' +
-      'GOTCHA: SINGLE-SLOT per (thread, cat) — calling hold_ball again while a previous hold is pending REPLACES the prior wake (prior taskId cancelled). This is intentional (KD-23): hold = "持一个球" exception, not a queue. If you need to track multiple waiting conditions, merge them into one nextStep (e.g. "等 CI + @co-creator 确认" 合并成一句). Rolling-window counter still ticks per call. ' +
+      'GOTCHA: SINGLE-SLOT per (thread, cat) — calling hold_ball again while a previous hold is pending REPLACES the prior wake (prior taskId cancelled). This is intentional (KD-23): hold = "持一个球" exception, not a queue. If you need to track multiple waiting conditions, merge them into one nextStep (e.g. "等 CI + @co-creator 确认" 合并成一句). Sliding-window counter ticks on each successful hold; rejected 429 calls do not advance the window. ' +
       'NEW (F167 Phase Q): event-backed retirement only works when waitSourceRef.expectedSignal is one of these exact structured keys: assignment, review_posted, ci_complete, comment_posted, managed_command_complete, user_message. Free-text values like "CI pass" remain valid narrative context but will NOT retire a timer by event, by design. ' +
       'NEW (F167 Phase P): wakeWhen — instead of a timed delay, specify a shell command to run. The server spawns it, captures output, and wakes you when it completes (or times out). Use for: pnpm gate, pnpm test, build commands — anything you would run_in_background and poll. wakeWhen is for LOCAL COMMANDS ONLY — it does not turn hold_ball into a universal "smart wait": waiting on a person is still @co-creator / @ that cat, waiting on a cloud event (PR / CI / issue) is still register_pr_tracking / register_issue_tracking. wakeWhen and wakeAfterMs are MUTUALLY EXCLUSIVE — provide exactly one.',
     inputSchema: {
@@ -3859,15 +4460,44 @@ export const callbackTools = [
     },
   }),
   defineCanonicalTool({
+    name: 'cat_cafe_get_hold_status',
+    description:
+      'Check whether you currently have an active or observable hold_ball in this thread. ' +
+      'Returns the hold status, task ID, lifecycle mode/status, cancelability, and access-projected owner — ' +
+      'all without needing to know the internal task ID. ' +
+      'Covers: pending holds, retired carriers with running managed commands. ' +
+      'Use when: you need to check if a prior hold is still pending before deciding whether to hold again, ' +
+      'or to observe your own hold state for diagnostic/reporting purposes. ' +
+      'No input required — threadId and catId are derived from your invocation auth. ' +
+      'Auth: enforces hold-access policy (same gate as GET /:taskId/status); ' +
+      'lifecycle visibility is projected per access role.',
+    inputSchema: {},
+    handler: handleGetHoldStatus,
+    governance: {
+      implementationExport: 'handleGetHoldStatus',
+      resourceFamily: 'task-workflow',
+      action: 'read',
+      authority: 'callback-owner',
+      risk: { level: 'read', openWorld: false },
+      runtimeProfiles: ['full'],
+      targetExposure: 'lazy-discoverable',
+      standaloneReason: {
+        disposition: 'accepted-boundary',
+        kind: 'authority-boundary',
+        admissionRef: 'file:docs/features/F167-a2a-chain-quality.md',
+      },
+    },
+  }),
+  defineCanonicalTool({
     name: 'cat_cafe_complete_managed_hold',
     description:
       'Terminally dispose the exact managed hold wake bound to this invocation. ' +
-      'Use when: the current turn was triggered by a managed hold wake and its requested work is actually handled/completed. ' +
+      'Use when: the current turn was triggered by a managed hold wake, or a full-body read adopted one into this same invocation, and its work is actually handled/completed. ' +
       'NOT for: ordinary holds, unfinished work, re-hold, a structured event wait, transfer, or unrelated task completion. ' +
       'Output: marks the exact F264 target receipt handled and terminalizes the original F167 hold ball; ' +
       'the server derives and fences threadId, holderCatId, invocationId, sourceMessageId, and taskId. ' +
       'GOTCHA: full read, command exit, tests, merge truth, or ACK never substitute for this producer, ' +
-      'and the caller cannot select or close another subject.',
+      'and the caller cannot select or close another subject. Full-read managedHoldDisposition guidance reports a unique pending source, ambiguity, or no obligation; never guess through ambiguity.',
     inputSchema: {
       disposition: z
         .enum(['handled', 'completed'])

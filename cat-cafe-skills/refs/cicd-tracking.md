@@ -1,6 +1,6 @@
 # CI/CD Tracking 参考
 
-> 返回 → opensource-ops SKILL.md
+> 返回 → [opensource-ops SKILL.md](../opensource-ops/SKILL.md)
 > 事实采集：F133；等待契约：F280。
 
 ## 模型
@@ -21,6 +21,10 @@ GitHub checks
 ## 等 CI 的注册方式
 
 ```text
+# 普通：跟踪这个 PR，CI 终态与冲突都在默认条件里
+cat_cafe_register_pr_tracking(repoFullName="<owner>/repo", prNumber=<N>)
+
+# 高级：只想被 CI 与冲突叫醒，不要其它条件
 cat_cafe_register_pr_tracking(
   repoFullName="<owner>/repo",
   prNumber=<N>,
@@ -28,8 +32,7 @@ cat_cafe_register_pr_tracking(
     { kind: "pr_ci_terminal" },
     { kind: "pr_became_conflicting" }
   ],
-  nextStep="Re-check checks and mergeability, then continue merge-gate.",
-  expiresAt=<future unix ms>
+  expiresAt=<future unix ms>  # 可选；省略则没有时间到期
 )
 ```
 
@@ -61,7 +64,7 @@ GitHub Actions job 同时满足：
 - `steps=[]`
 - annotation 指向 billing/payment/spending
 
-则归类 `external_infrastructure`。它不是代码失败，也不满足 `pr_ci_terminal`；记录状态后继续等待可执行 CI 或由 maintainer 主动处理账户条件。
+则归类 `external_infrastructure`。它不是代码失败，也不满足可执行的 `pr_ci_terminal`；记录状态后不把已知月底额度边界升级成 maintainer/operator 的付费、修账单或关 workflow 待办。若 claim 已有风险匹配的本地 gate 与独立 review 证据，结束这条不可执行的 CI 等待并继续 merge-gate；否则只写清真正缺失的行为证据。
 
 ## 收到唤醒
 

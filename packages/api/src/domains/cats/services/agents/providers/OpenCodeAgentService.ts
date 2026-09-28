@@ -17,6 +17,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { type CatId, createCatId } from '@cat-cafe/shared';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
@@ -31,6 +32,7 @@ import type {
   AgentServiceOptions,
   L0InjectableAgentService,
   MessageMetadata,
+  PreparedProviderRequestV1,
   ToolExecutionPolicy,
 } from '../../types.js';
 import { resolveCurrentContextUsage } from '../../types.js';
@@ -67,6 +69,26 @@ import {
 } from './opencode-recovery.js';
 
 const log = createModuleLogger('opencode-agent');
+
+function readOpenCodeNativeInstructions(
+  configPath: string | null | undefined,
+): PreparedProviderRequestV1['nativeInstructions'] {
+  if (!configPath) return [];
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as { instructions?: unknown };
+    if (!Array.isArray(config.instructions)) return [];
+    return config.instructions.flatMap((path) => {
+      if (typeof path !== 'string') return [];
+      try {
+        return [{ body: readFileSync(path, 'utf8'), injectionDecision: 'runtime_config_instruction' }];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
 
 interface OpenCodeAgentServiceOptions {
   catId?: CatId;
@@ -394,6 +416,30 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
         if (summary.stderrExcerpt) successfulExitStderr.stderrExcerpt = summary.stderrExcerpt;
       };
 
+      const submittedPrompt = args.at(-1);
+      if (typeof submittedPrompt !== 'string') throw new Error('opencode_request_prompt_unavailable');
+      const nativeInstructions = readOpenCodeNativeInstructions(childEnv.OPENCODE_CONFIG);
+      const preparedRequest: PreparedProviderRequestV1 = Object.freeze({
+        v: 1,
+        message: Object.freeze({ body: submittedPrompt }),
+        nativeInstructions: Object.freeze(nativeInstructions.map((instruction) => Object.freeze(instruction))),
+        runtime: Object.freeze({
+          provider: 'opencode',
+          carrier: 'run_json',
+          ...(effectiveModel ? { model: effectiveModel } : {}),
+          protocol: 'json',
+          ...(readOnly ? { toolExecutionPolicy: 'read_only' as const } : {}),
+        }),
+        tools: Object.freeze({
+          finalSurface: readOnly ? ('exact' as const) : ('unknown' as const),
+          ...(readOnly ? { catCafeSchemas: Object.freeze([]) } : {}),
+        }),
+        providerNativeVisibility: 'unknown',
+      });
+      await options?.beforeProviderLaunch?.(preparedRequest);
+      if (!('body' in preparedRequest.message)) throw new Error('opencode_prepared_message_not_exact');
+      args[args.length - 1] = preparedRequest.message.body;
+
       const cliOpts = {
         command: opencodeCommand,
         args,
@@ -526,7 +572,7 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
         const result = transformOpenCodeEvent(event, this.catId);
         if (result !== null) {
           let terminateAfterYield = false;
-          if (result.type === 'text') {
+          if (result.type === 'text' && result.content?.trim()) {
             textEventCount++;
             lastTextEventIndex = eventCount;
           }
@@ -674,12 +720,9 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
           };
         }
       }
-      if (
-        textEventCount > 0 &&
-        lastToolEventIndex > lastTextEventIndex &&
-        !(lastStepFinishReason === 'stop' && (stepStartCount > 1 || delegateTaskEmitted)) &&
-        !errorAlreadyYielded
-      ) {
+      // Step count, delegation and reason=stop describe execution, not delivery.
+      // A multi-step run still needs final text after its last tool.
+      if (textEventCount > 0 && lastToolEventIndex > lastTextEventIndex && !errorAlreadyYielded) {
         log.warn(
           {
             catId: this.catId,
@@ -829,6 +872,24 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
         : {}),
     };
 
+    const preparedRequest: PreparedProviderRequestV1 = Object.freeze({
+      v: 1,
+      boundaryReason: 'provider_continuation',
+      message: Object.freeze({ body: finalizerPrompt, injectionDecision: 'post_tool_finalizer' }),
+      nativeInstructions: Object.freeze([]),
+      runtime: Object.freeze({
+        provider: 'opencode',
+        carrier: 'run_json',
+        ...(params.effectiveModel ? { model: params.effectiveModel } : {}),
+        protocol: 'json',
+      }),
+      tools: Object.freeze({ finalSurface: 'exact' as const, catCafeSchemas: Object.freeze([]) }),
+      providerNativeVisibility: 'unknown',
+    });
+    await params.options?.beforeProviderLaunch?.(preparedRequest);
+    if (!('body' in preparedRequest.message)) throw new Error('opencode_finalizer_message_not_exact');
+    finalizerArgs[finalizerArgs.length - 1] = preparedRequest.message.body;
+
     const events = params.options?.spawnCliOverride
       ? params.options.spawnCliOverride(cliOpts)
       : spawnCli(cliOpts, this.spawnFn ? { spawnFn: this.spawnFn } : undefined);
@@ -921,14 +982,17 @@ export class OpenCodeAgentService implements L0InjectableAgentService {
       }
     }
 
-    if (!finalizerPoisoned && finalizerTextBuffer.length > 0) {
+    // Keep whitespace chunks for formatting, but do not accept whitespace alone
+    // as a recovered answer (which would replace the prelude with a blank bubble).
+    const hasFinalizerText = finalizerTextBuffer.some((message) => message.content?.trim());
+    if (!finalizerPoisoned && hasFinalizerText) {
       for (const finalizerText of finalizerTextBuffer) {
         yield finalizerText;
       }
       return;
     }
 
-    if (finalizerTextBuffer.length === 0 || finalizerPoisoned) {
+    if (!hasFinalizerText || finalizerPoisoned) {
       log.warn(
         {
           catId: this.catId,

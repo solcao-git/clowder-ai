@@ -1,12 +1,20 @@
 import { createModuleLogger } from '../../infrastructure/logger.js';
+import type { DynamicTaskDef } from '../../infrastructure/scheduler/DynamicTaskStore.js';
 import {
   managedCommandCompletionUnconsumedTotal,
   managedCommandDispatchRetryTotal,
-  managedCommandWakeSlaBreachTotal,
 } from '../../infrastructure/telemetry/instruments.js';
+import { normalizeOwnerAuthProvenance } from '../cats/services/owner-auth-provenance.js';
 import type { InvocationRecord } from '../cats/services/stores/ports/InvocationRecordStore.js';
 import { classifyInvocationRecoveryStatus } from '../cats/services/stores/ports/invocation-state-machine.js';
 import {
+  cancelDurableManagedGateJob,
+  inspectDurableManagedGateJob,
+  validateDurableManagedGateJob,
+} from './durable-managed-gate-job.js';
+import { ManagedCommandWakeActionLeaseAdmissionError } from './managed-command-wake-action-lease-admission.js';
+import {
+  buildAdmissionFactIdempotencyKey,
   type RecordManagedCommandCompletionInput as CompletionInput,
   type ManagedCommandWakeCarrierTerminalReason,
   type ManagedCommandWakeProjection,
@@ -20,9 +28,18 @@ import {
 } from './managed-command-wake-lifecycle.js';
 import { publishManagedCommandWakeMessage } from './managed-command-wake-message-fence.js';
 import {
+  isDispatchableManagedCommandWakeState,
+  recordManagedCommandWakeSlaBreach,
+  recoverManagedCommandMissingDisposition,
+} from './managed-command-wake-recovery-policy.js';
+import {
   persistManagedCommandFallbackDue,
   recordCancelledManagedCommandCompletion,
 } from './managed-command-wake-recovery-transitions.js';
+import {
+  parseRetiredManagedCommandWakeTask,
+  readManagedCommandWakeProjection,
+} from './managed-command-wake-task-projection.js';
 import {
   listRetiredManagedCommandRecoveryTaskIds,
   recordRetiredManagedCommandCompletion,
@@ -39,15 +56,14 @@ export type {
   RecordManagedCommandCompletionInput,
 } from './managed-command-wake-lifecycle.js';
 export {
+  buildAdmissionFactIdempotencyKey,
   createInitialManagedCommandWakeProjection,
   readManagedCommandWakeProjection,
   resolveManagedCommandWakeEventCarrier,
 } from './managed-command-wake-lifecycle.js';
 
 const log = createModuleLogger('ball-custody/managed-command-wake-recovery');
-function isDispatchableWakeState(state: ManagedCommandWakeProjection['state']): boolean {
-  return state === 'message_written' || state === 'dispatch_pending' || state === 'dispatched' || state === 'enqueued';
-}
+
 export class ManagedCommandWakeRecoverySweep {
   private readonly now: () => number;
   private readonly dispatchedCarrierGraceMs: number;
@@ -80,15 +96,132 @@ export class ManagedCommandWakeRecoverySweep {
     if (result === 'pending') managedCommandCompletionUnconsumedTotal.add(1);
     return result;
   }
+  private async reconcileDurableGateJobs(tasks: DynamicTaskDef[]): Promise<ManagedCommandWakeRecoveryStats> {
+    let recovered = 0;
+    let pending = 0;
+    const running = tasks.flatMap((task) => {
+      const command = readManagedCommandWakeProjection(task);
+      const durableJob = command?.state === 'command_running' ? command.durableJob : undefined;
+      return durableJob?.kind === 'full_gate' ? [{ task, durableJob }] : [];
+    });
+    for (const { task, durableJob } of running) {
+      if (!validateDurableManagedGateJob(durableJob, task.id)) {
+        pending += 1;
+        continue;
+      }
+      const lifecycle = task.params.holdLifecycle;
+      if (
+        lifecycle &&
+        typeof lifecycle === 'object' &&
+        !Array.isArray(lifecycle) &&
+        (lifecycle as Record<string, unknown>).status === 'cancel_requested'
+      ) {
+        const cancellation = lifecycle as Record<string, unknown>;
+        cancelDurableManagedGateJob(durableJob, {
+          cancelledBy:
+            typeof cancellation.cancelledBy === 'string' ? cancellation.cancelledBy : 'persisted_hold_cancellation',
+          reason: 'explicit_hold_cancel',
+          now: this.now(),
+        });
+      }
+      const inspection = inspectDurableManagedGateJob(durableJob);
+      if (!('result' in inspection)) {
+        pending += 1;
+        continue;
+      }
+      const completion = {
+        taskId: task.id,
+        wakeContent: `持球唤醒（durable full gate 终态）：${inspection.result.tailOutput ?? inspection.state}`,
+        result: inspection.result,
+      };
+      const result = parseRetiredManagedCommandWakeTask(task)
+        ? await this.recordRetiredCompletion(completion)
+        : await this.recordCompletion(completion);
+      if (result === 'recovered') recovered += 1;
+      else if (result === 'pending') pending += 1;
+    }
+    return { scanned: running.length, recovered, pending };
+  }
+  private async recoverAdmissionFacts(tasks: DynamicTaskDef[]): Promise<ManagedCommandWakeRecoveryStats> {
+    let recovered = 0;
+    let pending = 0;
+    const undelivered = tasks.flatMap((task) => {
+      const parsed = parseWakeTask(task);
+      const admissionFact = parsed?.command.admissionFact;
+      return parsed && admissionFact && !parsed.command.admissionFactAppended ? [{ task, parsed, admissionFact }] : [];
+    });
+    for (const { task, parsed, admissionFact } of undelivered) {
+      const idempotencyKey = buildAdmissionFactIdempotencyKey(task.id);
+      try {
+        const existing = await this.deps.messageStore.getByIdempotencyKey('system', parsed.threadId, idempotencyKey);
+        if (!existing) {
+          const stored = await this.deps.messageStore.append({
+            userId: 'system',
+            catId: null,
+            content: admissionFact,
+            mentions: [],
+            timestamp: this.now(),
+            threadId: parsed.threadId,
+            idempotencyKey,
+            source: {
+              connector: 'hold-ball',
+              label: '持球通知',
+              icon: '🏓',
+              meta: { wakeWhen: true, taskId: task.id, recoverySource: 'startup_sweep' },
+            },
+          });
+          this.deps.socketManager.broadcastToRoom(`thread:${parsed.threadId}`, 'connector_message', {
+            threadId: parsed.threadId,
+            message: {
+              id: stored.id,
+              type: 'connector',
+              content: stored.content,
+              source: stored.source,
+              timestamp: stored.timestamp,
+            },
+          });
+        }
+        const casOk = this.updateCommand(parsed, { ...parsed.command, admissionFactAppended: true });
+        if (casOk) recovered += 1;
+        else pending += 1;
+        log.info(
+          { taskId: task.id, threadId: parsed.threadId, command: parsed.command.command, casOk },
+          'F167 Phase P: admission-fact re-delivered via startup recovery',
+        );
+      } catch (err) {
+        log.warn(
+          { taskId: task.id, threadId: parsed.threadId, err },
+          'F167 Phase P: admission-fact startup recovery failed — will retry on next sweep',
+        );
+        pending += 1;
+      }
+    }
+    return { scanned: undelivered.length, recovered, pending };
+  }
   async runOnce(): Promise<ManagedCommandWakeRecoveryStats> {
     const tasks = this.deps.dynamicTaskStore.getAll();
+    const admission = await this.recoverAdmissionFacts(tasks);
+    const durable = await this.reconcileDurableGateJobs(tasks);
+    let { recovered, pending } = admission;
+    recovered += durable.recovered;
+    pending += durable.pending;
+
+    // F261: API restart loses the in-memory ManagedRunner, not the authorized
+    // action-plane job. Reconcile durable full-gate process/receipt truth before
+    // ordinary completion delivery. The existing lifecycle CAS and idempotency
+    // key provide exactly-once terminal settlement.
+    // ── F167 Phase P: admission-fact startup recovery (BEFORE completion) ──
+    // R6 P1-2: admission visibility must settle BEFORE completion publish/dispatch.
+    // A condition_met task with admissionFactAppended=false must see its admission
+    // fact re-delivered first, then the completion candidate loop can publish and
+    // dispatch — otherwise the provider receives the wake before the timeline
+    // shows what happened at spawn.
+    // ── Normal completion candidates (non-command_running active tasks) ──
     const candidates = tasks.filter((task) => {
       const parsed = parseWakeTask(task);
       return !!parsed && parsed.command.state !== 'command_running';
     });
     const retiredTaskIds = listRetiredManagedCommandRecoveryTaskIds(tasks);
-    let recovered = 0;
-    let pending = 0;
     for (const task of candidates) {
       const result = await this.recoverTask(task.id);
       if (result === 'recovered') recovered += 1;
@@ -99,7 +232,12 @@ export class ManagedCommandWakeRecoverySweep {
       if (result === 'recovered') recovered += 1;
       else if (result === 'pending') pending += 1;
     }
-    return { scanned: candidates.length + retiredTaskIds.length, recovered, pending };
+
+    return {
+      scanned: candidates.length + retiredTaskIds.length + admission.scanned + durable.scanned,
+      recovered,
+      pending,
+    };
   }
   async retireCarrier(messageIds: readonly string[], reason: ManagedCommandWakeCarrierTerminalReason): Promise<number> {
     const getById = this.deps.messageStore.getById?.bind(this.deps.messageStore);
@@ -141,14 +279,14 @@ export class ManagedCommandWakeRecoverySweep {
   async recoverTask(taskId: string): Promise<ManagedCommandWakeRecoveryResult> {
     let parsed = parseWakeTask(this.deps.dynamicTaskStore.getById(taskId));
     if (!parsed) return 'missing';
-    parsed = this.recordSlaBreach(parsed);
+    parsed = recordManagedCommandWakeSlaBreach(this.deps, parsed, this.now, this.wakeSlaMs);
     if (parsed.command.state === 'condition_met') {
       const published = await this.publishCompletion(parsed);
       if (!published) return 'pending';
       parsed = parseWakeTask(this.deps.dynamicTaskStore.getById(taskId));
       if (!parsed) return 'missing';
     }
-    if (isDispatchableWakeState(parsed.command.state)) {
+    if (isDispatchableManagedCommandWakeState(parsed.command.state)) {
       const eventCarrier = parsed.command.messageId
         ? await this.deps.getEventCarrier?.({
             threadId: parsed.threadId,
@@ -160,6 +298,11 @@ export class ManagedCommandWakeRecoverySweep {
       if (eventCarrier?.state === 'handled') return this.consume(parsed, eventCarrier.invocationId);
       if (eventCarrier?.state === 'terminal') {
         return this.consume(parsed, undefined, eventCarrier.reason);
+      }
+      if (eventCarrier?.state === 'failed') {
+        return eventCarrier.errorCode === 'managed_hold_disposition_missing'
+          ? recoverManagedCommandMissingDisposition(this.deps, parsed, eventCarrier, this.now)
+          : 'pending';
       }
       if (eventCarrier?.state === 'pending') return 'pending';
       // An orphaned receipt proves durable responsibility while also proving
@@ -212,6 +355,9 @@ export class ManagedCommandWakeRecoverySweep {
 
     let outcome: ManagedCommandWakeTriggerOutcome;
     try {
+      const ownerAuthProvenance = normalizeOwnerAuthProvenance(
+        this.deps.dynamicTaskStore.getPrivateOwnerAuthProvenance?.(parsed.task.id),
+      );
       outcome = await trigger.trigger(
         parsed.threadId,
         parsed.catId,
@@ -219,9 +365,22 @@ export class ManagedCommandWakeRecoverySweep {
         `[定时任务] ${wakeContent}`,
         messageId,
         undefined,
-        { sourceCategory: 'scheduled', forceQueue: true },
+        { sourceCategory: 'scheduled', forceQueue: true, ownerAuthProvenance },
       );
     } catch (err) {
+      if (err instanceof ManagedCommandWakeActionLeaseAdmissionError) {
+        try {
+          const canceled = await this.deps.messageStore.markCanceled(messageId);
+          if (canceled?.deliveryStatus === 'canceled' && this.retireTask(parsed.task.id, 'canceled', messageId)) {
+            log.info({ code: err.code, taskId: parsed.task.id, messageId }, 'stale managed-command wake retired');
+            return 'recovered';
+          }
+        } catch (cancelError) {
+          log.warn({ err, cancelError, taskId: parsed.task.id, messageId }, 'managed-command wake retirement failed');
+        }
+        this.persistDispatchOutcome(parsed.task.id, 'failed');
+        return 'pending';
+      }
       log.warn(
         { err, taskId: parsed.task.id, threadId: parsed.threadId, messageId },
         'managed-command execution-plane dispatch failed',
@@ -310,32 +469,6 @@ export class ManagedCommandWakeRecoverySweep {
     this.deps.dynamicTaskStore.setEnabled(parsed.task.id, false);
     this.deps.taskRunner.unregister(parsed.task.id);
     return 'recovered';
-  }
-
-  private recordSlaBreach(parsed: ParsedManagedCommandWakeTask): ParsedManagedCommandWakeTask {
-    const conditionMetAt = parsed.command.conditionMetAt;
-    if (
-      conditionMetAt === undefined ||
-      parsed.command.slaBreachObservedAt !== undefined ||
-      this.now() - conditionMetAt < this.wakeSlaMs
-    ) {
-      return parsed;
-    }
-    const observedAt = this.now();
-    const updated = this.updateCommand(parsed, { ...parsed.command, slaBreachObservedAt: observedAt });
-    if (!updated) return parsed;
-    managedCommandWakeSlaBreachTotal.add(1);
-    log.warn(
-      {
-        taskId: parsed.task.id,
-        threadId: parsed.threadId,
-        messageId: parsed.command.messageId,
-        conditionMetAt,
-        observedAt,
-      },
-      'managed-command completion wake exceeded SLA',
-    );
-    return parseWakeTask(this.deps.dynamicTaskStore.getById(parsed.task.id)) ?? parsed;
   }
 
   private updateCommand(parsed: ParsedManagedCommandWakeTask, command: ManagedCommandWakeProjection): boolean {

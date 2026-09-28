@@ -2,6 +2,7 @@ import { meetingIntakeNeedsAttention } from '@cat-cafe/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { resolveCapabilityWriteSessionUserId } from '../config/capabilities/capability-write-guards.js';
 import { MeetingIntakeError } from '../domains/signal-intake/errors.js';
+import { normalizeFeishuMeetingSourceReference } from '../domains/signal-intake/LarkCliFeishuSourceResolver.js';
 import type { MeetingIntakeActionService } from '../domains/signal-intake/MeetingIntakeActionService.js';
 import type { MeetingIntakeService } from '../domains/signal-intake/MeetingIntakeService.js';
 import type { MeetingIntakeStore } from '../domains/signal-intake/MeetingIntakeStore.js';
@@ -12,7 +13,7 @@ export interface MeetingIntakeRoutesOptions {
   readonly actions?: MeetingIntakeActionService;
 }
 
-const MANUAL_IMPORT_BODY_LIMIT_BYTES = 2_100_000;
+const MANUAL_IMPORT_BODY_LIMIT_BYTES = 4_096;
 
 function sessionUser(request: FastifyRequest, reply: FastifyReply): string | null {
   const userId = resolveCapabilityWriteSessionUserId(request);
@@ -169,6 +170,36 @@ export function registerMeetingIntakeRoutes(app: FastifyInstance, options: Meeti
     },
   );
 
+  app.post<{ Params: { intakeId: string }; Body: { expectedRevision?: unknown; clientRequestId?: unknown } }>(
+    '/api/meeting-intakes/:intakeId/presentation-retry',
+    async (request, reply) => {
+      const userId = sessionUser(request, reply);
+      if (!userId) return;
+      const expectedRevision = request.body?.expectedRevision;
+      const rawClientRequestId = request.body?.clientRequestId;
+      const clientRequestId = typeof rawClientRequestId === 'string' ? rawClientRequestId.trim() : undefined;
+      if (
+        typeof expectedRevision !== 'number' ||
+        !Number.isSafeInteger(expectedRevision) ||
+        !clientRequestId ||
+        clientRequestId.length > 200 ||
+        !/^[A-Za-z0-9._:-]+$/.test(clientRequestId)
+      ) {
+        return reply.status(400).send({ error: 'expectedRevision and clientRequestId are required' });
+      }
+      try {
+        return await options.actions!.retryPresentation(
+          userId,
+          request.params.intakeId,
+          expectedRevision,
+          clientRequestId,
+        );
+      } catch (error) {
+        return sendServiceError(reply, error);
+      }
+    },
+  );
+
   app.post<{ Params: { intakeId: string }; Body: { expectedRevision?: number } }>(
     '/api/meeting-intakes/:intakeId/regrant',
     async (request, reply) => {
@@ -194,7 +225,7 @@ export function registerMeetingIntakeRoutes(app: FastifyInstance, options: Meeti
     },
   );
 
-  app.post<{ Params: { intakeId: string }; Body: { expectedRevision?: number; transcript?: string } }>(
+  app.post<{ Params: { intakeId: string }; Body: { expectedRevision?: number; reference?: string } }>(
     '/api/meeting-intakes/:intakeId/manual-import',
     { bodyLimit: MANUAL_IMPORT_BODY_LIMIT_BYTES },
     async (request, reply) => {
@@ -203,20 +234,25 @@ export function registerMeetingIntakeRoutes(app: FastifyInstance, options: Meeti
       if (
         typeof request.body?.expectedRevision !== 'number' ||
         !Number.isSafeInteger(request.body.expectedRevision) ||
-        typeof request.body.transcript !== 'string'
+        typeof request.body.reference !== 'string' ||
+        request.body.reference.length > 1_024
       ) {
-        return reply.status(400).send({ error: 'expectedRevision and transcript are required' });
+        return reply.status(400).send({ error: 'expectedRevision and a bounded Feishu reference are required' });
       }
       try {
+        const sourceHandle = normalizeFeishuMeetingSourceReference(request.body.reference);
         return {
           intake: await options.actions!.manualImport(
             userId,
             request.params.intakeId,
             request.body.expectedRevision,
-            request.body.transcript,
+            sourceHandle,
           ),
         };
       } catch (error) {
+        if (error instanceof TypeError) {
+          return reply.status(400).send({ error: 'Feishu meeting reference is invalid' });
+        }
         return sendServiceError(reply, error);
       }
     },

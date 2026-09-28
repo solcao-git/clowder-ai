@@ -62,13 +62,33 @@ describe('F254 Phase E production wiring guard', () => {
     const messages = source('routes/messages.ts');
 
     assert.match(messages, /queueCustody:\s*createInitialQueuedMessageCustody\(enqueueResult\.entry\)/);
-    assert.match(index, /const queueCustodyCoordinator = new QueuedMessageCustodyCoordinator\(\{ messageStore \}\)/);
+    const custodyDependencies = index.match(
+      /const queueCustodyCoordinator = new QueuedMessageCustodyCoordinator\(\{([\s\S]*?)\}\);/,
+    )?.[1];
+    assert.ok(custodyDependencies, 'production must instantiate the canonical Queue custody coordinator');
+    assert.match(custodyDependencies, /\bmessageStore\s*[,}]/);
+    assert.match(
+      custodyDependencies,
+      /readWaitRegistration:\s*\(id\)\s*=>\s*taskStore\.getWaitRegistration\(id\)/,
+      'Queue settlement must read the canonical Task registration instead of relying on a route snapshot',
+    );
     assert.match(index, /const queueProcessor = new QueueProcessor\(\{[\s\S]*?queueCustodyCoordinator,[\s\S]*?\}\)/);
     assert.match(index, /await app\.register\(queueRoutes, \{[\s\S]*?queueCustodyCoordinator,[\s\S]*?\}\)/);
     assert.match(index, /const callbackOpts = \{[\s\S]*?queueCustodyCoordinator,[\s\S]*?\} as Parameters/);
     assert.match(
       index,
-      /new StartupReconciler\(\{[\s\S]*?invocationQueue,[\s\S]*?resumePrestartRetirement:\s*\(entries\) => queueProcessor\.resumeDurablePrestartRetirement\(entries\),[\s\S]*?resumeQueue:\s*\(threadId, userId\) => queueProcessor\.processNext\(threadId, userId\)/,
+      /new StartupReconciler\(\{[\s\S]*?invocationQueue,[\s\S]*?a2aDispatchDispositionService[\s\S]*?resumePrestartRetirement:\s*\(entries\) => queueProcessor\.resumeDurablePrestartRetirement\(entries\)/,
+    );
+    const queueRecovery = index.indexOf('const startupRecovery = await reconciler.reconcileOrphans()');
+    const callbackAdmission = index.indexOf('registry.markStartupRecoveryComplete()');
+    const queueResume = index.indexOf('for (const scope of startupRecovery.queueResumeScopes)');
+    assert.ok(queueRecovery >= 0, 'production bootstrap must reconcile durable Queue custody');
+    assert.ok(callbackAdmission > queueRecovery, 'callback admission must wait for Queue restart convergence');
+    assert.ok(queueResume > callbackAdmission, 'restored Queue work must resume only after callback admission opens');
+    assert.match(
+      index.slice(queueResume),
+      /queueProcessor\.processNext\(scope\.threadId, scope\.userId\)/,
+      'restored Queue scopes must re-enter the canonical QueueProcessor',
     );
   });
 

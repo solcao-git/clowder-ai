@@ -48,6 +48,53 @@ function invocationCreated(parent: string, turn: string, ts = 1050) {
 describe('Codex active path — tool work-log + text converge', () => {
   const harness = installActiveHarness();
 
+  it('attaches a suppressed child event to the live root bubble without mixing child prose into root text', () => {
+    const parent = 'parent-subexecution-active';
+    const turn = 'turn-subexecution-active';
+    const childEvent = {
+      v: 1 as const,
+      id: 'subexecution:child-active:message',
+      kind: 'subexecution' as const,
+      occurredAt: 1010,
+      stage: 'message' as const,
+      subexecutionId: 'child-active',
+      rootExecutionId: 'root-provider-thread',
+      parentExecutionId: 'root-provider-thread',
+      rootTurnId: 'root-provider-turn',
+      parentTurnId: 'root-provider-turn',
+      turnId: 'child-provider-turn',
+      agentPath: '/root/review_delta',
+      nickname: 'Bohr',
+      depth: 1,
+      content: 'Approve from child',
+      messagePhase: 'final_answer' as const,
+    };
+
+    harness.render();
+    harness.send({
+      type: 'system_info',
+      catId: 'codex',
+      threadId: THREAD,
+      invocationId: parent,
+      turnInvocationId: turn,
+      timestamp: 1010,
+      semanticEvent: childEvent,
+      metadata: {
+        provider: 'openai',
+        model: 'gpt-5.6-sol',
+        subexecutionEvents: [childEvent],
+      },
+    });
+    harness.send(text(parent, 'root final survives', 1020, turn));
+
+    const rootBubble = flatCodexStreamBubbles()[0];
+    expect(rootBubble?.content).toBe('root final survives');
+    expect(rootBubble?.metadata?.subexecutionEvents).toEqual([childEvent]);
+    expect(useChatStore.getState().messages.some((message) => message.content.includes('Approve from child'))).toBe(
+      false,
+    );
+  });
+
   it('[real shape] tool_use + text both carrying turn id stay ONE stream bubble', () => {
     const PARENT = 'parent-inv-a2a';
     const TURN = 'turn-inv-codex';
@@ -64,6 +111,31 @@ describe('Codex active path — tool work-log + text converge', () => {
     expect(streamBubbles).toHaveLength(1);
     expect(streamBubbles[0]!.content).toContain('我来查');
     expect(streamBubbles[0]!.toolEvents?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it('keeps a file_change tool card when its semantic diff augments the native carrier', () => {
+    const parent = 'parent-file-change';
+    const turn = 'turn-file-change';
+    useChatStore.setState({ catInvocations: { codex: { invocationId: parent, turnInvocationId: turn } } });
+    harness.render();
+    harness.send({
+      ...tool(parent, 1000, turn),
+      toolName: 'file_change',
+      toolInput: { status: 'completed', changes: [{ path: 'src/a.ts', kind: 'update' }] },
+      semanticEvent: {
+        v: 1,
+        id: 'diff-active-1',
+        kind: 'diff',
+        occurredAt: 1000,
+        stage: 'completed',
+        summary: '1 个文件变更',
+      },
+    });
+
+    const streamBubbles = flatCodexStreamBubbles();
+    expect(streamBubbles).toHaveLength(1);
+    expect(streamBubbles[0]?.toolEvents?.some((event) => event.label.includes('file_change'))).toBe(true);
+    expect(useChatStore.getState().messages.some((message) => message.id === 'semantic:diff-active-1')).toBe(false);
   });
 
   it('[multi-round-trip] two tool+text round-trips on one turn stay ONE stream bubble', () => {

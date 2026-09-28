@@ -236,6 +236,9 @@ const ENV_VARS_TO_STRIP: ReadonlySet<string> = new Set([
   // forwarding either value would let a raw dev command act like the runtime owner.
   'CONNECTOR_GATEWAY_AUTOSTART',
   'CAT_CAFE_PROVISION_GLOBAL_SIDECAR',
+  // Legacy F296 process-scoped bearer. Session hooks authenticate with the
+  // invocation-bound callback pair; never leak a stale operator token to any child.
+  'CAT_CAFE_HOOK_TOKEN',
   // Per-invocation process ownership is a capability, not ambient config. A
   // nested API or persistent host must not inherit the outer invocation.
   CLI_EXECUTION_OWNER_BINDING_ENV,
@@ -294,7 +297,7 @@ async function waitForIteratorUntil<T>(
 
 export function buildChildEnv(
   overrides?: Record<string, string | null>,
-  options: { bindExecutionOwner?: boolean } = {},
+  options: { bindExecutionOwner?: boolean; workingDirectory?: string } = {},
 ): NodeJS.ProcessEnv {
   // Clone process.env but strip known bloated vars to avoid E2BIG (ARG_MAX exceeded).
   const merged: NodeJS.ProcessEnv = {};
@@ -332,6 +335,12 @@ export function buildChildEnv(
       }
     }
   }
+  // spawn.cwd and shell cwd env are distinct inputs. Providers such as OpenCode
+  // consult PWD/INIT_CWD during bootstrap, so inherited runtime values must not
+  // override the workspace assigned to the child process.
+  const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
+  merged.PWD = workingDirectory;
+  merged.INIT_CWD = workingDirectory;
   return withVerdictGhGuardEnv(merged, overrides);
 }
 
@@ -367,7 +376,10 @@ export async function* spawnCli(
 
   const child = doSpawn(options.command, options.args, {
     cwd: options.cwd,
-    env: buildChildEnv(options.env, { bindExecutionOwner: options.bindExecutionOwner !== false }),
+    env: buildChildEnv(options.env, {
+      bindExecutionOwner: options.bindExecutionOwner !== false,
+      workingDirectory: options.cwd,
+    }),
     // Incident 2026-05-29 (cross-thread-context-contamination): when stdinInput is
     // provided, open stdin as a pipe so the prompt can be streamed off the command
     // line. Otherwise keep 'ignore' (unchanged for providers not using stdin).
@@ -923,6 +935,7 @@ export async function* spawnCli(
         rawText,
         structuredErrorText: structuredErrorTexts.filter(Boolean).join('\n'),
         stderrEmpty: stderrTrimLen === 0,
+        ...(options.managedArgvFlags ? { managedArgvFlags: options.managedArgvFlags } : {}),
         debugRef: {
           command: options.command,
           exitCode,
@@ -1010,6 +1023,7 @@ export async function* spawnCli(
         rawText,
         structuredErrorText: structuredErrorTexts.filter(Boolean).join('\n'),
         stderrEmpty: timeoutStderrTrimLen === 0,
+        ...(options.managedArgvFlags ? { managedArgvFlags: options.managedArgvFlags } : {}),
         debugRef: {
           command: options.command,
           signal: null,

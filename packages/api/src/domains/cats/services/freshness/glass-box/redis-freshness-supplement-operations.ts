@@ -1,7 +1,7 @@
 import type { FreshnessSupplementAggregate, FreshnessSupplementFailureReason } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import { FreshnessSupplementKeys } from '../../stores/redis-keys/freshness-closure-keys.js';
-import type { OfferFreshnessSupplementResult } from '../freshness-closure-store-types.js';
+import type { OfferFreshnessSupplementResult } from '../closure/freshness-closure-store-types.js';
 import {
   advanceFreshnessSupplement,
   claimFreshnessSupplement,
@@ -79,6 +79,13 @@ export class RedisFreshnessSupplementOperations {
   async listByThread(threadId: string): Promise<FreshnessSupplementAggregate[]> {
     const ids = await this.redis.smembers(FreshnessSupplementKeys.thread(threadId));
     return (await this.readMany(ids)).sort((left, right) => left.createdAt - right.createdAt || left.seq - right.seq);
+  }
+
+  async listAll(): Promise<FreshnessSupplementAggregate[]> {
+    const ids = await this.redis.smembers(FreshnessSupplementKeys.ALL);
+    return (await this.readMany(ids)).sort(
+      (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+    );
   }
 
   async listRecoverable(): Promise<FreshnessSupplementAggregate[]> {

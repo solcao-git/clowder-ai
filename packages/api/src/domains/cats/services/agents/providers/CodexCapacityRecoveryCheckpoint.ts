@@ -44,7 +44,14 @@ const MAX_EXPLANATION_CHARS = 640;
 const MAX_AGENT_MESSAGE_CHARS = 800;
 const MAX_TOOL_LABEL_CHARS = 240;
 
-const TOOL_ITEM_TYPES = new Set(['command_execution', 'file_change', 'mcp_tool_call', 'dynamic_tool_call']);
+const TOOL_ITEM_TYPES = new Set([
+  'command_execution',
+  'file_change',
+  'mcp_tool_call',
+  'dynamic_tool_call',
+  // The app-server mapper preserves this native spelling.
+  'collabAgentToolCall',
+]);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
@@ -110,11 +117,23 @@ function toolLabel(item: Record<string, unknown>): string {
   if (item.type === 'dynamic_tool_call') {
     return boundedText(item.tool, MAX_TOOL_LABEL_CHARS) ?? 'dynamic tool call';
   }
+  if (item.type === 'collabAgentToolCall') {
+    return boundedText(item.tool, MAX_TOOL_LABEL_CHARS) ?? 'agent collaboration';
+  }
   return 'file change';
 }
 
 export class CodexCapacityRecoveryCheckpoint {
-  private readonly anchor: CodexCapacityRecoveryAnchor | undefined;
+  /**
+   * F296 B4 (Sol review #5): the RAW anchor, normalized on read rather than in
+   * the constructor.
+   *
+   * A preflight carrier only learns its prompt message ids inside `settle`, which
+   * runs after this checkpoint is constructed. Normalizing eagerly snapshotted an
+   * empty array, so app_server capacity recovery could never resume the exact
+   * invocation no matter what the final generation knew.
+   */
+  private readonly rawAnchor: CodexCapacityRecoveryAnchor | undefined;
   private nativeThreadId: string | undefined;
   private latestPlan: CodexCapacityPlanSnapshot | undefined;
   private readonly tools = new Map<string, CodexCapacityToolSnapshot>();
@@ -122,7 +141,12 @@ export class CodexCapacityRecoveryCheckpoint {
   private anonymousToolSequence = 0;
 
   constructor(anchor?: CodexCapacityRecoveryAnchor) {
-    this.anchor = normalizeAnchor(anchor);
+    this.rawAnchor = anchor;
+  }
+
+  /** Normalized at the moment of use, so late-arriving ids are still seen. */
+  private get anchor(): CodexCapacityRecoveryAnchor | undefined {
+    return normalizeAnchor(this.rawAnchor);
   }
 
   setNativeThreadId(threadId: string | undefined): void {
@@ -174,7 +198,15 @@ export class CodexCapacityRecoveryCheckpoint {
   }
 
   canResumeAfterTools(): boolean {
-    return Boolean(this.hasExactAnchor() && this.latestPlan && !this.hasInFlightTool() && this.hasObservedTools());
+    // Native plans are optional in ordinary turns. Completed progress from this
+    // invocation is also a checkpoint; neither source replaces the exact task
+    // anchor or proves that an unfinished tool completed.
+    return Boolean(
+      this.hasExactAnchor() &&
+        (this.latestPlan || this.lastAgentMessage) &&
+        !this.hasInFlightTool() &&
+        this.hasObservedTools(),
+    );
   }
 
   nextIncompleteStep(): CodexCapacityPlanItem | undefined {

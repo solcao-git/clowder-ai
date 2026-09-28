@@ -219,6 +219,8 @@ export interface DispatchDispositionEventInput {
   invocationId: string;
   sourceMessageId: string;
   disposition: A2ADispatchDisposition;
+  /** The exact child completed after unrelated custody replaced the thread-level holder. */
+  retired?: boolean;
   at: number;
 }
 
@@ -239,6 +241,7 @@ export function buildDispatchDispositionEvent(input: DispatchDispositionEventInp
       invocationId: input.invocationId,
       sourceMessageId: input.sourceMessageId,
       disposition: input.disposition,
+      ...(input.retired ? { retired: true } : {}),
     },
     at: input.at,
   };
@@ -249,12 +252,24 @@ export interface TaskBlockedEventInput {
   threadId: string;
   ownerCatId?: string | null;
   blockedSinceAt: number;
+  entrustedWorkRevision?: number;
   resolveMode?: BallResolveMode | null;
+}
+
+/** Typed owner revisions identify transitions; generic Task IDs keep their legacy timestamp shape. */
+function taskStatusEventSourceId(
+  taskId: string,
+  status: 'blocked' | 'unblocked',
+  at: number,
+  entrustedWorkRevision?: number,
+): string {
+  const transitionRef = entrustedWorkRevision === undefined ? at : `entrusted:${entrustedWorkRevision}`;
+  return `task:${taskId}:${status}:${transitionRef}`;
 }
 
 export function buildTaskBlockedEvent(input: TaskBlockedEventInput): BallCustodyEvent {
   return {
-    sourceEventId: `task:${input.taskId}:blocked:${input.blockedSinceAt}`,
+    sourceEventId: taskStatusEventSourceId(input.taskId, 'blocked', input.blockedSinceAt, input.entrustedWorkRevision),
     subjectKey: `ball:task:${input.taskId}`,
     kind: 'task.blocked',
     classification: 'state-changing',
@@ -273,9 +288,9 @@ export interface TaskEventInput {
   at: number;
 }
 
-export function buildTaskUnblockedEvent(input: TaskEventInput): BallCustodyEvent {
+export function buildTaskUnblockedEvent(input: TaskEventInput & { entrustedWorkRevision?: number }): BallCustodyEvent {
   return {
-    sourceEventId: `task:${input.taskId}:unblocked:${input.at}`,
+    sourceEventId: taskStatusEventSourceId(input.taskId, 'unblocked', input.at, input.entrustedWorkRevision),
     subjectKey: `ball:task:${input.taskId}`,
     kind: 'task.unblocked',
     classification: 'state-changing',

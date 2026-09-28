@@ -1,5 +1,5 @@
 import type { FreshnessSupplementAggregate, FreshnessSupplementFailureReason } from '@cat-cafe/shared';
-import type { OfferFreshnessSupplementResult } from '../freshness-closure-store-types.js';
+import type { OfferFreshnessSupplementResult } from '../closure/freshness-closure-store-types.js';
 import {
   advanceFreshnessSupplement,
   claimFreshnessSupplement,
@@ -35,6 +35,12 @@ export class InMemoryFreshnessSupplementOperations {
     return this.readIds(this.idsByThread.get(threadId)).sort(
       (left, right) => left.createdAt - right.createdAt || left.seq - right.seq,
     );
+  }
+
+  listAll(): FreshnessSupplementAggregate[] {
+    return [...this.supplements.values()]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+      .map(clone);
   }
 
   listRecoverable(): FreshnessSupplementAggregate[] {

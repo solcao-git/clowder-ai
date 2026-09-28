@@ -9,6 +9,9 @@ import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { catRegistry } from '@cat-cafe/shared';
 
+const { ContextEpochOwner } = await import('../dist/domains/cats/services/session/ContextEpochOwner.js');
+const { InMemoryContextEpochStore } = await import('../dist/domains/cats/services/stores/ports/ContextEpochStore.js');
+
 const SMALL_CONTEXT_OPUS = 'small-context-opus';
 const SMALL_CONTEXT_CODEX = 'small-context-codex';
 const UNKNOWN_AUTO_CONTEXT_CAT = 'unknown-auto-context-cat';
@@ -257,6 +260,7 @@ function createMockDeps(services, appendCalls, threadStore = null, guideSessionS
       threadStore: safeThreadStore,
       guideSessionStore,
       apiUrl: 'http://127.0.0.1:3004',
+      contextEpochOwner: new ContextEpochOwner(new InMemoryContextEpochStore()),
     },
     messageStore: {
       append: async (msg) => {
@@ -453,15 +457,14 @@ describe('routeParallel collaboration continuity', () => {
 
   it('includes continuity capsule in threshold seal payload for parallel invocations', async () => {
     const { routeParallel } = await import('../dist/domains/cats/services/agents/routing/route-parallel.js');
-    const activeRecord = {
-      id: 'sess-parallel-seal',
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+    const activeRecord = sessionChainStore.create({
+      cliSessionId: 'cli-parallel-seal',
       catId: 'codex',
       threadId: 'thread-parallel-seal',
       userId: 'user1',
-      seq: 0,
-      status: 'active',
-      compressionCount: 0,
-    };
+    });
     const service = {
       contextCapability() {
         return {
@@ -495,12 +498,7 @@ describe('routeParallel collaboration continuity', () => {
     };
     const deps = createMockDeps({ codex: service });
     deps.invocationDeps.sessionManager.delete = async () => {};
-    deps.invocationDeps.sessionChainStore = {
-      getChain: async () => [activeRecord],
-      getActive: async () => activeRecord,
-      update: async () => activeRecord,
-      create: async () => activeRecord,
-    };
+    deps.invocationDeps.sessionChainStore = sessionChainStore;
     deps.invocationDeps.sessionSealer = {
       requestSeal: async () => ({ accepted: true, status: 'sealing' }),
       finalize: async () => {},
@@ -531,7 +529,7 @@ describe('routeParallel collaboration continuity', () => {
     assert.equal(payload.continuityCapsule.threadId, 'thread-parallel-seal');
     assert.equal(payload.continuityCapsule.catId, 'codex');
     assert.equal(payload.continuityCapsule.mode, 'parallel');
-    assert.equal(payload.continuityCapsule.seal.sessionId, 'sess-parallel-seal');
+    assert.equal(payload.continuityCapsule.seal.sessionId, activeRecord.id);
   });
 });
 
@@ -709,7 +707,9 @@ describe('incremental current-message fallback integration', () => {
           parentInvocationId: 'inv-parent',
           persistedPromptMessageIds: [sanitizedMessageId],
           persistedPromptMessages: [{ messageId: sanitizedMessageId, content: sanitizedBody }],
-          onPromptMessagesExposed: async (input) => exposed.push(input),
+          onPromptMessagesExposed: async (input) => {
+            exposed.push(input);
+          },
         })) {
         }
 
@@ -762,7 +762,9 @@ describe('incremental current-message fallback integration', () => {
         parentInvocationId: 'inv-parent',
         persistedPromptMessageIds: [normalizedMessageId],
         persistedPromptMessages: [{ messageId: normalizedMessageId, content: persistedBody }],
-        onPromptMessagesExposed: async (input) => exposed.push(input),
+        onPromptMessagesExposed: async (input) => {
+          exposed.push(input);
+        },
       })) {
       }
 
@@ -820,7 +822,9 @@ describe('incremental current-message fallback integration', () => {
       for await (const _ of route(deps, ['opus'], 'history-16', 'user1', 'thread1', {
         currentUserMessageId,
         parentInvocationId: 'inv-parent',
-        onPromptMessagesExposed: async (input) => exposed.push(input),
+        onPromptMessagesExposed: async (input) => {
+          exposed.push(input);
+        },
       })) {
       }
 
@@ -893,7 +897,9 @@ describe('incremental current-message fallback integration', () => {
         for await (const _ of route(deps, ['opus'], 'this message starts the new turn', 'user1', 'thread1', {
           currentUserMessageId,
           parentInvocationId: 'inv-parent',
-          onPromptMessagesExposed: async (input) => exposed.push(input),
+          onPromptMessagesExposed: async (input) => {
+            exposed.push(input);
+          },
         })) {
         }
 
@@ -939,7 +945,9 @@ describe('incremental current-message fallback integration', () => {
         persistedPromptMessageIds: callerFolded,
         freshnessSupplementRequiredMessageIds: [freshnessRequired[0]],
         freshnessClosureRequiredMessageIds: [freshnessRequired[1]],
-        onPromptMessagesExposed: async (input) => exposed.push(input),
+        onPromptMessagesExposed: async (input) => {
+          exposed.push(input);
+        },
       })) {
       }
 
@@ -1076,7 +1084,9 @@ describe('incremental current-message fallback integration', () => {
             contentBlocks: [{ type: 'context_attachment', attachment: hydratedAttachment }],
           },
         ],
-        onPromptMessagesExposed: async (input) => exposed.push(input),
+        onPromptMessagesExposed: async (input) => {
+          exposed.push(input);
+        },
       })) {
       }
 
@@ -1184,7 +1194,7 @@ describe('incremental current-message fallback integration', () => {
     }
   });
 
-  it('routeSerial avoids duplicating current message when smart-window anchor already carries it', async () => {
+  it('routeSerial avoids duplicating the current message after canonical cold removes anchors', async () => {
     const { routeSerial } = await import('../dist/domains/cats/services/agents/routing/route-serial.js');
     const captureService = createCapturingService('opus', 'ack');
     const currentUserMessageId = '0000000000000001-000001-aaaaaaaa';
@@ -1260,7 +1270,7 @@ describe('incremental current-message fallback integration', () => {
       1,
       'current attachment should appear once in its exact smart-window anchor',
     );
-    assert.ok(prompt.includes(currentUserMessageId), 'smart-window anchor should carry current message id');
+    assert.doesNotMatch(prompt, /\[Anchor /, 'canonical cold must not restore the message through an unbound anchor');
   });
 
   it('concierge routes keep handle context visible to the invocation that resolves its actions', async () => {
@@ -1449,12 +1459,16 @@ describe('incremental current-message fallback integration', () => {
     captureService.calls.length = 0;
     hiddenMentionService.calls.length = 0;
     appendCalls.length = 0;
-    for await (const _ of routeSerial(deps, ['opus'], currentText, 'user1', 'thread-concierge', {
+    const serialProjectedEvents = [];
+    for await (const event of routeSerial(deps, ['opus'], currentText, 'user1', 'thread-concierge', {
       currentUserMessageId,
     })) {
+      serialProjectedEvents.push(event);
     }
     const serialStoredReply = appendCalls.find((msg) => msg.catId === 'opus');
     assertDanglingTriageStoredAsVisibleText(serialStoredReply, 'serial');
+    const serialDone = serialProjectedEvents.find((event) => event.type === 'done' && event.catId === 'opus');
+    assert.equal(serialDone?.content, serialStoredReply.content, 'serial done must expose the canonical stored body');
     assert.deepStrictEqual(serialStoredReply.mentions, [], 'serial should ignore hidden triage A2A mentions');
     assert.equal(
       hiddenMentionService.calls.length,
@@ -1466,13 +1480,19 @@ describe('incremental current-message fallback integration', () => {
     captureService.calls.length = 0;
     hiddenMentionService.calls.length = 0;
     appendCalls.length = 0;
-    for await (const _ of routeParallel(deps, ['opus'], currentText, 'user1', 'thread-concierge', {
+    const parallelProjectedEvents = [];
+    for await (const event of routeParallel(deps, ['opus'], currentText, 'user1', 'thread-concierge', {
       currentUserMessageId,
     })) {
+      parallelProjectedEvents.push(event);
     }
-    assertDanglingTriageStoredAsVisibleText(
-      appendCalls.find((msg) => msg.catId === 'opus'),
-      'parallel',
+    const parallelStoredReply = appendCalls.find((msg) => msg.catId === 'opus');
+    assertDanglingTriageStoredAsVisibleText(parallelStoredReply, 'parallel');
+    const parallelDone = parallelProjectedEvents.find((event) => event.type === 'done' && event.catId === 'opus');
+    assert.equal(
+      parallelDone?.content,
+      parallelStoredReply.content,
+      'parallel done must expose the canonical stored body',
     );
     assert.equal(hiddenMentionService.calls.length, 0, 'parallel should not invoke hidden triage mentions');
   });
@@ -1581,7 +1601,7 @@ describe('incremental current-message fallback integration', () => {
     assertVerifiedAction('parallel');
   });
 
-  it('routeParallel avoids duplicating current message when smart-window anchor already carries it', async () => {
+  it('routeParallel avoids duplicating the current message after canonical cold removes anchors', async () => {
     const { routeParallel } = await import('../dist/domains/cats/services/agents/routing/route-parallel.js');
     const captureService = createCapturingService('opus', 'ack');
     const currentUserMessageId = '0000000000000001-000001-aaaaaaaa';
@@ -1657,7 +1677,7 @@ describe('incremental current-message fallback integration', () => {
       1,
       'current attachment should appear once in its exact smart-window anchor',
     );
-    assert.ok(prompt.includes(currentUserMessageId), 'smart-window anchor should carry current message id');
+    assert.doesNotMatch(prompt, /\[Anchor /, 'canonical cold must not restore the message through an unbound anchor');
   });
 });
 
@@ -1676,6 +1696,21 @@ describe('routeSerial', () => {
     assert.ok(textMsgs.length > 0, 'should have text messages');
     assert.ok(doneMsgs.length > 0, 'should have done message');
     assert.equal(textMsgs[0].content, 'serial response');
+    assert.equal(doneMsgs[0].content, undefined, 'ordinary serial done must not acquire a content contract');
+  });
+
+  it('keeps ordinary parallel done events free of persisted content', async () => {
+    const { routeParallel } = await import('../dist/domains/cats/services/agents/routing/route-parallel.js');
+    const deps = createMockDeps({ opus: createMockService('opus', 'parallel response') });
+
+    const messages = [];
+    for await (const msg of routeParallel(deps, ['opus'], 'test message', 'user1', 'thread1')) {
+      messages.push(msg);
+    }
+
+    const done = messages.find((message) => message.type === 'done' && message.catId === 'opus');
+    assert.ok(done, 'parallel route should yield a done event');
+    assert.equal(done.content, undefined, 'ordinary parallel done must not acquire a content contract');
   });
 
   it('persists toolEvents when agent yields tool_use and tool_result', async () => {
@@ -2188,25 +2223,44 @@ describe('routeSerial A2A worklist', () => {
     assert.equal(deferredEntries.length, 0, 'no deferred enqueue when gate is clear');
   });
 
-  it('skips A2A text-scan @mention when cat already dispatched via callback (cross-path dedup)', async () => {
+  it('durably defers a second A2A when the target is already executing queued agent work', async () => {
     const { routeSerial } = await import('../dist/domains/cats/services/agents/routing/route-serial.js');
     const deps = createMockDeps({
       opus: createMockService('opus', '代码完成\n@缅因猫 请 review'),
       codex: createMockService('codex', 'should not be invoked via text-scan'),
     });
 
+    const deferredEntries = [];
     const messages = [];
-    for await (const msg of routeSerial(deps, ['opus'], 'test', 'user1', 'thread1', {
-      hasQueuedOrActiveAgentForCat: (_tid, catId) => catId === 'codex',
-    })) {
+    for await (const msg of routeSerial(
+      deps,
+      ['opus'],
+      'test',
+      'user1',
+      'thread1',
+      withClaimedA2ASlot({
+        hasQueuedOrActiveAgentForCat: (_tid, catId) => catId === 'codex',
+        trackA2ASlot: () => false,
+        deferA2AEnqueue: (entry) => {
+          deferredEntries.push(entry);
+          return { outcome: 'enqueued', entry };
+        },
+      }),
+    )) {
       messages.push(msg);
     }
 
     const codexText = messages.filter((m) => m.type === 'text' && m.catId === 'codex');
-    assert.equal(codexText.length, 0, 'codex must NOT be invoked when already in InvocationQueue');
+    assert.equal(codexText.length, 0, 'the busy target must not start in the current route');
+    assert.equal(deferredEntries.length, 1, 'the second intent must gain one durable Queue responsibility');
+    assert.deepEqual(deferredEntries[0].targetCats, ['codex']);
+    assert.equal(deferredEntries[0].source, 'agent');
+    assert.equal(deferredEntries[0].sourceCategory, 'a2a');
+    assert.equal(deferredEntries[0].autoExecute, true);
+    assert.match(deferredEntries[0].content, /请 review/);
 
     const handoffs = messages.filter((m) => m.type === 'a2a_handoff');
-    assert.equal(handoffs.length, 0, 'should not emit handoff for deduped cat');
+    assert.equal(handoffs.length, 0, 'deferred responsibility must not masquerade as an inline start');
   });
 
   it('self-mention does not trigger A2A', async () => {

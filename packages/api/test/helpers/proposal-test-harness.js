@@ -15,6 +15,8 @@ export async function createProposalTestContext({
   invocationQueueOverride,
   queueProcessorOverride,
   fetchPrTrackingBoundaryOverride,
+  sidebarPresenceSourceOverride,
+  projectRoot,
 } = {}) {
   const { InvocationRegistry } = await import(
     '../../dist/domains/cats/services/agents/invocation/InvocationRegistry.js'
@@ -23,7 +25,7 @@ export async function createProposalTestContext({
   const { MessageStore } = await import('../../dist/domains/cats/services/stores/ports/MessageStore.js');
   const { InMemoryProposalStore } = await import('../../dist/domains/cats/services/stores/ports/ProposalStore.js');
   const { TaskStore } = await import('../../dist/domains/cats/services/stores/ports/TaskStore.js');
-  const { callbacksRoutes, proposalRoutes } = await import('../../dist/routes/index.js');
+  const { callbacksRoutes, proposalRoutes, threadsRoutes } = await import('../../dist/routes/index.js');
 
   const registry = new InvocationRegistry();
   const threadStore = new ThreadStore();
@@ -67,10 +69,20 @@ export async function createProposalTestContext({
     ...(invocationQueueOverride ? { invocationQueue: invocationQueueOverride } : {}),
     ...(queueProcessorOverride ? { queueProcessor: queueProcessorOverride } : {}),
     ...(fetchPrTrackingBoundaryOverride ? { fetchPrTrackingBoundary: fetchPrTrackingBoundaryOverride } : {}),
+    ...(projectRoot ? { projectRoot } : {}),
   });
+  if (sidebarPresenceSourceOverride) {
+    await app.register(threadsRoutes, {
+      threadStore,
+      presenceSource: sidebarPresenceSourceOverride,
+      messageStore,
+      taskStore,
+      socketManager,
+    });
+  }
 
   const originByRequest = new Map();
-  async function propose({ userId, catId = 'opus', threadId, body = {} }) {
+  async function propose({ userId, catId = 'opus', threadId, body = {}, originContentBlocks }) {
     const dedupKey = body.clientRequestId ? `${userId}:${catId}:${threadId}:${body.clientRequestId}` : undefined;
     let origin = dedupKey ? originByRequest.get(dedupKey) : undefined;
     if (!origin) {
@@ -78,6 +90,7 @@ export async function createProposalTestContext({
         userId,
         catId: null,
         content: 'Please propose a child thread',
+        contentBlocks: originContentBlocks,
         mentions: [],
         timestamp: Date.now(),
         threadId,

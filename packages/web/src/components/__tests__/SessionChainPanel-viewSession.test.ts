@@ -18,8 +18,14 @@ vi.mock('@/utils/api-client', () => ({
 vi.mock('../BindNewSessionSection', () => ({
   BindNewSessionSection: () => null,
 }));
+vi.mock('../CloudConversationLink', () => ({
+  CloudConversationLink: () => null,
+}));
 vi.mock('../ContextHealthBar', () => ({
   ContextHealthBar: () => null,
+}));
+vi.mock('../CloudConversationLink', () => ({
+  CloudConversationLink: () => null,
 }));
 vi.mock('../SessionChainInputs', () => ({
   BindSessionInput: () => null,
@@ -92,9 +98,9 @@ describe('SessionChainPanel onViewSession', () => {
     return defaultProps;
   }
 
-  /** Sealed section is default-collapsed — expand it first */
+  /** Sealed section is default-collapsed — expand it first. */
   async function expandSealedSection() {
-    const sealedBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.includes('Sealed'));
+    const sealedBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.includes('已封存'));
     expect(sealedBtn).toBeTruthy();
     await act(async () => {
       sealedBtn?.click();
