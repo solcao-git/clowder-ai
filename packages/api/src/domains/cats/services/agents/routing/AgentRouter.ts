@@ -34,8 +34,8 @@ import { inferRoutingContextIntent } from '../../../../routing-context/RoutingDi
 import type { IntentResult } from '../../context/IntentParser.js';
 import { parseIntent, ROUTE_CONTROL_TAGS, stripIntentTags } from '../../context/IntentParser.js';
 import type { IRuntimeSessionStore } from '../../runtime-session/RuntimeSessionStore.js';
-import type { ContextEpochOwner } from '../../session/ContextEpochOwner.js';
-import type { PresentationLedger } from '../../session/PresentationLedger.js';
+import type { ContextEpochOwner } from '../../session/context/ContextEpochOwner.js';
+import type { PresentationLedger } from '../../session/context/PresentationLedger.js';
 import { SessionManager } from '../../session/SessionManager.js';
 import type { ISessionSealer } from '../../session/SessionSealer.js';
 import type { TranscriptReader } from '../../session/TranscriptReader.js';
@@ -511,8 +511,6 @@ export interface AgentRouterOptions {
   contextEpochOwner?: ContextEpochOwner;
   /** F296: authenticated Claude project-hook readiness from API bootstrap. */
   hookAuthenticationReady?: boolean | (() => boolean);
-  /** F296: project-local PreCompact carrier readiness for the invocation workspace. */
-  claudeProjectHookCarrierReady?: boolean | ((projectRoot: string) => boolean);
   /** F296 B3b-2: shared provider-presentation delivery ledger. */
   presentationLedger?: PresentationLedger;
   /** F293: owner-scoped sparse routing projection consumed by provider generation. */
@@ -641,7 +639,6 @@ export class AgentRouter {
   private sessionChainStore: ISessionChainStore | undefined;
   private contextEpochOwner: ContextEpochOwner | undefined;
   private hookAuthenticationReady: boolean | (() => boolean);
-  private claudeProjectHookCarrierReady: boolean | ((projectRoot: string) => boolean);
   private presentationLedger: PresentationLedger | undefined;
   private routingContextPromptProjection?: import('../../../../routing-context/RoutingContextPromptProjector.js').RoutingContextPromptProjectionPort;
   private routingDispatchPreflight?: import('../../../../routing-context/RoutingDispatchPreflightPort.js').RoutingDispatchPreflightPort;
@@ -815,7 +812,6 @@ export class AgentRouter {
     this.sessionChainStore = options.sessionChainStore;
     this.contextEpochOwner = options.contextEpochOwner;
     this.hookAuthenticationReady = options.hookAuthenticationReady ?? false;
-    this.claudeProjectHookCarrierReady = options.claudeProjectHookCarrierReady ?? false;
     this.presentationLedger = options.presentationLedger;
     this.routingContextPromptProjection = options.routingContextPromptProjection;
     this.routingDispatchPreflight = options.routingDispatchPreflight;
@@ -1497,7 +1493,6 @@ export class AgentRouter {
         ...(this.sessionChainStore ? { sessionChainStore: this.sessionChainStore } : {}),
         ...(this.contextEpochOwner ? { contextEpochOwner: this.contextEpochOwner } : {}),
         hookAuthenticationReady: this.hookAuthenticationReady,
-        claudeProjectHookCarrierReady: this.claudeProjectHookCarrierReady,
         ...(this.presentationLedger ? { presentationLedger: this.presentationLedger } : {}),
         ...(this.routingContextPromptProjection
           ? { routingContextPromptProjection: this.routingContextPromptProjection }
@@ -1741,6 +1736,7 @@ export class AgentRouter {
     targetCats: CatId[],
     intent: IntentResult,
     options: A2ASlotTrackingOptions & {
+      liveCompanion?: RouteOptions['liveCompanion'];
       /** Authentication-grade owner provenance; legacy/system producers pass unknown. */
       ownerAuthProvenance: NonNullable<RouteOptions['ownerAuthProvenance']>;
       /** F167 Phase T: turn-scoped protocol carrier for the structured stop gate. */
@@ -1893,6 +1889,7 @@ export class AgentRouter {
     const strategyDeps = this.getStrategyDeps();
     const routingContextIntent = inferRoutingContextIntent(cleanMessage);
     const routeOptions = {
+      ...(options.liveCompanion ? { liveCompanion: options.liveCompanion } : {}),
       routeIntent: projectAgentRouteIntent(intent),
       ...(routingContextIntent ? { routingContextIntent } : {}),
       ownerAuthProvenance: options.ownerAuthProvenance,

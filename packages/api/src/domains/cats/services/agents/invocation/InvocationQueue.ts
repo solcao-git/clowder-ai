@@ -110,7 +110,16 @@ export interface QueueEntry {
   /** F175: queue-internal priority — urgent entries sort before normal in dequeue */
   priority: 'urgent' | 'normal';
   /** F175: origin category for visual grouping */
-  sourceCategory?: 'ci' | 'review' | 'conflict' | 'scheduled' | 'a2a' | 'continuation' | 'issue' | 'freshness';
+  sourceCategory?:
+    | 'ci'
+    | 'review'
+    | 'conflict'
+    | 'scheduled'
+    | 'a2a'
+    | 'continuation'
+    | 'issue'
+    | 'freshness'
+    | 'producer_return';
   /** Queue-internal dedup key for agent control-flow work. */
   continuationKey?: string;
   /** F254 Phase E: typed custody carrier for one persistent catch closure. */
@@ -250,6 +259,23 @@ function isQueueTargetPending(entry: Pick<QueueEntry, 'targetCats' | 'queuedFail
 export class InvocationQueue {
   private readonly log = createModuleLogger('invocation-queue');
   private queues = new Map<string, QueueEntry[]>();
+  private readonly sourceListeners = new Set<(threadId: string, userId: string) => void>();
+
+  /** Notification only. Message/Queue custody remains the source of truth. */
+  onSourceChanged(listener: (threadId: string, userId: string) => void): () => void {
+    this.sourceListeners.add(listener);
+    return () => this.sourceListeners.delete(listener);
+  }
+
+  private signalSourceChanged(threadId: string, userId: string): void {
+    for (const listener of this.sourceListeners) {
+      try {
+        listener(threadId, userId);
+      } catch {
+        // A disposable consumer cannot reverse a committed Queue mutation.
+      }
+    }
+  }
 
   /** Original content per entryId at enqueue time, for rollbackEnqueue */
   private originalContents = new Map<string, string>();
@@ -363,7 +389,7 @@ export class InvocationQueue {
         input.targetCats.length !== 1 ||
         (input.executionScope === 'collective-participation'
           ? ownerAuthProvenance !== 'unknown'
-          : input.executionScope !== 'collective-work' || ownerAuthProvenance !== 'strict'))
+          : input.executionScope !== 'collective-work' || ownerAuthProvenance !== 'unknown'))
     ) {
       throw new Error('Collective execution scope requires one exact cat and its matching owner provenance');
     }
@@ -471,6 +497,7 @@ export class InvocationQueue {
     };
     q.push(entry);
     this.originalContents.set(entry.id, input.content);
+    if (entry.messageId && !entry.queueCustodyAdmissionId) this.signalSourceChanged(input.threadId, input.userId);
     return { outcome: 'enqueued', entry: { ...entry }, queuePosition: q.length };
   }
 
@@ -495,10 +522,12 @@ export class InvocationQueue {
     if (!e) return;
     if (!e.messageId) {
       e.messageId = messageId;
+      if (!e.queueCustodyAdmissionId) this.signalSourceChanged(threadId, userId);
       return;
     }
     if (e.messageId !== messageId && !e.mergedMessageIds.includes(messageId)) {
       e.mergedMessageIds.push(messageId);
+      if (!e.queueCustodyAdmissionId) this.signalSourceChanged(threadId, userId);
     }
   }
 
@@ -534,6 +563,7 @@ export class InvocationQueue {
     const ownsAdmission = entries.every((entry) => entry?.queueCustodyAdmissionId === admissionId);
     if (!alreadyCommitted && !ownsAdmission) return false;
     for (const entry of entries as QueueEntry[]) delete entry.queueCustodyAdmissionId;
+    if (ownsAdmission && entries.some((entry) => entry?.messageId)) this.signalSourceChanged(threadId, userId);
     return true;
   }
 
@@ -720,6 +750,7 @@ export class InvocationQueue {
     userId: string,
     catId: string,
     parentInvocationId?: string,
+    readingInvocationId?: string,
   ): Array<{
     entryId: string;
     source: string;
@@ -727,6 +758,7 @@ export class InvocationQueue {
     callerCatId?: string;
     messageId?: string | null;
     mergedMessageIds?: string[];
+    alreadyExposedToInvocation: boolean;
   }> {
     return this.list(threadId, userId)
       .filter((entry) => entry.status === 'queued' && entry.targetCats.includes(catId))
@@ -738,6 +770,13 @@ export class InvocationQueue {
         ...(entry.callerCatId ? { callerCatId: entry.callerCatId } : {}),
         ...(entry.messageId !== undefined ? { messageId: entry.messageId } : {}),
         ...(entry.mergedMessageIds.length > 0 ? { mergedMessageIds: [...entry.mergedMessageIds] } : {}),
+        alreadyExposedToInvocation: Boolean(
+          entry.source === 'user' &&
+            readingInvocationId &&
+            entry.queuedBodyExposures?.some(
+              (exposure) => exposure.targetCatId === catId && exposure.invocationId === readingInvocationId,
+            ),
+        ),
       }));
   }
 
@@ -2191,6 +2230,7 @@ export class InvocationQueue {
     e.queuedNotifiedByCatIds = undefined;
     e.queuedSeenByCatIds = undefined;
     e.queuedSeenInvocationIdByCatId = undefined;
+    e.queuedBodyExposures = undefined;
     e.queueCustodyAdmissionId = queueCustodyAdmissionId;
     return true;
   }
