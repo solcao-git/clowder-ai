@@ -14,6 +14,9 @@ let forwardedSignal = null;
 const child = spawn(command, args, {
   env: process.env,
   stdio: 'inherit',
+  // Windows: `next` and friends are .CMD shims that bare spawn() cannot resolve
+  // (ENOENT). shell: true lets cmd.exe resolve them via PATHEXT like pnpm does.
+  shell: process.platform === 'win32',
 });
 
 for (const signal of Object.keys(signalExitCodes)) {

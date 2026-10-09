@@ -53,7 +53,7 @@
     "test:runtime-interaction": "CAT_CAFE_DISABLE_SHARED_STATE_PREFLIGHT=1 bash ./scripts/with-test-home.sh node --import tsx --test --test-timeout=60000 test/runtime-interaction-service.test.ts test/runtime-interaction-routes.test.ts test/runtime-interaction-composition.test.ts test/runtime-interaction-card-publisher.test.ts test/codex-runtime-interaction-adapter.test.ts test/codex-runtime-interaction-wire-edge.test.ts test/callback-runtime-interaction-routes.test.ts test/approval-hub/f306-approval-adapter.test.ts test/codex-app-server-protocol-resilience.test.mjs",
     "persist-dormant-cursors": "pnpm run build && node scripts/persist-dormant-cursors.mjs",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf dist",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "test:artifact-review": "CAT_CAFE_DISABLE_SHARED_STATE_PREFLIGHT=1 bash ./scripts/with-test-home.sh node --import tsx --test --test-concurrency=1 --test-timeout=60000 test/artifact-review-*.test.ts test/content-owner-media-history.test.ts test/published-media-*.test.ts test/persisted-queue-delivery.test.ts",
     "test:companion": "CAT_CAFE_DISABLE_SHARED_STATE_PREFLIGHT=1 bash ./scripts/with-test-home.sh node --import tsx --import ./test/helpers/setup-cat-registry.js --test --test-concurrency=2 --test-timeout=60000 test/f317-*.test.ts test/f317-*.test.mjs",
     "test:claude-sdk": "CAT_CAFE_DISABLE_SHARED_STATE_PREFLIGHT=1 bash ./scripts/with-test-home.sh node --import tsx --test --test-timeout=60000 test/f318-claude-sdk*.test.ts test/f318-delayed-read-receipt.test.mjs",
