@@ -18,6 +18,7 @@ import {
   resolveByAccountRef,
   resolveForClient,
 } from '../../../../config/account-resolver.js';
+import type { AccountProtocol } from '@cat-cafe/shared';
 import { resolveBoundAccountRefForCat } from '../../../../config/cat-account-binding.js';
 import { getCatModel } from '../../../../config/cat-models.js';
 import { assertProviderCredentialDestination } from '../../../../config/provider-credential-policy.js';
@@ -62,6 +63,11 @@ export class LlmAIProvider implements AIProvider {
         case 'anthropic':
           return await this.callAnthropic(prompt, controller.signal);
         case 'openai':
+        case 'qoder':
+        case 'trae':
+        case 'codebuddy':
+        case 'deepseek':
+          // These clients speak the OpenAI-compatible wire protocol.
           return await this.callOpenAI(prompt, controller.signal);
         case 'google':
           return await this.callGoogle(prompt, controller.signal);
@@ -72,6 +78,21 @@ export class LlmAIProvider implements AIProvider {
       }
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  /** Map a builtin client to its wire protocol — new OpenAI-compatible clients
+   * (qoder/trae/codebuddy/deepseek) all speak 'openai' on the wire. */
+  private static wireProtocolFor(client: Exclude<BuiltinAccountClient, 'opencode'>): AccountProtocol {
+    switch (client) {
+      case 'anthropic':
+        return 'anthropic';
+      case 'google':
+        return 'google';
+      case 'kimi':
+        return 'kimi';
+      default:
+        return 'openai';
     }
   }
 
@@ -87,13 +108,14 @@ export class LlmAIProvider implements AIProvider {
         ? resolveByAccountRef(root, builtinRef)
         : null;
     if (!profile?.apiKey) throw new Error(`No ${client} API key in the selected account`);
+    const protocol = LlmAIProvider.wireProtocolFor(client);
     const url = buildProviderEndpoint({
-      protocol: client,
+      protocol,
       baseUrl: profile.baseUrl,
       model: this.model,
       ...(client === 'google' ? { apiKey: profile.apiKey } : {}),
     });
-    assertProviderCredentialDestination(profile, client, url);
+    assertProviderCredentialDestination(profile, protocol, url);
     return { apiKey: profile.apiKey, url };
   }
 

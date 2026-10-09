@@ -19,7 +19,7 @@ import { type CatId, createCatId } from '@cat-cafe/shared';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
 import { CliRawArchive } from '../../session/CliRawArchive.js';
-import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata } from '../../types.js';
+import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata, PreparedProviderRequestV1 } from '../../types.js';
 import type { RawArchiveSink } from './codex-audit-hooks.js';
 
 const log = createModuleLogger('deepseek-agent');
@@ -234,6 +234,28 @@ export class DeepSeekAgentService implements AgentService {
     // Build endpoint URL — some BASE_URLs already include /v1 (e.g. dashscope compatible-mode/v1)
     const basePath = config.baseUrl.endsWith('/v1') ? config.baseUrl : `${config.baseUrl}/v1`;
     const url = `${basePath}/chat/completions`;
+
+    // F299: provider request recorder fence — must fire before fetch. Placed
+    // outside the try below so recorder fail-closed errors are not swallowed
+    // into "connection failed".
+    const userContent = sepIdx > 0 ? prompt.slice(sepIdx + SYSTEM_SEP.length) : prompt;
+    const preparedRequest: PreparedProviderRequestV1 = Object.freeze({
+      v: 1,
+      message: Object.freeze({ body: userContent }),
+      nativeInstructions: Object.freeze(
+        sepIdx > 0 ? [Object.freeze({ body: prompt.slice(0, sepIdx), injectionDecision: 'system_role_message' })] : [],
+      ),
+      runtime: Object.freeze({
+        provider: 'deepseek',
+        carrier: 'direct_api',
+        model: effectiveModel,
+        protocol: 'openai_sse',
+      }),
+      tools: Object.freeze({ finalSurface: 'unknown' as const }),
+      providerNativeVisibility: 'unknown',
+    });
+    await options?.beforeProviderLaunch?.(preparedRequest);
+    if (!('body' in preparedRequest.message)) throw new Error('deepseek_prepared_message_not_exact');
 
     let response: Response;
     try {

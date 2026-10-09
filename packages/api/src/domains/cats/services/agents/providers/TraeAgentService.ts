@@ -35,7 +35,7 @@ import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/
 import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
 import { CliRawArchive } from '../../session/CliRawArchive.js';
-import type { AgentMessage, AgentServiceOptions, L0InjectableAgentService, MessageMetadata } from '../../types.js';
+import type { AgentMessage, AgentServiceOptions, L0InjectableAgentService, MessageMetadata, PreparedProviderRequestV1 } from '../../types.js';
 import type { RawArchiveSink } from '../providers/codex-audit-hooks.js';
 import { sanitizeRawEvent } from '../providers/codex-audit-hooks.js';
 import { appendLocalImagePathHints, collectImageAccessDirectories } from './image-cli-bridge.js';
@@ -204,6 +204,29 @@ export class TraeAgentService implements L0InjectableAgentService {
         },
         'Invoking Trae CLI',
       );
+
+      // F299: provider request recorder fence — must fire before spawnCli.
+      // buildArgs ends with args.push('-p', prompt); rewrite the prompt slot
+      // after the fence so the recorder sees (and may rewrite) the exact body.
+      const promptIndex = args.lastIndexOf('-p');
+      const submittedPrompt = promptIndex >= 0 ? args[promptIndex + 1] : undefined;
+      if (typeof submittedPrompt !== 'string') throw new Error('trae_request_prompt_unavailable');
+      const preparedRequest: PreparedProviderRequestV1 = Object.freeze({
+        v: 1,
+        message: Object.freeze({ body: submittedPrompt }),
+        nativeInstructions: Object.freeze([]),
+        runtime: Object.freeze({
+          provider: 'trae',
+          carrier: 'argv_print',
+          ...(effectiveModel ? { model: effectiveModel } : {}),
+          protocol: 'stream-json',
+        }),
+        tools: Object.freeze({ finalSurface: 'unknown' as const }),
+        providerNativeVisibility: 'unknown',
+      });
+      await options?.beforeProviderLaunch?.(preparedRequest);
+      if (!('body' in preparedRequest.message)) throw new Error('trae_prepared_message_not_exact');
+      args[promptIndex + 1] = preparedRequest.message.body;
 
       const cliOpts = {
         command: traeCommand,

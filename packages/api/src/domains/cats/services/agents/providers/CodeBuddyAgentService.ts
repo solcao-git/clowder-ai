@@ -34,7 +34,7 @@ import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/
 import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
 import { CliRawArchive } from '../../session/CliRawArchive.js';
-import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata } from '../../types.js';
+import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata, PreparedProviderRequestV1 } from '../../types.js';
 import type { RawArchiveSink } from '../providers/codex-audit-hooks.js';
 import { sanitizeRawEvent } from '../providers/codex-audit-hooks.js';
 import { appendLocalImagePathHints } from './image-cli-bridge.js';
@@ -265,12 +265,35 @@ export class CodeBuddyAgentService implements AgentService {
       // Reuse Qoder transform state since event formats are identical
       const transformState = createQoderTransformState();
 
+      // F299: provider request recorder fence — must fire before spawnCli.
+      const submittedPrompt = systemPrompt ? prompt : effectivePrompt;
+      const preparedRequest: PreparedProviderRequestV1 = Object.freeze({
+        v: 1,
+        message: Object.freeze({
+          body: submittedPrompt,
+          ...(submittedPrompt !== effectivePrompt ? { injectionDecision: 'system_prompt_flag_separated' } : {}),
+        }),
+        nativeInstructions: Object.freeze(
+          systemPrompt ? [Object.freeze({ body: systemPrompt, injectionDecision: 'system_prompt_flag' })] : [],
+        ),
+        runtime: Object.freeze({
+          provider: 'codebuddy',
+          carrier: 'stream_json',
+          ...(effectiveModel && effectiveModel !== 'Auto' ? { model: effectiveModel } : {}),
+          protocol: 'stream-json',
+        }),
+        tools: Object.freeze({ finalSurface: 'unknown' as const }),
+        providerNativeVisibility: 'unknown',
+      });
+      await options?.beforeProviderLaunch?.(preparedRequest);
+      if (!('body' in preparedRequest.message)) throw new Error('codebuddy_prepared_message_not_exact');
+
       const cliOpts = {
         command: codebuddyCommand,
         args,
         // Prompt via stdin (see the args.push('-p') comment above) — argv
         // stays under the Windows 32K command-line cap regardless of size.
-        stdinInput: systemPrompt ? prompt : effectivePrompt,
+        stdinInput: preparedRequest.message.body,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         ...(options?.callbackEnv || options?.accountEnv
           ? { env: { ...(options?.callbackEnv ?? {}), ...(options?.accountEnv ?? {}) } }
