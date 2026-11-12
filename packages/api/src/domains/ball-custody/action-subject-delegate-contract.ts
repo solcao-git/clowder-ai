@@ -46,14 +46,31 @@ export interface DevelopmentScopeSnapshot {
   readonly acceptedRevision: string;
 }
 
+/** Exact immutable authorization scope equality; missing snapshots never match. */
+export function sameDevelopmentScopeSnapshot(
+  approved: DevelopmentScopeSnapshot | undefined,
+  current: DevelopmentScopeSnapshot | undefined,
+): boolean {
+  return Boolean(
+    approved &&
+      current &&
+      approved.featureRef === current.featureRef &&
+      approved.phaseKey === current.phaseKey &&
+      approved.workUnitRef === current.workUnitRef &&
+      approved.acceptedSourceRef === current.acceptedSourceRef &&
+      approved.acceptedRevision === current.acceptedRevision,
+  );
+}
+
 export interface TaskApprovedDelegateProvider {
   getForTask(
     taskId: string,
     taskThreadId: string,
     currentOwnerCatId: string,
     tenantScope: string,
-    /** F167 R5: current task scope for drift detection. Absent → tasks without scope get no delegates. */
+    /** F167 R5: current task scope for drift detection. Absent → only an exact generic continuation can authorize delegation. */
     currentDevelopmentScope?: DevelopmentScopeSnapshot,
+    currentTaskTitle?: string,
   ): Promise<ReadonlyArray<ApprovedDelegate>>;
 }
 
@@ -61,7 +78,11 @@ export interface TaskApprovedDelegateProvider {
  * Narrow snapshot of a task used for action subject truth resolution.
  */
 export interface TaskActionSnapshot {
+  kind?: import('@cat-cafe/shared').TaskKind;
+  subjectKey?: string | null;
+  entrustedWork?: unknown;
   id: string;
+  title?: string;
   status: 'todo' | 'doing' | 'blocked' | 'done';
   ownerCatId: string | null;
   threadId: string;

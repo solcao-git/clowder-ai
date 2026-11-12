@@ -79,7 +79,12 @@ describe('Workspace running work counts cat/thread work, retaining exact activit
     expect(container.querySelectorAll('a')).toHaveLength(1);
     expect(container.querySelector('a')?.getAttribute('href')).toBe('/thread/thread-a');
     expect(container.textContent).toContain('回复中');
-    expect(container.textContent).toContain('后台 · 测试');
+    const activities = Array.from(
+      container.querySelectorAll('[data-testid="workspace-running-activity"]'),
+      (row) => row.textContent,
+    );
+    expect(activities).toEqual(expect.arrayContaining([expect.stringContaining('实时回合')]));
+    expect(activities).toEqual(expect.arrayContaining([expect.stringContaining('托管命令 · 测试')]));
     const details = container.querySelector<HTMLButtonElement>('[data-testid="workspace-open-running-object"]');
     act(() => details?.click());
     expect(onSelect).toHaveBeenCalledExactlyOnceWith(turn);
@@ -94,6 +99,22 @@ describe('Workspace running work counts cat/thread work, retaining exact activit
     expect(Object.keys(useActiveExecutionStore.getState().executionsByKey)).toEqual([
       activeExecutionKey(turn),
       activeExecutionKey(task),
+    ]);
+  });
+
+  it('labels project identity on classic global rows with identical conversation titles', async () => {
+    hydrate([
+      { ...live('codex-sol', 'thread-a', 'a'), threadTitle: '同名对话', projectPath: '/a/demo' },
+      { ...live('codex-sol', 'thread-b', 'b'), threadTitle: '同名对话', projectPath: '/b/demo' },
+    ]);
+    await act(async () => root.render(<WorkspaceNowSurface repository={{ name: 'current-repo', branch: 'main' }} />));
+    const labels = [...container.querySelectorAll('[data-testid="workspace-running-project"]')];
+    expect(labels.map((node) => node.textContent)).toEqual(['a/demo', 'b/demo']);
+    expect(labels.map((node) => node.getAttribute('title'))).toEqual(['/a/demo', '/b/demo']);
+    expect(container.textContent).toContain('当前项目');
+    expect([...container.querySelectorAll('a')].map((link) => link.getAttribute('href'))).toEqual([
+      '/thread/thread-a',
+      '/thread/thread-b',
     ]);
   });
 

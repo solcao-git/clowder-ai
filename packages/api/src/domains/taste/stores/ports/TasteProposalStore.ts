@@ -1,3 +1,4 @@
+import type { SettledHistoryPageOptions, SettledHistorySourcePage } from '../../../../utils/settled-history-page.js';
 /**
  * F221 Phase B TasteProposalStore — port interface.
  *
@@ -12,7 +13,7 @@
  * Bypass prohibited: no generic delete/restore — proposals are immutable once settled.
  */
 
-import type { ApprovalOriginRef, TasteDimension, TasteProposal } from '@cat-cafe/shared';
+import type { ApprovalOriginRef, TasteDimension, TasteMemoryCorrectionTarget, TasteProposal } from '@cat-cafe/shared';
 import type { ApprovalPublicationStore } from '../../../approval-hub/ports/ApprovalPublicationStore.js';
 import type { TasteDecisionAuthorityFence } from '../../services/RedisTasteDecisionAuthority.js';
 import type { TasteDecisionSnapshot } from '../../services/taste-decision-snapshot.js';
@@ -32,6 +33,7 @@ export interface CreateTasteProposalInput {
   privacy: 'public' | 'sensitive';
   clientRequestId?: string;
   approvalOriginRef?: ApprovalOriginRef;
+  correctionTarget?: TasteMemoryCorrectionTarget;
 }
 
 export interface TasteWriteCheckpoint {
@@ -49,7 +51,17 @@ export interface ITasteProposalStore extends ApprovalPublicationStore {
   /** List user-actionable proposals, including durable approving states that require resume. */
   listActionable(userId: string, limit?: number): TasteProposal[] | Promise<TasteProposal[]>;
   /** List settled (approved+rejected) proposals for a user, ordered by decidedAt DESC. */
+  listSettledPage?(
+    owner: string,
+    options: SettledHistoryPageOptions,
+  ): SettledHistorySourcePage<TasteProposal> | Promise<SettledHistorySourcePage<TasteProposal>>;
   listSettledByUser(userId: string, limit?: number): TasteProposal[] | Promise<TasteProposal[]>;
+  /** Actionable correction suggestions attached to one canonical vignette source. */
+  listCorrectionsBySource(
+    userId: string,
+    sourceAnchor: string,
+    limit?: number,
+  ): TasteProposal[] | Promise<TasteProposal[]>;
   /** CAS pending → approving. Returns claimed snapshot, or null if not pending. */
   claimForApproval(
     id: string,

@@ -3,7 +3,7 @@ import { catRegistry, createCompanionIdentitySnapshot } from '@cat-cafe/shared';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { isCatAvailable } from '../config/cat-config-loader.js';
-import type { InvocationQueue, QueueEntry } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
+import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
 import type { IMessageStore, StoredMessage } from '../domains/cats/services/stores/ports/MessageStore.js';
 import type { ISessionChainStore } from '../domains/cats/services/stores/ports/SessionChainStore.js';
 import type { IConciergeConfigStore } from '../domains/concierge/ConciergeConfigStore.js';
@@ -31,11 +31,18 @@ interface Options {
   sessions: LiveCompanionSessions;
   threadService: Pick<ConciergeThreadService, 'getOrCreate' | 'isCurrent'>;
   sessionChainStore: Pick<ISessionChainStore, 'getActive'>;
-  messageStore: Pick<IMessageStore, 'appendIdempotent' | 'getByThread' | 'getByThreadAfter' | 'getById'>;
-  invocationQueue: Pick<InvocationQueue, 'getQueuedBodyMessagesForCat' | 'getEntrySnapshot'>;
+  messageStore: Pick<
+    IMessageStore,
+    'appendIdempotent' | 'getByThread' | 'getByThreadAfter' | 'getById' | 'recordCompanionDeliveryAcceptance'
+  >;
+  invocationQueue: Pick<
+    InvocationQueue,
+    'getQueuedBodyMessagesForCat' | 'getEntrySnapshot' | 'getDurableEntriesForMessages'
+  >;
   recovery: Pick<LiveRecoveryOptions, 'tasks' | 'approvals' | 'epochs'>;
-  progressOwnedCarrier(entry: QueueEntry, catId: string): Promise<unknown>;
   mcpDistDir: string;
+  /** Host-only readiness switch; the owner request schema never accepts it. Defaults off. */
+  meetingToolsEnabled?: boolean;
   desktopRoot?: string;
   allowedDirectories: readonly string[];
   publish(message: StoredMessage): void;
@@ -159,6 +166,7 @@ export const conciergeLiveRoutes: FastifyPluginAsync<Options> = async (app, opti
         ...(options.desktopRoot ? { desktopRoot: options.desktopRoot } : {}),
         allowedDirectories: options.allowedDirectories,
         householdToolsEnabled: parsed.data.allowHomeReads,
+        meetingToolsEnabled: options.meetingToolsEnabled === true,
         companion,
         identitySnapshot: createCompanionIdentitySnapshot({
           ...companion,
@@ -194,22 +202,6 @@ export const conciergeLiveRoutes: FastifyPluginAsync<Options> = async (app, opti
               // An invocation ID alone cannot prove retained F296 context.
               retainsCurrentInvocationReads: () => false,
             }),
-          onSuccessorRequired: async (scope, references) => {
-            for (const reference of references) {
-              const entry = options.invocationQueue.getEntrySnapshot(
-                scope.threadId,
-                scope.userId,
-                reference.queueEntryId,
-              );
-              if (
-                !entry ||
-                !entry.targetCats.includes(scope.catId) ||
-                (entry.messageId !== reference.messageId && !entry.mergedMessageIds?.includes(reference.messageId))
-              )
-                continue;
-              await options.progressOwnedCarrier(entry, scope.catId);
-            }
-          },
         },
         recovery: {
           ...options.recovery,
@@ -245,12 +237,11 @@ export const conciergeLiveRoutes: FastifyPluginAsync<Options> = async (app, opti
         payload: {
           content: `@${catId}\n开始语音交流。${parsed.data.allowHomeReads ? '已允许查询家里资料' : '未开放家里资料'}；屏幕只在另行选择后共享。`,
           threadId,
-          deliveryMode: 'immediate',
           idempotencyKey: call.id,
         },
       });
       const admitted = admission.json();
-      if (admission.statusCode !== 200 || admitted.status !== 'processing') {
+      if (admission.statusCode !== 202 || admitted.status !== 'queued') {
         await call.fail(new Error('Host did not admit Live'));
         return reply
           .code(admission.statusCode >= 400 ? admission.statusCode : 409)

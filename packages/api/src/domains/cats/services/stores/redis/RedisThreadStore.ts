@@ -19,6 +19,7 @@ import { awaitStoreRead, throwIfStoreReadAborted } from '../ports/StoreReadOptio
 import type {
   BootcampStateV1,
   ConnectorHubStateV1,
+  EnsureOnboardingThreadResult,
   ExternalRuntimeAnchorRuntime,
   IThreadStore,
   MentionActionabilityMode,
@@ -29,6 +30,7 @@ import type {
   ThreadMetadataPatch,
   ThreadMetadataV1,
   ThreadParticipantActivity,
+  ThreadPluginOwnershipV1,
   ThreadRoutingPolicyV1,
   ThreadSystemKind,
   VotingStateV1,
@@ -38,7 +40,9 @@ import {
   DEFAULT_THREAD_ID,
   deriveAutoThreadTitle,
   isThreadGoalStateV1,
+  isThreadPluginOwnershipV1,
   mergeThreadMetadata,
+  onboardingThreadId,
   parseThreadMetadataJson,
   validateMergedTotals,
 } from '../ports/ThreadStore.js';
@@ -77,6 +81,18 @@ if redis.call('HEXISTS', KEYS[1], 'id') == 0 then
   return 0
 end
 redis.call('HSET', KEYS[1], unpack(ARGV))
+return 1
+`;
+
+/** Atomic first-run thread creation keyed by the stable onboarding journey. */
+const ENSURE_ONBOARDING_THREAD_LUA = `
+if redis.call('HEXISTS', KEYS[1], 'id') == 1 then
+  return 0
+end
+for i = 1, #ARGV - 2, 2 do
+  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+end
+redis.call('ZADD', KEYS[2], ARGV[#ARGV - 1], ARGV[#ARGV])
 return 1
 `;
 
@@ -256,6 +272,7 @@ export class RedisThreadStore implements IThreadStore {
     parentThreadId?: string,
     proposalAudit?: import('../ports/ThreadStore.js').ThreadProposalAudit,
     branchAudit?: import('../ports/ThreadStore.js').ThreadBranchAudit,
+    options?: import('../ports/ThreadStore.js').ThreadCreateOptions,
   ): Promise<Thread> {
     const now = Date.now();
     const thread: Thread = {
@@ -266,6 +283,7 @@ export class RedisThreadStore implements IThreadStore {
       participants: [],
       lastActiveAt: now,
       createdAt: now,
+      ...(options?.pinned ? { pinned: true, pinnedAt: now } : {}),
       ...(parentThreadId ? { parentThreadId } : {}),
       ...(proposalAudit
         ? {
@@ -337,6 +355,43 @@ export class RedisThreadStore implements IThreadStore {
       .exec();
     // System threads are persistent — no TTL applied (W5: user state default persistent)
     return thread;
+  }
+
+  async ensureOnboardingThread(
+    userId: string,
+    journeyId: string,
+    title: string,
+    projectPath: string,
+    bootcampState?: BootcampStateV1,
+  ): Promise<EnsureOnboardingThreadResult> {
+    const threadId = onboardingThreadId(userId, journeyId);
+    const now = Date.now();
+    const thread: Thread = {
+      id: threadId,
+      projectPath,
+      title,
+      createdBy: userId,
+      participants: [],
+      lastActiveAt: now,
+      createdAt: now,
+      bootcampState,
+    };
+    const fields = this.serializeThread(thread);
+    const args = Object.entries(fields).flatMap(([key, value]) => [key, value]);
+    args.push(String(now), threadId);
+    const created =
+      Number(
+        await this.redis.eval(
+          ENSURE_ONBOARDING_THREAD_LUA,
+          2,
+          ThreadKeys.detail(threadId),
+          ThreadKeys.userList(userId),
+          ...args,
+        ),
+      ) === 1;
+    const existing = await this.get(threadId);
+    if (!existing) throw new Error('Failed to ensure onboarding thread');
+    return { thread: existing, created };
   }
 
   async ensureExternalRuntimeAnchorThread(runtime: ExternalRuntimeAnchorRuntime, userId: string): Promise<Thread> {
@@ -488,6 +543,10 @@ export class RedisThreadStore implements IThreadStore {
   }
 
   async listProjectCandidates(userId: string, projectPath: string, threadIds: readonly string[]): Promise<Thread[]> {
+    return (await this.listCandidates(userId, threadIds)).filter((thread) => thread.projectPath === projectPath);
+  }
+
+  async listCandidates(userId: string, threadIds: readonly string[]): Promise<Thread[]> {
     const candidates = [...new Set(threadIds)];
     const ids: string[] = [];
     // The existing user list remains the visibility authority, including
@@ -505,8 +564,7 @@ export class RedisThreadStore implements IThreadStore {
         if (id !== undefined && (reply[1] !== null || id === DEFAULT_THREAD_ID)) ids.push(id);
       }
     }
-    const threads = await this.readListedThreads(ids);
-    return threads.filter((thread) => thread.projectPath === projectPath);
+    return this.readListedThreads(ids);
   }
 
   async hasByProject(userId: string, projectPath: string): Promise<boolean> {
@@ -647,7 +705,47 @@ export class RedisThreadStore implements IThreadStore {
 
   async updateTitle(threadId: string, title: string): Promise<void> {
     const key = ThreadKeys.detail(threadId);
-    await this.setDetailFields(key, 'title', title);
+    await this.setDetailFields(key, 'title', title, 'titleSource', 'user', 'titleCatId', '');
+  }
+
+  async setSessionImport(threadId: string, value: NonNullable<Thread['sessionImport']>): Promise<void> {
+    await this.setDetailFields(
+      ThreadKeys.detail(threadId),
+      'sessionImportSessionId',
+      value.sessionId,
+      'sessionImportCatId',
+      value.catId,
+    );
+  }
+
+  async setAutomaticTitle(
+    threadId: string,
+    title: string,
+    source: 'temporary' | 'cat',
+    catId?: string,
+  ): Promise<boolean> {
+    const key = ThreadKeys.detail(threadId);
+    const changed = await this.redis.eval(
+      `
+      if redis.call('HEXISTS', KEYS[1], 'id') == 0 then return 0 end
+      local deleted = redis.call('HGET', KEYS[1], 'deletedAt')
+      if deleted and deleted ~= '' and deleted ~= '0' then return 0 end
+      local current = redis.call('HGET', KEYS[1], 'title') or ''
+      local source = redis.call('HGET', KEYS[1], 'titleSource')
+      if not source then source = current == '' and 'temporary' or 'user' end
+      if source ~= 'temporary' then return 0 end
+      if ARGV[2] == 'temporary' and current ~= '' then return 0 end
+      redis.call('HSET', KEYS[1], 'title', ARGV[1], 'titleSource', ARGV[2], 'titleCatId', ARGV[3])
+      return 1
+    `,
+      1,
+      key,
+      title,
+      source,
+      catId ?? '',
+    );
+    if (changed === 1) await this.applyKeyRetention([key]);
+    return changed === 1;
   }
 
   async compareAndSetTitle(threadId: string, expectedTitle: string, nextTitle: string): Promise<boolean> {
@@ -749,8 +847,13 @@ export class RedisThreadStore implements IThreadStore {
   }
 
   async linkBacklogItem(threadId: string, backlogItemId: string): Promise<void> {
+    await this.updateBacklogItem(threadId, backlogItemId);
+  }
+
+  async updateBacklogItem(threadId: string, backlogItemId: string | null): Promise<void> {
     const key = ThreadKeys.detail(threadId);
-    await this.setDetailFields(key, 'backlogItemId', backlogItemId);
+    if (backlogItemId) await this.setDetailFields(key, 'backlogItemId', backlogItemId);
+    else await this.deleteDetailFields(key, 'backlogItemId');
   }
 
   async setMentionRoutingFeedback(
@@ -860,6 +963,27 @@ export class RedisThreadStore implements IThreadStore {
     }
   }
 
+  async claimSystemKind(threadId: string, ownerUserId: string, kind: ThreadSystemKind): Promise<boolean> {
+    const result = await this.redis.eval(
+      `
+      if redis.call('HGET', KEYS[1], 'id') ~= ARGV[1] then return 0 end
+      if redis.call('HGET', KEYS[1], 'createdBy') ~= ARGV[2] then return 0 end
+      local deleted = redis.call('HGET', KEYS[1], 'deletedAt')
+      if deleted and deleted ~= '' and deleted ~= '0' then return 0 end
+      local previous = redis.call('HGET', KEYS[1], 'systemKind')
+      if previous and previous ~= '' and previous ~= ARGV[3] then return 0 end
+      redis.call('HSET', KEYS[1], 'systemKind', ARGV[3])
+      return 1
+    `,
+      1,
+      ThreadKeys.detail(threadId),
+      threadId,
+      ownerUserId,
+      kind,
+    );
+    return Number(result) === 1;
+  }
+
   /** F229 / F167: Set or clear threadKind marker for concierge / gate-keeping thread. */
   async updateThreadKind(threadId: string, kind: ThreadKind | null): Promise<void> {
     const key = ThreadKeys.detail(threadId);
@@ -876,6 +1000,18 @@ export class RedisThreadStore implements IThreadStore {
       await this.deleteDetailFields(key, 'connectorHubState');
     } else {
       await this.setDetailFields(key, 'connectorHubState', JSON.stringify(state));
+    }
+  }
+
+  async updatePluginOwnership(threadId: string, ownership: ThreadPluginOwnershipV1 | null): Promise<void> {
+    if (ownership !== null && !isThreadPluginOwnershipV1(ownership)) {
+      throw new TypeError('invalid plugin thread ownership');
+    }
+    const key = ThreadKeys.detail(threadId);
+    if (ownership === null) {
+      await this.deleteDetailFields(key, 'pluginOwnership');
+    } else {
+      await this.setDetailFields(key, 'pluginOwnership', JSON.stringify(ownership));
     }
   }
 
@@ -1297,6 +1433,14 @@ export class RedisThreadStore implements IThreadStore {
       id: thread.id,
       projectPath: thread.projectPath,
       title: thread.title ?? '',
+      titleSource: thread.titleSource ?? (thread.title ? 'user' : 'temporary'),
+      titleCatId: thread.titleCatId ?? '',
+      ...(thread.sessionImport
+        ? {
+            sessionImportSessionId: thread.sessionImport.sessionId,
+            sessionImportCatId: thread.sessionImport.catId,
+          }
+        : {}),
       createdBy: thread.createdBy,
       lastActiveAt: String(thread.lastActiveAt),
       createdAt: String(thread.createdAt),
@@ -1374,6 +1518,9 @@ export class RedisThreadStore implements IThreadStore {
     if (thread.connectorHubState) {
       result.connectorHubState = JSON.stringify(thread.connectorHubState);
     }
+    if (thread.pluginOwnership) {
+      result.pluginOwnership = JSON.stringify(thread.pluginOwnership);
+    }
     if (thread.externalRuntimeAnchorState) {
       result.externalRuntimeAnchorState = JSON.stringify(thread.externalRuntimeAnchorState);
     }
@@ -1401,6 +1548,18 @@ export class RedisThreadStore implements IThreadStore {
       id: data.id ?? '',
       projectPath: data.projectPath ?? 'default',
       title: data.title || null,
+      titleSource:
+        data.titleSource === 'cat' || data.titleSource === 'temporary'
+          ? data.titleSource
+          : data.title
+            ? 'user'
+            : 'temporary',
+      ...(data.titleCatId ? { titleCatId: data.titleCatId } : {}),
+      ...(data.sessionImportSessionId && data.sessionImportCatId
+        ? {
+            sessionImport: { sessionId: data.sessionImportSessionId, catId: data.sessionImportCatId },
+          }
+        : {}),
       createdBy: data.createdBy ?? 'unknown',
       participants: [], // Loaded separately from Set
       lastActiveAt: parseInt(data.lastActiveAt ?? '0', 10),
@@ -1544,7 +1703,8 @@ export class RedisThreadStore implements IThreadStore {
       (data.systemKind === 'connector_hub' ||
         data.systemKind === 'eval_domain' ||
         data.systemKind === 'cat_bedroom' ||
-        data.systemKind === 'memory_ops')
+        data.systemKind === 'memory_ops' ||
+        data.systemKind === 'collective_channel')
     ) {
       result.systemKind = data.systemKind as ThreadSystemKind;
     }
@@ -1556,6 +1716,16 @@ export class RedisThreadStore implements IThreadStore {
         }
       } catch {
         /* ignore malformed JSON */
+      }
+    }
+    if (data.pluginOwnership) {
+      try {
+        const parsed: unknown = JSON.parse(data.pluginOwnership);
+        if (isThreadPluginOwnershipV1(parsed)) {
+          result.pluginOwnership = parsed;
+        }
+      } catch {
+        /* ignore malformed plugin ownership */
       }
     }
     if (data.externalRuntimeAnchorState) {

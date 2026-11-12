@@ -1,5 +1,6 @@
+import { CollectiveNameplate } from './CollectiveNameplate.js';
 import type { RoadmapAction } from './channel-collaboration.js';
-import { actorDisplayName, actorOrigin, formatEventTime } from './channel-model.js';
+import { formatEventTime } from './channel-model.js';
 import type {
   ChannelThread,
   CollectiveEventEnvelope,
@@ -9,9 +10,13 @@ import type {
   CollectiveVoteProjection,
   CollectiveWorkProjection,
 } from './client-types.js';
+import { useCollectiveLanguage, useCollectiveText } from './collective-copy.js';
 import { MessageInteraction } from './MessageInteraction.js';
+import { MessageReadEnd } from './MessageReadEnd.js';
+import { MessageReceipt } from './MessageReceipt.js';
 import { authorPresentation } from './message-presentation.js';
-import { HumanNameplate, MessageAvatar, MessageBody } from './TopicMessage.js';
+import { publicActorLabel } from './participant-label.js';
+import { MessageAvatar, MessageBody } from './TopicMessage.js';
 import { useRoomPresentation } from './use-room-presentation.js';
 import type { InformalVoteDraft } from './VoteCard.js';
 
@@ -44,25 +49,12 @@ export function ChannelMessage({
   showTime = true,
 }: ChannelMessageProps) {
   const v2 = useRoomPresentation(presentation) === 'v2';
+  const language = useCollectiveLanguage();
+  const t = useCollectiveText();
   const author = authorPresentation(thread.root, currentHumanId);
   const { root, replies } = thread;
-  const namedRecipient = root.recipient?.kind === 'agent' ? root.recipient : undefined;
-  const namedResponded = namedRecipient
-    ? replies.some(
-        (reply) =>
-          reply.replyToEventId === root.eventId &&
-          reply.actor.kind === 'agent' &&
-          reply.actor.provenance.connectionId === namedRecipient.connectionId &&
-          reply.actor.provenance.catId === namedRecipient.agentId,
-      )
-    : false;
   const body = (
-    <MessageBody
-      event={root}
-      participants={participants}
-      responseState={replies.length ? 'responded' : 'waiting'}
-      namedResponseState={namedRecipient ? (namedResponded ? 'responded' : 'waiting') : undefined}
-    />
+    <MessageBody event={root} participants={participants} responseState={replies.length ? 'responded' : 'waiting'} />
   );
   const interaction = (
     <MessageInteraction
@@ -94,14 +86,23 @@ export function ChannelMessage({
     replies.length > 0 ? (
       <button type="button" className="reply-vitals" onClick={() => onOpenTopic(root.eventId)}>
         <span className="reply-summary">
-          <strong>{replies.length} 条回复</strong>
-          <small>最近 {formatEventTime(replies.at(-1)?.acceptedAt ?? root.acceptedAt)}</small>
+          <strong>
+            {language === 'en'
+              ? `${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`
+              : `${replies.length} 条回复`}
+          </strong>
+          <small>
+            {t('最近')} {formatEventTime(replies.at(-1)?.acceptedAt ?? root.acceptedAt, language)}
+          </small>
         </span>
         <span className="reply-preview">
           {replies.slice(-2).map((reply) => (
-            <span key={reply.eventId}>
-              <b>{actorDisplayName(reply)}</b>
-              <span>{reply.body}</span>
+            <span key={reply.eventId} className="reply-preview-item">
+              <MessageAvatar event={reply} participants={participants} compact />
+              <span>
+                <b>{publicActorLabel(reply, participants)}</b>
+                <span>{reply.body}</span>
+              </span>
             </span>
           ))}
         </span>
@@ -115,56 +116,26 @@ export function ChannelMessage({
     tabIndex: -1,
   } as const;
 
-  // F322 B segment 1 (human message): in the new presentation your own message is one block on the right with no
-  // avatar and no signature, and another person is on the left with a nameplate. Cats and the classic layout are below.
-  if (v2 && author === 'self') {
-    return (
-      <article {...frame} className="message message-self" data-author="self">
-        <div className="message-content">
-          <div className="message-bubble">{body}</div>
-          {showTime && (
-            <time className="message-time" dateTime={root.acceptedAt}>
-              {formatEventTime(root.acceptedAt)}
-            </time>
-          )}
-          {interaction}
-          {replyVitals}
-        </div>
-      </article>
-    );
-  }
-  if (v2 && author === 'other-human') {
-    return (
-      <article {...frame} className="message message-other" data-author="other-human">
-        <div className="message-content">
-          <header className="message-plate-row">
-            <HumanNameplate event={root} participants={participants} onOpenMember={() => onOpenMember(root)} />
-            <time dateTime={root.acceptedAt}>{formatEventTime(root.acceptedAt)}</time>
-          </header>
-          {body}
-          {interaction}
-          {replyVitals}
-        </div>
-      </article>
-    );
-  }
   return (
-    <article {...frame} className="message">
-      <button
-        type="button"
-        className="avatar-button"
-        onClick={() => onOpenMember(root)}
-        aria-label={`查看 ${actorDisplayName(root)}`}
-      >
-        <MessageAvatar event={root} participants={participants} />
-      </button>
+    <article {...frame} className="message" data-author={v2 ? author : undefined}>
       <div className="message-content">
         <header className="message-meta">
-          <strong>{actorDisplayName(root)}</strong>
-          <span>{actorOrigin(root)}</span>
-          <time dateTime={root.acceptedAt}>{formatEventTime(root.acceptedAt)}</time>
+          <CollectiveNameplate event={root} participants={participants} onOpen={() => onOpenMember(root)} />
+          {(!v2 || showTime) && (
+            <time className={v2 ? 'message-time' : undefined} dateTime={root.acceptedAt}>
+              {formatEventTime(root.acceptedAt, language)}
+            </time>
+          )}
         </header>
         {body}
+        <MessageReadEnd eventId={root.eventId} />
+        <MessageReceipt
+          event={root}
+          replies={replies}
+          participants={participants}
+          works={works}
+          onOpen={() => onOpenTopic(root.eventId)}
+        />
         {interaction}
         {replyVitals}
       </div>
@@ -186,7 +157,11 @@ interface ChannelMessageProps {
   readonly humanNames?: Readonly<Record<string, string>>;
   readonly reactions?: readonly CollectiveReactionSummary[];
   readonly onProposeWork?: (event: CollectiveEventEnvelope) => void;
-  readonly onCommitWork?: (work: CollectiveWorkProjection, participant?: CollectiveParticipant) => void;
+  readonly onCommitWork?: (
+    work: CollectiveWorkProjection,
+    participant?: CollectiveParticipant,
+    accountability?: 'self' | 'unassigned',
+  ) => void;
   readonly onDeclineWork?: (work: CollectiveWorkProjection) => void;
   readonly onAcceptWorkResult?: (work: CollectiveWorkProjection) => void;
   readonly onRequestWorkRevision?: (work: CollectiveWorkProjection, feedback: string) => Promise<void>;
@@ -199,6 +174,6 @@ interface ChannelMessageProps {
   readonly highlighted?: boolean;
   /** Overrides the frame default (tests, previews). */
   readonly presentation?: 'v2' | 'classic';
-  /** Self messages only: the time under the block, once per run of your own messages. */
+  /** Time visibility supplied by the surrounding flow; consecutive own messages show it once. */
   readonly showTime?: boolean;
 }

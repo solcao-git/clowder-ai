@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Tenri AI",
-  "short_name": "Tenri AI",
+  "name": "Clowder AI",
+  "short_name": "Clowder AI",
   "description": "Your AI team collaboration space",
   "start_url": "/",
   "display": "standalone",

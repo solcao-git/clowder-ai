@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApprovalHubStore } from '@/stores/approvalHubStore';
 import type { UnifiedAttentionView } from '../use-unified-attention';
+import { readConfirmedApprovalTerminal } from './approval-confirmation-read';
 import { type ApprovalSessions, createApprovalSessions } from './approval-sessions';
 
 /**
@@ -22,6 +23,8 @@ export function useApprovalSessions(view: UnifiedAttentionView): ApprovalSession
       refetch: () => viewRef.current.refetch(),
       refreshStore: () => useApprovalHubStore.getState().fetchPending(),
       storeItems: () => useApprovalHubStore.getState().items,
+      storeAvailable: () =>
+        useApprovalHubStore.getState().pendingReadAvailable && !useApprovalHubStore.getState().isLoading,
       attempts: () => useApprovalHubStore.getState().decisionAttempts,
       latestRead: () => {
         const current = viewRef.current;
@@ -32,6 +35,7 @@ export function useApprovalSessions(view: UnifiedAttentionView): ApprovalSession
         return { result: current.result, generation: current.resultGeneration };
       },
       now: () => Date.now(),
+      confirmTerminal: readConfirmedApprovalTerminal,
     }),
   );
 

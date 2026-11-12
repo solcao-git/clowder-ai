@@ -25,11 +25,10 @@
  *   3. JobEventConsumer parses jsonl per-line with try/catch (delegated)
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { type CatId, createCatId } from '@cat-cafe/shared';
-import { resolveCatCafeNodeCommand } from '../../../../../config/capabilities/mcp-constants.js';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
 import {
@@ -44,6 +43,7 @@ import { CAT_CLI_PROCESS_CONTEXT, CLI_PROCESS_CONTEXT_ENV } from '../../../../..
 import { CLI_PROCESS_OWNER_ENV } from '../../../../../utils/cli-process-ownership.js';
 import { resolveCliCommandOrBare } from '../../../../../utils/cli-resolve.js';
 import { buildChildEnv } from '../../../../../utils/cli-spawn.js';
+import { excerptSanitizedStderr } from '../../../../../utils/sanitize-cli-stderr.js';
 import type {
   AgentMessage,
   AgentService,
@@ -65,8 +65,10 @@ import {
   resolveDefaultClaudeMcpServerPath,
   SUBSCRIPTION_MODE_DENY_KEYS,
 } from './ClaudeAgentService.js';
+import { resolveClaudeMcpConfig } from './claude-mcp-config.js';
 import { JobEventConsumer, type JobState } from './JobEventConsumer.js';
 import { compileL0ViaSubprocess } from './l0-compiler.js';
+import { writeInvocationMcpConfigFile } from './session-credential-file.js';
 import { TranscriptTailer } from './TranscriptTailer.js';
 
 const SHORT_ID_PATTERN = /backgrounded\s*·\s*([a-f0-9]{8})/;
@@ -114,11 +116,6 @@ export interface ClaudeBgCarrierServiceOptions {
   jobsDir?: string;
   /** Test seam — invoke() poll interval (ms). Default 500. */
   pollMs?: number;
-  /** Test seam — invoke() terminal-wait timeout (ms). Default 30 min.
-   *  F198 Phase D Bug #2 fix: exposed so terminal-detection tests can
-   *  assert fast-fail instead of hanging the full 30-minute production
-   *  ceiling. Production callers leave undefined. */
-  timeoutMs?: number;
   /** Absolute path to MCP server entry (dist/index.js) for --mcp-config.
    *  Resolved from env CAT_CAFE_MCP_SERVER_PATH or repo layout heuristics
    *  via `resolveDefaultClaudeMcpServerPath` when undefined.
@@ -166,7 +163,6 @@ export class ClaudeBgCarrierService implements AgentService {
   private readonly spawnFn: typeof spawn;
   private readonly jobsDir?: string;
   private readonly pollMs: number;
-  private readonly timeoutMs: number;
   private readonly mcpServerPath: string | undefined;
   private readonly claudeCommand: string;
   private readonly ownerDataDir: string | undefined;
@@ -174,7 +170,6 @@ export class ClaudeBgCarrierService implements AgentService {
   private readonly jobOwnershipEnabled: boolean;
   /** Windows: cached MCP config file path (created once per instance,
    *  reused across invocations to avoid temp file spam). */
-  private mcpConfigFilePath: string | undefined;
   /** F203 Phase C: compiles per-cat L0 → file for --system-prompt-file. */
   private readonly l0CompilerFn: typeof compileL0ViaSubprocess;
 
@@ -185,7 +180,6 @@ export class ClaudeBgCarrierService implements AgentService {
     this.l0CompilerFn = options?.l0CompilerFn ?? compileL0ViaSubprocess;
     this.jobsDir = options?.jobsDir;
     this.pollMs = options?.pollMs ?? 500;
-    this.timeoutMs = options?.timeoutMs ?? 30 * 60_000;
     this.claudeCommand = options?.claudeCommand ?? resolveCliCommandOrBare('claude');
     this.ownerDataDir = options?.ownerDataDir;
     this.ownerKillGraceMs = options?.ownerKillGraceMs ?? 3_000;
@@ -315,8 +309,18 @@ export class ClaudeBgCarrierService implements AgentService {
    * reject instead of hanging.
    */
   async startJob(prompt: string, options?: AgentServiceOptions): Promise<StartJobResult> {
+    // Native 2.1.296 retains daemon-start auth, ignoring later dispatch credentials.
+    if (options?.claudeTokenAccount) throw new Error('claude_token_carrier_unsupported');
     const readOnly = options?.toolExecutionPolicy?.mode === 'read_only';
     const l0Path = await this.compileL0ToTempFile(options?.callbackEnv?.CAT_CAFE_USER_ID);
+    const mcpResolution =
+      !readOnly && options?.callbackEnv && this.mcpServerPath
+        ? await resolveClaudeMcpConfig({
+            callbackEnv: options.callbackEnv,
+            workingDirectory: options.workingDirectory,
+            mcpServerPath: this.mcpServerPath,
+          })
+        : undefined;
     return new Promise<StartJobResult>((resolve, reject) => {
       // Critical: even with --bg, the child inherits parent env unless we
       // explicitly strip CLAUDE_CODE_ENTRYPOINT. Otherwise transcript entrypoint
@@ -335,7 +339,9 @@ export class ClaudeBgCarrierService implements AgentService {
         [ANTHROPIC_PROFILE_MODE_KEY]: 'subscription',
         ...(options?.callbackEnv ?? {}),
       };
-      const envOverrides = buildClaudeEnvOverrides(callbackEnvWithMode);
+      const envOverrides = buildClaudeEnvOverrides(callbackEnvWithMode, {
+        contextNativeWindowTokens: options?.contextNativeWindowTokens,
+      });
       if (options?.accountEnv) {
         for (const [k, v] of Object.entries(options.accountEnv)) {
           envOverrides[k] = v;
@@ -372,7 +378,7 @@ export class ClaudeBgCarrierService implements AgentService {
       // before detaching worker daemon). Remove prompt positional from argv;
       // stream content via stdin (set up below).
       const args = useEnvModelOverride ? ['--bg'] : ['--bg', '--model', effectiveModel];
-      args.push('--effort', effortLevel);
+      if (effortLevel) args.push('--effort', effortLevel);
       // F203 Phase C: native system role from compiled L0 file (above).
       args.push('--system-prompt-file', l0Path);
 
@@ -419,28 +425,10 @@ export class ClaudeBgCarrierService implements AgentService {
       // Windows: claude CLI treats inline JSON as a file path → write JSON
       // to a temp file. POSIX: pass JSON inline (matches ClaudeAgentService).
       if (!readOnly && options?.callbackEnv && this.mcpServerPath) {
-        const IS_WINDOWS = process.platform === 'win32';
-        if (IS_WINDOWS) {
-          if (!this.mcpConfigFilePath || !existsSync(this.mcpConfigFilePath)) {
-            const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-bg-mcp-'));
-            this.mcpConfigFilePath = join(dir, 'mcp-config.json');
-            writeFileSync(
-              this.mcpConfigFilePath,
-              JSON.stringify({
-                mcpServers: { 'cat-cafe': { command: resolveCatCafeNodeCommand(), args: [this.mcpServerPath] } },
-              }),
-              'utf-8',
-            );
-          }
-          args.push('--mcp-config', this.mcpConfigFilePath);
-        } else {
-          args.push(
-            '--mcp-config',
-            JSON.stringify({
-              mcpServers: { 'cat-cafe': { command: resolveCatCafeNodeCommand(), args: [this.mcpServerPath] } },
-            }),
-          );
-        }
+        args.push(
+          '--mcp-config',
+          writeInvocationMcpConfigFile({ mcpServers: mcpResolution?.servers ?? {} }, options.callbackEnv),
+        );
         // F198 Step-4 (2026-05-14, alpha-evidence): daemon `--bg` discovers
         // cwd `.mcp.json` walking up the tree. WITHOUT this flag, claude
         // would LOAD discovered servers ALONGSIDE our injected cat-cafe MCP
@@ -502,7 +490,7 @@ export class ClaudeBgCarrierService implements AgentService {
             carrier: 'bg_daemon',
             ...(effectiveModel ? { model: effectiveModel } : {}),
             protocol: 'job_jsonl',
-            reasoningEffort: effortLevel,
+            ...(effortLevel ? { reasoningEffort: effortLevel } : {}),
             ...(readOnly ? { toolExecutionPolicy: 'read_only' as const } : {}),
           }),
           tools: Object.freeze({
@@ -564,7 +552,8 @@ export class ClaudeBgCarrierService implements AgentService {
           if (code !== 0) {
             // A dispatcher may have persisted a job before exiting nonzero. No
             // short id means no safe stop target, so retain the pending record.
-            return finish(new CarrierError(`claude --bg exited code=${code}: ${stderr.slice(0, 300)}`));
+            const excerpt = excerptSanitizedStderr(stderr, { edge: 'head', maxLength: 300 });
+            return finish(new CarrierError(`claude --bg exited code=${code}: ${excerpt}`));
           }
           const match = SHORT_ID_PATTERN.exec(stdout);
           if (!match) {
@@ -638,12 +627,9 @@ export class ClaudeBgCarrierService implements AgentService {
     // — otherwise cancellation from invoke-single-cat can't stop our long
     // poll, leaving daemon jobs running and burning resources.
     //
-    // codex review (PR #1666 round 5) P1.2: on abort / timeout, issue a
+    // codex review (PR #1666 round 5) P1.2: on abort, issue a
     // best-effort `claude stop <shortId>` so the detached --bg session
     // stops consuming quota instead of leaking until natural completion.
-    const timeoutMs = this.timeoutMs;
-    const deadline = Date.now() + timeoutMs;
-
     let tailer: TranscriptTailer | undefined;
     // F198 Phase C (AC-C2): track last emitted detail to deduplicate status messages.
     // Only emit a new 'status' AgentMessage when state.detail actually changes.
@@ -667,6 +653,7 @@ export class ClaudeBgCarrierService implements AgentService {
     // (multi-text-block last turns where output.result is the concatenation)
     // get a duplicate text rather than silent loss — acceptable tradeoff.
     let lastAssistantText = '';
+    const textBoundaryState = {};
     const yieldFromTranscript = function* (this: ClaudeBgCarrierService, entries: unknown[]): Generator<AgentMessage> {
       for (const raw of entries) {
         if (typeof raw === 'object' && raw !== null) {
@@ -691,12 +678,12 @@ export class ClaudeBgCarrierService implements AgentService {
           }
         }
       }
-      for (const msg of transcriptEntriesToAgentMessages(entries, { catId: this.catId })) {
+      for (const msg of transcriptEntriesToAgentMessages(entries, { catId: this.catId, textBoundaryState })) {
         yield msg;
       }
     }.bind(this);
 
-    while (Date.now() < deadline) {
+    while (true) {
       if (options?.signal?.aborted) {
         this.bestEffortStop(shortId, owner);
         throw new Error(`ClaudeBgCarrierService.invoke: aborted for ${shortId}`);
@@ -887,9 +874,5 @@ export class ClaudeBgCarrierService implements AgentService {
 
       await new Promise((resolve) => setTimeout(resolve, this.pollMs));
     }
-
-    // Timeout
-    this.bestEffortStop(shortId, owner);
-    throw new Error(`ClaudeBgCarrierService.invoke: timeout ${timeoutMs}ms for ${shortId}`);
   }
 }

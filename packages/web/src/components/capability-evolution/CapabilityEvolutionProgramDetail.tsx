@@ -2,12 +2,14 @@
 
 import { type EvolutionResolvedAssetReviewV1, type ExactAssetVersionRefV1, refIdentity } from '@cat-cafe/shared';
 import type { ReactNode } from 'react';
+import { useShellPresentation } from '@/components/shell/shell-presentation';
+import { EvolutionPhaseGaps } from './CapabilityEvolutionHomeV2';
 import {
   type EvolutionProgramPresentationProjection,
   evolutionProgramPresentation,
   productStatus,
 } from './capability-evolution-presentation';
-import { EvolutionJourney, journeyMoment } from './EvolutionJourney';
+import { EvolutionJourney, journeyMoment, MOMENTS } from './EvolutionJourney';
 import { EvolutionOwnerEvidence } from './EvolutionOwnerEvidence';
 import { RawDetails } from './EvolutionProgramContext';
 import { EvolutionProgramName } from './EvolutionProgramName';
@@ -23,43 +25,56 @@ import {
 import { projectAssetVersions, selectedAssetVersion } from './evolution-version-view';
 import { EvolutionMomentContext } from './journey/EvolutionMomentContext';
 import { EvolutionProgressAction } from './journey/EvolutionProgressAction';
+import { EvolutionPreparationOverview } from './preparation/EvolutionPreparationOverview';
 import { useEvolutionOwnerReadingDefault } from './use-evolution-owner-reading-default';
 
 function CurrentAdoption({
   catalog,
-  programRefs,
+  versions,
   loading,
 }: {
   catalog?: EvolutionResolvedAssetReviewV1;
-  programRefs: EvolutionProgramPresentationProjection['program']['currentAssetVersionRefs'];
+  versions: ReturnType<typeof projectAssetVersions>;
   loading: boolean;
 }) {
-  const current = catalog?.currentVersionRefs ?? [];
+  const adopted = versions.filter((version) => version.adopted);
+  const sourceCurrent = versions.filter((version) => version.sourceCurrent);
+  const title = (ref: ExactAssetVersionRefV1) =>
+    catalog?.versions.find((version) => refIdentity(version.versionRef) === refIdentity(ref))?.title;
   return (
-    <div>
-      <h3 className="text-xs font-semibold text-cafe-secondary">当前采用</h3>
-      {catalog ? (
-        current.length ? (
-          current.map((ref) => {
-            const title = catalog.versions.find(
-              (version) => refIdentity(version.versionRef) === refIdentity(ref),
-            )?.title;
-            return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-xs font-semibold text-cafe-secondary">当前采用</h3>
+        {adopted.length ? (
+          adopted.map(({ ref }) => (
+            <div key={refIdentity(ref)} className="mt-2">
+              <p className="break-words text-sm font-semibold text-cafe">{title(ref) ?? ref.assetId}</p>
+              <EvolutionSource label="版本标识" source={ref} />
+            </div>
+          ))
+        ) : (
+          <p className="evolution-empty mt-2">本项目尚无采用记录。</p>
+        )}
+      </div>
+      <div>
+        <h3 className="text-xs font-semibold text-cafe-secondary">来源当前版本</h3>
+        {catalog ? (
+          sourceCurrent.length ? (
+            sourceCurrent.map(({ ref }) => (
               <div key={refIdentity(ref)} className="mt-2">
-                <p className="break-words text-sm font-semibold text-cafe">{title ?? ref.assetId}</p>
+                <p className="break-words text-sm font-semibold text-cafe">{title(ref) ?? ref.assetId}</p>
                 <EvolutionSource label="版本标识" source={ref} />
               </div>
-            );
-          })
+            ))
+          ) : (
+            <p className="evolution-empty mt-2">来源尚未登记当前版本。</p>
+          )
         ) : (
-          <p className="evolution-empty mt-2">资产来源尚无采用记录。</p>
-        )
-      ) : (
-        <p className="evolution-empty mt-2">{loading ? '正在读取资产来源…' : '当前采用尚待资产来源确认。'}</p>
-      )}
-      {!catalog &&
-        programRefs.map((ref) => <EvolutionSource key={refIdentity(ref)} label="项目最近记录" source={ref} />)}
-      {catalog && <EvolutionSource label="采用来源" source={catalog.currentProofRef} />}
+          <p className="evolution-empty mt-2">{loading ? '正在读取资产来源…' : '来源当前版本尚待确认。'}</p>
+        )}
+        {catalog && <EvolutionSource label="来源当前版本证明" source={catalog.currentProofRef} />}
+        <p className="evolution-empty mt-2">来源当前版本不等于本项目已采用。</p>
+      </div>
     </div>
   );
 }
@@ -68,6 +83,26 @@ function ownerReadStatus(asset: ReturnType<typeof useEvolutionAssetReview>) {
   if (asset.error || asset.review?.blockers.length) return 'unavailable' as const;
   if (asset.loading) return 'loading' as const;
   return asset.catalog ? ('resolved' as const) : ('unavailable' as const);
+}
+
+function EvolutionEvaluationStatus({
+  projection,
+  whileReadingHistory = false,
+}: {
+  projection: EvolutionProgramPresentationProjection;
+  whileReadingHistory?: boolean;
+}) {
+  return (
+    <aside className="evolution-v2-phase-note" aria-label={whileReadingHistory ? '项目效果评估状态' : undefined}>
+      <strong>
+        {whileReadingHistory ? '项目效果评估仍待补证' : `${MOMENTS[journeyMoment(projection)]}这一阶段还缺`}
+      </strong>
+      <p>
+        <EvolutionPhaseGaps projection={projection} />
+      </p>
+      {whileReadingHistory && <p>这些缺口用于判断改进是否有效，不是查看已发布探索记录的前置条件。</p>}
+    </aside>
+  );
 }
 
 export function CapabilityEvolutionProgramDetail({
@@ -81,6 +116,7 @@ export function CapabilityEvolutionProgramDetail({
   onOpenProgram: (programId: string, view?: EvolutionReadingView) => void;
   controls?: ReactNode;
 }) {
+  const v2 = useShellPresentation() === 'v2';
   const id = projection.program.programId;
   const reading = useEvolutionReading((state) => state.programs[id] ?? DEFAULT_READING);
   const updateReading = useEvolutionReading((state) => state.update);
@@ -116,38 +152,70 @@ export function CapabilityEvolutionProgramDetail({
         {controls}
       </div>
       <p className="evolution-eyebrow">能力进化 · 第 {projection.program.cycle} 轮</p>
-      <h2 className="evolution-title mt-2">{target.title}</h2>
+      <h2 className="evolution-title mt-2">{v2 ? (projection.program.displayName ?? '尚未命名') : target.title}</h2>
       <EvolutionProgramOrigin projection={projection} />
       <EvolutionProgramName projection={projection} />
       <EvolutionJourney projection={projection} />
-      <EvolutionProgressAction projection={projection} compact={moment === 2} />
-      <div className="evolution-focus">
+      <EvolutionProgressAction projection={projection} compact={v2 || moment === 2} />
+      {v2 && (
+        <>
+          {moment !== 2 && <EvolutionEvaluationStatus projection={projection} />}
+          <div role="tablist" aria-label="项目阅读内容" className="evolution-tabs">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={reading.view === 'judgment'}
+              onClick={() => updateReading(id, { view: 'judgment' })}
+            >
+              本轮判断
+            </button>
+            <button type="button" role="tab" aria-selected={reading.view === 'history'} onClick={() => open('history')}>
+              更改历史
+            </button>
+          </div>
+        </>
+      )}
+      <div className={v2 ? 'evolution-v2-moment' : 'evolution-focus'}>
         <p className="text-xs font-semibold text-cafe-secondary">{status.label}</p>
-        <EvolutionMomentContext
-          projection={projection}
-          moment={moment}
-          onSelectCandidate={select}
-          onOpenPreparation={openPreparation}
-        >
-          {moment === 2 && change && <EvolutionSource label="候选来源" source={change.proposalRef} />}
-          {moment >= 2 && (
-            <EvolutionActualUse
-              selected={asset.review?.status === 'resolved' ? asset.review.selected : undefined}
-              readStatus={ownerReadStatus(asset)}
-            />
-          )}
-        </EvolutionMomentContext>
+        {v2 && moment === 1 ? (
+          <EvolutionPreparationOverview
+            projection={projection}
+            onOpen={(section) => {
+              updateReading(id, { preparationSection: section });
+              open('judgment');
+            }}
+          />
+        ) : (
+          <EvolutionMomentContext
+            projection={projection}
+            moment={moment}
+            onSelectCandidate={select}
+            onOpenPreparation={openPreparation}
+          >
+            {moment === 2 && change && <EvolutionSource label="候选来源" source={change.proposalRef} />}
+            {moment >= 2 && (
+              <EvolutionActualUse
+                selected={asset.review?.status === 'resolved' ? asset.review.selected : undefined}
+                readStatus={ownerReadStatus(asset)}
+              />
+            )}
+          </EvolutionMomentContext>
+        )}
         <button type="button" className="evolution-link mt-5" onClick={() => open('judgment')}>
-          展开阅读 →
+          {v2 ? '在主区展开阅读' : '展开阅读 →'}
         </button>
       </div>
-      <EvolutionOwnerEvidence projection={projection} />
+      {v2 && moment === 2 && <EvolutionEvaluationStatus projection={projection} whileReadingHistory />}
+      {v2 ? (
+        <details className="evolution-preparation-related">
+          <summary>目标与评估来源</summary>
+          <EvolutionOwnerEvidence projection={projection} />
+        </details>
+      ) : (
+        <EvolutionOwnerEvidence projection={projection} />
+      )}
       <section className="mt-6 space-y-5" aria-label="采用与候选">
-        <CurrentAdoption
-          catalog={asset.catalog}
-          programRefs={projection.program.currentAssetVersionRefs}
-          loading={asset.loading}
-        />
+        <CurrentAdoption catalog={asset.catalog} versions={versions} loading={asset.loading} />
         <div>
           <h3 className="text-xs font-semibold text-cafe-secondary">本轮候选</h3>
           <p className="evolution-empty mt-2">

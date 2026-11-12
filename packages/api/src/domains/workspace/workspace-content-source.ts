@@ -1,10 +1,12 @@
 import { constants } from 'node:fs';
 import { type FileHandle, open, realpath } from 'node:fs/promises';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { probeImmutableMedia } from '../video-studio/content-owner/published-media-probe.js';
-import { isRenderedMarkdownPath, resolveWorkspaceRenderedQuote } from './workspace-content-rendered-quote.js';
+import { type RenderedQuoteBatchInput, resolveAuthorizedRenderedQuotes } from './workspace-content-rendered-quote.js';
 import {
   MAX_WORKSPACE_COLLABORATION_BYTES,
+  MAX_WORKSPACE_VIDEO_BYTES,
   type OpenWorkspaceMediaV1,
   type WorkspaceContentDescriptionV1,
   type WorkspaceContentLocatorV1,
@@ -22,6 +24,7 @@ import {
   digestWorkspaceFile,
   hasSameWorkspaceFileState,
   openedWorkspaceContentMatchesCanonicalLocator,
+  requireWorkspaceContentBytes,
   supportedWorkspaceMediaMime,
   validateWorkspaceContentLocator,
   validateWorkspaceQuote,
@@ -31,6 +34,7 @@ import {
 import { resolveWorkspaceTextQuote, resolveWorkspaceTextQuoteBatch } from './workspace-content-text-resolver.js';
 import { guessMime } from './workspace-file-read.js';
 import { WorkspaceSecurityError } from './workspace-security.js';
+import { freezeWorkspaceVideo } from './workspace-video-snapshot.js';
 
 export {
   MAX_WORKSPACE_COLLABORATION_BYTES,
@@ -76,6 +80,39 @@ export class WorkspaceContentSourceService {
     },
   ) {}
 
+  /** Navigation needs a readable canonical file, not a revision-bound collaboration snapshot. */
+  async resolveFileLocator(input: {
+    readonly principal: WorkspaceContentPrincipalV1;
+    readonly locator: WorkspaceContentLocatorV1;
+  }): Promise<WorkspaceContentLocatorV1> {
+    this.assertPrincipal(input.principal);
+    const resolved = await this.resolveLocator(input.locator);
+    const handle = await open(resolved.path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(
+      (error: NodeJS.ErrnoException) => {
+        throw new WorkspaceContentSourceError(error.code === 'ENOENT' ? 'not_found' : 'access_denied');
+      },
+    );
+    try {
+      if (
+        !(await handle.stat()).isFile() ||
+        !(await openedWorkspaceContentMatchesCanonicalLocator(resolved.root, resolved.path, resolved.locator, handle))
+      )
+        throw new WorkspaceContentSourceError('access_denied');
+      return resolved.locator;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** Owner-issued current file identity for a read projection; no registration or write authority. */
+  async describeFileReference(input: {
+    readonly principal: WorkspaceContentPrincipalV1;
+    readonly locator: WorkspaceContentLocatorV1;
+  }) {
+    const read = await this.readStable(input, false);
+    return { ...this.describeRead(read), absolutePath: join(read.root, read.locator.path) };
+  }
+
   async describe(input: {
     readonly principal: WorkspaceContentPrincipalV1;
     readonly locator: WorkspaceContentLocatorV1;
@@ -119,6 +156,16 @@ export class WorkspaceContentSourceService {
     readonly principal: WorkspaceContentPrincipalV1;
     readonly locator: WorkspaceContentLocatorV1;
   }): Promise<WorkspaceMediaDescriptionV1> {
+    if (guessMime(input.locator.path) === 'video/mp4') {
+      const source = await this.describe(input);
+      const {
+        stream,
+        localPath: _path,
+        ...description
+      } = await this.openMedia({ ...input, expectedRevision: source.revision });
+      stream.destroy();
+      return description;
+    }
     const read = await this.readStable(input, true);
     const description = this.describeRead(read);
     const mime = supportedWorkspaceMediaMime(description);
@@ -154,9 +201,43 @@ export class WorkspaceContentSourceService {
       if (!stillCanonical) {
         throw new WorkspaceContentSourceError('revision_changed');
       }
-      const maximum = this.options.maxBytes ?? MAX_WORKSPACE_COLLABORATION_BYTES;
+      const video = guessMime(resolved.locator.path) === 'video/mp4';
+      const maximum = this.options.maxBytes ?? (video ? MAX_WORKSPACE_VIDEO_BYTES : MAX_WORKSPACE_COLLABORATION_BYTES);
       if (!before.isFile()) throw new WorkspaceContentSourceError('access_denied');
       if (before.size < 0 || before.size > maximum) throw new WorkspaceContentSourceError('too_large');
+      if (video) {
+        const snapshot = await freezeWorkspaceVideo({
+          handle,
+          byteLength: before.size,
+          expectedRevision: input.expectedRevision,
+          assertSourceCurrent: async () => {
+            if (
+              !hasSameWorkspaceFileState(before, await handle.stat()) ||
+              !(await openedWorkspaceContentMatchesCanonicalLocator(
+                resolved.root,
+                resolved.path,
+                resolved.locator,
+                handle,
+              ))
+            )
+              throw new WorkspaceContentSourceError('revision_changed');
+          },
+        });
+        return {
+          ...this.describeRead({
+            root: resolved.root,
+            locator: resolved.locator,
+            mime: 'video/mp4',
+            byteLength: snapshot.byteLength,
+            digest: snapshot.revision,
+          }),
+          kind: 'media',
+          mime: 'video/mp4',
+          media: snapshot.media,
+          stream: snapshot.stream,
+          localPath: resolved.path,
+        };
+      }
       const checked = await digestWorkspaceFile(handle, before.size, true);
       const after = await handle.stat();
       if (!hasSameWorkspaceFileState(before, after) || checked.byteLength !== before.size)
@@ -174,7 +255,14 @@ export class WorkspaceContentSourceService {
       const media = await probeImmutableMedia(snapshot, mime).catch(() => {
         throw new WorkspaceContentSourceError('unsupported_media');
       });
-      return { ...description, kind: 'media', mime, media, stream: Readable.from([snapshot]) };
+      return {
+        ...description,
+        kind: 'media',
+        mime,
+        media,
+        stream: Readable.from([snapshot]),
+        localPath: resolved.path,
+      };
     } finally {
       await handle.close();
     }
@@ -231,10 +319,13 @@ export class WorkspaceContentSourceService {
   async resolveRenderedTextSelection(
     input: Parameters<WorkspaceContentSourceService['readText']>[0] & { readonly quote: string },
   ): Promise<WorkspaceTextQuoteResolutionV1 & { readonly sourceRevision: `sha256:${string}` }> {
-    const { text, revision } = await this.readText(input);
-    const markdown = isRenderedMarkdownPath(input.locator.path);
-    const quote = validateWorkspaceQuote(input.quote);
-    return { ...resolveWorkspaceRenderedQuote({ text, quote, markdown }), sourceRevision: revision };
+    const { source, resolutions } = await this.resolveRenderedTextSelections({ ...input, quotes: [input.quote] });
+    return { ...resolutions[0], sourceRevision: source.revision };
+  }
+
+  /** Batch references share one authorized stable read and one rendered source map. */
+  async resolveRenderedTextSelections(input: RenderedQuoteBatchInput) {
+    return resolveAuthorizedRenderedQuotes(input, this.readText.bind(this));
   }
 
   private async readStable(
@@ -269,7 +360,8 @@ export class WorkspaceContentSourceService {
       if (!stillCanonical) {
         throw new WorkspaceContentSourceError('revision_changed');
       }
-      const maximum = this.options.maxBytes ?? MAX_WORKSPACE_COLLABORATION_BYTES;
+      const video = !collectBytes && guessMime(resolved.locator.path) === 'video/mp4';
+      const maximum = this.options.maxBytes ?? (video ? MAX_WORKSPACE_VIDEO_BYTES : MAX_WORKSPACE_COLLABORATION_BYTES);
       if (!before.isFile()) throw new WorkspaceContentSourceError('access_denied');
       if (before.size < 0 || before.size > maximum) throw new WorkspaceContentSourceError('too_large');
       const result = await digestWorkspaceFile(handle, before.size, collectBytes);
@@ -336,9 +428,4 @@ export class WorkspaceContentSourceService {
       throw new WorkspaceContentSourceError('access_denied');
     }
   }
-}
-
-function requireWorkspaceContentBytes(bytes: Buffer | undefined): Buffer {
-  if (!bytes) throw new WorkspaceContentSourceError('revision_changed');
-  return bytes;
 }

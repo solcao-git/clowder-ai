@@ -19,10 +19,12 @@ import {
   type CanonicalActionTerminalPredicate,
   canonicalizeActionTerminalPredicate,
 } from './ActionTerminalPredicateCatalog.js';
+import { requireAdmissionFreshness, resolveAdmissionFreshness } from './action-admission-freshness.js';
 import {
   ActionSuccessorStandingError,
   type ActionSuccessorStandingSnapshot,
   assertActionSuccessorStanding,
+  assertDelegateLineageSuccessorStanding,
 } from './action-successor-standing.js';
 import {
   type ActionSuccessorLease,
@@ -49,7 +51,9 @@ export {
   type MatchedStandingAuthority,
 } from './action-successor-standing.js';
 
-type ActionSuccessorStandingInput = Pick<ActionSuccessorAdmissionInput, 'action'> & ActionSuccessorStandingSnapshot;
+type ActionSuccessorStandingInput = Pick<ActionSuccessorAdmissionInput, 'action'> &
+  ActionSuccessorStandingSnapshot &
+  Partial<Pick<ActionSuccessorAdmissionInput, 'actorCatId' | 'sourceThreadId'>>;
 
 export class ActionSuccessorAdmissionService {
   constructor(
@@ -102,7 +106,7 @@ export class ActionSuccessorAdmissionService {
     input: ActionSuccessorStandingInput,
   ): Promise<Extract<ActionFreshnessResolution, { status: 'verified' }>> {
     const terminalPredicate = this.requireTerminalPredicate(input);
-    const freshness = await this.requireVerifiedGenerationFreshness(terminalPredicate);
+    const freshness = await requireAdmissionFreshness(this.truthResolver, terminalPredicate, input);
     assertActionSuccessorStanding(input, freshness);
     return freshness;
   }
@@ -127,7 +131,7 @@ export class ActionSuccessorAdmissionService {
     const issuerStandingEvidenceRef = this.resolveIssuerStanding(input, claimOrigin);
 
     const terminalPredicate = this.requireTerminalPredicate(input);
-    const freshness = await this.requireVerifiedGenerationFreshness(terminalPredicate);
+    const freshness = await requireAdmissionFreshness(this.truthResolver, terminalPredicate, input);
     const standingAuthority = assertActionSuccessorStanding(input, freshness);
     const claimInput: ClaimActionSuccessorInput = {
       leaseId: randomUUID(),
@@ -196,7 +200,7 @@ export class ActionSuccessorAdmissionService {
       if (lease.terminalPredicate.identityKey !== terminalPredicate.identityKey) return null;
       if (lease.terminalPredicate.freshnessKey === terminalPredicate.freshnessKey) return null;
     }
-    const freshness = await this.resolveGenerationFreshness(terminalPredicate);
+    const freshness = await resolveAdmissionFreshness(this.truthResolver, terminalPredicate, input);
     if (freshness.status !== 'verified') return null;
     // F167: re-check standing to capture delegate authority evidence for the new lease.
     const standingAuthority = assertActionSuccessorStanding(input, freshness);
@@ -233,10 +237,13 @@ export class ActionSuccessorAdmissionService {
     return admitActionSuccessorReplacement(identityKey, input, {
       leaseStore: this.leaseStore,
       resolveIssuerStanding: (request, claimOrigin) => this.resolveIssuerStanding(request, claimOrigin),
-      resolveVerifiedPredicate: async (request) => {
+      resolveVerifiedPredicate: async (request, current, delegateLineageReentry) => {
         const terminalPredicate = this.requireTerminalPredicate(request);
-        const freshness = await this.requireVerifiedGenerationFreshness(terminalPredicate);
-        const standingAuthority = assertActionSuccessorStanding(request, freshness);
+        const freshness = await requireAdmissionFreshness(this.truthResolver, terminalPredicate, request);
+        const standingAuthority =
+          delegateLineageReentry && terminalPredicate.kind === 'task_done'
+            ? assertDelegateLineageSuccessorStanding(current, request, freshness)
+            : assertActionSuccessorStanding(request, freshness);
         return {
           terminalPredicate,
           freshnessEvidenceRef: freshness.evidenceRef,
@@ -259,30 +266,6 @@ export class ActionSuccessorAdmissionService {
       subjectRef: input.action.subjectRef,
       predicate: input.action.terminalPredicate,
     });
-  }
-
-  private async resolveGenerationFreshness(
-    terminalPredicate: CanonicalActionTerminalPredicate,
-  ): Promise<ActionFreshnessResolution> {
-    const freshness = await this.truthResolver.resolveFreshness(terminalPredicate);
-    if (freshness.status === 'verified' && freshness.freshnessKey !== terminalPredicate.freshnessKey) {
-      return {
-        status: 'mismatch',
-        reason: 'verified freshness identity does not match the canonical predicate',
-        evidenceRef: freshness.evidenceRef,
-      };
-    }
-    return freshness;
-  }
-
-  private async requireVerifiedGenerationFreshness(
-    terminalPredicate: CanonicalActionTerminalPredicate,
-  ): Promise<Extract<ActionFreshnessResolution, { status: 'verified' }>> {
-    const freshness = await this.resolveGenerationFreshness(terminalPredicate);
-    if (freshness.status !== 'verified') {
-      throw new ActionSuccessorStandingError(freshness.status, freshness.reason);
-    }
-    return freshness;
   }
 
   private async returnToPredecessor(

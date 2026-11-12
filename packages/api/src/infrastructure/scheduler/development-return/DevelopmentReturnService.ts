@@ -3,13 +3,13 @@ import {
   type DevelopmentReturnActionV1,
   type DevelopmentReturnRegistrationV1,
 } from '@cat-cafe/shared';
+import type { ActionSuccessorLeaseStore } from '../../../domains/ball-custody/ActionSuccessorLeaseStore.js';
 import type { PersistedQueueDeliveryPort } from '../../../domains/cats/services/agents/invocation/PersistedQueueDelivery.js';
 import type { OwnerAuthProvenance } from '../../../domains/cats/services/owner-auth-provenance.js';
 import type { DevelopmentWorkActor } from '../../../domains/cats/services/stores/ports/DevelopmentWorkTransition.js';
 import type { IMessageStore } from '../../../domains/cats/services/stores/ports/MessageStore.js';
 import { deriveGrowingSourceMessageRevision } from '../../../domains/cats/services/stores/ports/MessageStore.js';
 import type { IProposalStore } from '../../../domains/cats/services/stores/ports/ProposalStore.js';
-import { projectQueueReceipt } from '../../../domains/cats/services/stores/ports/queued-message-receipt.js';
 import type { ITaskStore } from '../../../domains/cats/services/stores/ports/TaskStoreContract.js';
 import type { IThreadStore } from '../../../domains/cats/services/stores/ports/ThreadStore.js';
 import type {
@@ -20,23 +20,34 @@ import type { DynamicTaskStore } from '../DynamicTaskStore.js';
 import type { TaskRunnerV2 } from '../TaskRunnerV2.js';
 import { createDevelopmentReturnTemplate } from '../templates/development-return.js';
 import type { ExecuteContext } from '../types.js';
-import { developmentReturnCurrentRevision, prepareDevelopmentReturn } from './DevelopmentReturnAuthority.js';
+import {
+  developmentReturnCurrentRevision,
+  prepareDevelopmentReturn,
+  resolveDevelopmentReturnFreshness,
+} from './DevelopmentReturnAuthority.js';
+import {
+  isAdmissibleDevelopmentReturnReport,
+  renderDevelopmentReturnWakeContentV1,
+} from './DevelopmentReturnReportSource.js';
 import { publishDevelopmentReturnRetirement } from './DevelopmentReturnRetirement.js';
-import { sameDevelopmentReturnSource } from './DevelopmentReturnSource.js';
+import { parseDevelopmentReturnActionLeaseRef, sameDevelopmentReturnSource } from './DevelopmentReturnSource.js';
 
 export interface DevelopmentReturnDeps {
   emit: (ownerUserId: string, event: string, data: unknown) => void;
   delivery: PersistedQueueDeliveryPort;
   definitions: DynamicTaskStore;
-  runner: Pick<TaskRunnerV2, 'registerDynamic' | 'getRegisteredTasks' | 'triggerNow' | 'rescheduleOnce'>;
+  runner: Pick<TaskRunnerV2, 'registerDynamic' | 'getRegisteredTasks' | 'triggerNow' | 'rescheduleOnce' | 'unregister'>;
   tasks: Pick<ITaskStore, 'get' | 'hasDevelopmentSource'>;
   threads: Pick<IThreadStore, 'get'>;
   proposals: Pick<IProposalStore, 'get'>;
   messages: Pick<IMessageStore, 'getById' | 'append'>;
   readReviewProvenance?: (query: RecordedReviewQuery) => Promise<RecordedReviewProof | null>;
+  /** Exact returned generation used by sequential same-child reporter recovery. */
+  actionSuccessors?: Pick<ActionSuccessorLeaseStore, 'get'>;
   now?: () => number;
 }
 type Registration = DevelopmentReturnRegistrationV1;
+type DeliveryFreshnessClaim = { kind: 'current'; revision: number } | { kind: 'terminal'; state: Registration | null };
 export class DevelopmentReturnService {
   readonly template = createDevelopmentReturnTemplate(this);
   constructor(readonly deps: DevelopmentReturnDeps) {}
@@ -53,7 +64,12 @@ export class DevelopmentReturnService {
     proof: OwnerAuthProvenance,
   ): Promise<Registration> {
     const now = this.now();
-    const { registration, reviewedSource } = await prepareDevelopmentReturn(this.deps, actor, input, now);
+    const { registration, returnStorage, predecessorSupersession } = await prepareDevelopmentReturn(
+      this.deps,
+      actor,
+      input,
+      now,
+    );
     const id = registration.registrationId;
     const old = this.read(id);
     if (old) {
@@ -77,8 +93,10 @@ export class DevelopmentReturnService {
       },
       proof,
       registration,
-      reviewedSource,
+      returnStorage,
+      predecessorSupersession,
     );
+    if (predecessorSupersession) this.deps.runner.unregister(predecessorSupersession.registrationId);
     this.ensureScheduled(id);
     return registration;
   }
@@ -127,17 +145,18 @@ export class DevelopmentReturnService {
       !state.reporterCatIds.includes(actor.catId)
     )
       throw new Error('Return registration is unavailable here');
-    const message = await this.deps.messages.getById(report.sourceMessageId);
     if (
-      !message ||
-      message.userId !== actor.userId ||
-      message.threadId !== actor.threadId ||
-      message.catId !== actor.catId ||
-      message.deletedAt ||
-      message._tombstone ||
-      message.source ||
-      message.timestamp < state.registeredAt
-    )
+      parseDevelopmentReturnActionLeaseRef(state.sourceActionRef) &&
+      (await developmentReturnCurrentRevision(this.deps, state)) === null
+    ) {
+      throw new Error('Return reporter authority is no longer current');
+    }
+    const predecessor = state.predecessorRegistrationId ? this.read(state.predecessorRegistrationId) : null;
+    const [message, predecessorWake] = await Promise.all([
+      this.deps.messages.getById(report.sourceMessageId),
+      predecessor?.wakeMessageId ? this.deps.messages.getById(predecessor.wakeMessageId) : null,
+    ]);
+    if (!isAdmissibleDevelopmentReturnReport(message, state, actor.catId, predecessor, predecessorWake))
       throw new Error('A current persisted terminal report from this execution is required');
     const publication = { ...report, sourceMessageRevision: deriveGrowingSourceMessageRevision(message) };
     if (state.report && JSON.stringify(state.report) !== JSON.stringify(publication))
@@ -177,19 +196,36 @@ export class DevelopmentReturnService {
     });
   }
 
+  private async claimDeliveryFreshness(id: string, state: Registration): Promise<DeliveryFreshnessClaim> {
+    const freshness = await resolveDevelopmentReturnFreshness(this.deps, state);
+    if (freshness.kind === 'current') return { kind: 'current', revision: freshness.revision };
+    if (freshness.kind === 'superseded') {
+      const next = {
+        ...state,
+        status: 'retired' as const,
+        reason: 'superseded' as const,
+      };
+      this.deps.definitions.replacePrivateExecutionReturn(id, state, next);
+      return { kind: 'terminal', state: null };
+    }
+    const next = {
+      ...state,
+      status: 'delivering' as const,
+      reason: 'owner_changed' as const,
+    };
+    return {
+      kind: 'terminal',
+      state: this.deps.definitions.replacePrivateExecutionReturn(id, state, next) ? next : null,
+    };
+  }
+
   private async claimDelivery(id: string): Promise<Registration | null> {
     let state = this.read(id);
     if (!state || state.status === 'retired' || state.status === 'delivered') return null;
     if (state.status === 'delivering' && state.reason === 'owner_changed') return state;
-    const currentRevision = await developmentReturnCurrentRevision(this.deps, state);
-    if (currentRevision === null) {
-      const next = {
-        ...state,
-        status: 'delivering' as const,
-        reason: 'owner_changed' as const,
-      };
-      return this.deps.definitions.replacePrivateExecutionReturn(id, state, next) ? next : null;
-    }
+    const freshness = await this.claimDeliveryFreshness(id, state);
+    if (freshness.kind === 'terminal') return freshness.state;
+    const currentRevision = freshness.revision;
     if (state.status !== 'delivering') {
       if (state.status === 'waiting' && this.now() < state.slaUntil) return null;
       const next = {
@@ -215,12 +251,7 @@ export class DevelopmentReturnService {
       this.deps.definitions.replacePrivateExecutionReturn(id, state, { ...state, status: 'retired' });
       return;
     }
-    const content =
-      `[开发责任续办] registration=${id}; signal=${state.reason}; ${state.taskRef} observedRevision=${state.observedRevision}; currentRevision=${state.deliveryRevision}（投递认领时；行动前重读）\n` +
-      (state.report
-        ? `执行现场已提交 ${state.report.outcome}；sourceMessage=${state.report.sourceMessageId}；evidence=${state.report.evidenceRefs.join(', ')}。\n`
-        : '回流预算到期：这只是一次当前事实复核，不代表成功，不重派执行或催促其他猫。\n') +
-      '由原 owner 先重读同一 Task、当前授权和产物，再执行确切 owner action 或注册有据的合法后继；报告/唤醒本身不算工作完成。';
+    const content = renderDevelopmentReturnWakeContentV1(state);
     ctx.signal.throwIfAborted();
     // Dispatch owns message admission, replay and terminal custody; the producer never mints a second wake.
     const result = await this.deps.delivery.deliver({
@@ -247,17 +278,14 @@ export class DevelopmentReturnService {
     if (result.state === 'unavailable' || result.state === 'conflict' || !result.message) {
       throw new Error('Original owner return has not been accepted by durable Dispatch');
     }
-    const custody = result.message.queueCustody;
-    const withdrawn = custody?.withdrawnByCatIds?.some((cat) => cat === state.ownerCatId);
-    const failed = custody?.failedByCatIds.some((cat) => cat === state.ownerCatId);
-    const final =
-      withdrawn || failed
-        ? {
-            ...state,
-            status: 'retired' as const,
-            reason: withdrawn ? ('cancelled' as const) : ('delivery_failed' as const),
-          }
-        : { ...state, status: 'delivered' as const };
+    const withdrawn = result.message.deliveryStatus === 'canceled';
+    const final = withdrawn
+      ? {
+          ...state,
+          status: 'retired' as const,
+          reason: 'cancelled' as const,
+        }
+      : { ...state, status: 'delivered' as const };
     if (
       this.deps.definitions.replacePrivateExecutionReturn(id, state, { ...final, wakeMessageId: result.message.id })
     ) {
@@ -268,13 +296,16 @@ export class DevelopmentReturnService {
         messages: [
           {
             id: message.id,
+            from: message.from,
+            lifecycle: message.lifecycle,
+            deliveryStatus: message.deliveryStatus,
             content: message.content,
             catId: message.catId,
             timestamp: message.timestamp,
             mentions: message.mentions,
             userId: message.userId,
             source: message.source,
-            extra: { ...message.extra, ...(custody ? { queueReceipt: projectQueueReceipt(custody) } : {}) },
+            extra: message.extra,
           },
         ],
       });

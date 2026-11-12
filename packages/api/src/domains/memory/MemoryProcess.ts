@@ -15,6 +15,8 @@ import {
   type ProcessError,
   type WalCheckpointResult,
 } from './memory-process-protocol.js';
+import { MemoryReadExecution, type MemoryReadSnapshot } from './memory-read-execution.js';
+import type { VectorRepackResult } from './repack-passage-vectors.js';
 
 function decodeError(error: ProcessError): Error {
   const details = error.details;
@@ -43,10 +45,17 @@ class MemoryProcess {
 
   run<T>(
     job: MemoryProcessJob,
-    options?: { signal?: AbortSignal; deadlineAt?: number; embedding?: IEmbeddingService },
+    options?: {
+      signal?: AbortSignal;
+      deadlineAt?: number;
+      embedding?: IEmbeddingService;
+      onReadSnapshot?: (snapshot: MemoryReadSnapshot) => void;
+    },
   ): Promise<T> {
     if (this.pending >= 64) return Promise.reject(new Error('Memory process queue is full'));
     this.pending++;
+    const execution = job.kind === 'message-search' ? new MemoryReadExecution(job.kind) : undefined;
+    const ownsNativeWrite = job.kind === 'checkpoint' || job.kind === 'vector-repack';
     return new Promise<T>((resolve, reject) => {
       const controller = new AbortController();
       let settled = false;
@@ -55,6 +64,14 @@ class MemoryProcess {
       const complete = (error?: unknown, value?: T) => {
         if (settled) return;
         settled = true;
+        execution?.annotate(error);
+        if (execution) {
+          try {
+            options?.onReadSnapshot?.(execution.snapshot(error === undefined ? 'fulfilled' : 'rejected'));
+          } catch {
+            /* An observer cannot replace completion. */
+          }
+        }
         if (timer) clearTimeout(timer);
         options?.signal?.removeEventListener('abort', abort);
         cleanupActive();
@@ -67,9 +84,9 @@ class MemoryProcess {
           // SIGKILL also interrupts native SQLite. Its open transaction rolls back.
           active.kill('SIGKILL');
           if (this.child === active) this.child = undefined;
-          // A checkpoint owns native I/O resources. Do not release its scope
+          // Native maintenance owns I/O resources. Do not release its scope
           // until the killed process has actually closed its SQLite handles.
-          if (job.kind === 'checkpoint') return;
+          if (ownsNativeWrite) return;
         }
         complete(reason);
       };
@@ -81,6 +98,7 @@ class MemoryProcess {
         .then(async () => {
           if (settled) return;
           const child = this.getChild();
+          execution?.dispatched(child.pid);
           active = child;
           child.ref();
           child.channel?.ref();
@@ -90,7 +108,7 @@ class MemoryProcess {
             const diagnostics = this.diagnostics.get(child)!;
             diagnostics.begin(id);
             const onError = (error: Error) => {
-              if (job.kind !== 'checkpoint') return complete(error);
+              if (!ownsNativeWrite) return complete(error);
               controller.abort(error);
               child.kill('SIGKILL');
               if (this.child === child) this.child = undefined;
@@ -103,13 +121,33 @@ class MemoryProcess {
                       stderrTail: diagnostics.tail(id),
                     }),
               );
+            let nativeStartObserved = false;
             const onMessage = (message: ChildMessage) => {
-              if (job.kind === 'checkpoint' && controller.signal.aborted) return;
+              if (ownsNativeWrite && controller.signal.aborted) return;
+              if (execution?.onMessage(message, id)) {
+                // Existing CJK progress/finish, plus at most one native-input start and final completion.
+                if (
+                  message.type === 'read-diagnostic' &&
+                  message.id === id &&
+                  (message.diagnostic.phase === 'cjk-read' ||
+                    (message.diagnostic.phase === 'sql-start' && message.diagnostic.sql.native && !nativeStartObserved))
+                ) {
+                  if (message.diagnostic.phase === 'sql-start') nativeStartObserved = true;
+                  try {
+                    options?.onReadSnapshot?.(execution.snapshot('pending'));
+                  } catch {
+                    /* Optional private progress. */
+                  }
+                }
+                return;
+              }
               if (message.type === 'started') {
                 channel('cat-cafe.memory-process').publish({ kind: job.kind, pid: message.pid, id });
               } else if (message.type === 'embedding') {
-                void this.handleEmbedding(child, message, options?.embedding, controller.signal);
-              } else if (message.id === id) {
+                void this.handleEmbedding(child, message, options?.embedding, controller.signal).finally(() =>
+                  execution?.embeddingFinished(message.id),
+                );
+              } else if (message.type === 'result' && message.id === id) {
                 complete(message.error ? decodeError(message.error) : undefined, message.value as T);
               }
             };
@@ -220,6 +258,15 @@ export function runMemoryCheckpoint(
   return projections.run<WalCheckpointResult>(
     { kind: 'checkpoint', dbPath },
     { ...options, deadlineAt: options.deadlineAt ?? Date.now() + 15_000 },
+  );
+}
+export function runMemoryVectorRepack(
+  dbPath: string,
+  options: { signal?: AbortSignal; deadlineAt?: number } = {},
+): Promise<VectorRepackResult> {
+  return projections.run<VectorRepackResult>(
+    { kind: 'vector-repack', dbPath },
+    { ...options, deadlineAt: options.deadlineAt ?? Date.now() + 120_000 },
   );
 }
 export function runMemoryScan<T>(job: Extract<MemoryProcessJob, { kind: 'scan' }>): Promise<T> {

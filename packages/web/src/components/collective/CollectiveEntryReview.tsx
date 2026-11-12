@@ -3,6 +3,7 @@
 import type { CollectivePairingIntentMessage } from '@cat-cafe/shared';
 import { useEffect, useState } from 'react';
 import { AvatarImageWithFallback } from '@/components/AvatarImageWithFallback';
+import { isCanonicalAvatarUrl } from '@/lib/avatar-url';
 import { apiFetch } from '@/utils/api-client';
 
 interface EntryCat {
@@ -45,7 +46,7 @@ export function CollectiveEntryReview({
     const abort = new AbortController();
     setError(undefined);
     setRoster(undefined);
-    void apiFetch('/api/plugins/collective-connector/entry-roster', { signal: abort.signal })
+    void apiFetch('/api/plugins/official.collective-connector/entry-roster', { signal: abort.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error('暂时无法读取这台 Café 的注册伙伴，请重试。');
         const result = (await response.json()) as EntryRoster;
@@ -78,11 +79,11 @@ export function CollectiveEntryReview({
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <p className="text-sm leading-6 text-cafe-secondary">
-          勾选的伙伴会出现在获准频道的成员栏，其他成员可以点名请求回应。连接本身不会向频道发消息；不想带来的猫可先取消勾选。
+          勾选的猫会出现在频道成员里，大家可以 @ 它们。不想带来的猫不勾。
         </p>
         {existing && (
           <output className="mt-4 block rounded-lg bg-conn-amber-bg p-3 text-sm text-conn-amber-text">
-            这台 Café 已连接当前共同家园。打开「我的 Café」即可管理参与伙伴，不必再建一条连接。
+            你的 Café 已经在这个共同体里。在「我的猫」里管理。
           </output>
         )}
         {error && (
@@ -124,7 +125,13 @@ export function CollectiveEntryReview({
                   }
                 />
                 <AvatarImageWithFallback
-                  src={cat.avatar?.startsWith('/avatars/') || cat.avatar?.startsWith('/uploads/') ? cat.avatar : null}
+                  src={
+                    cat.avatar?.startsWith('/avatars/') ||
+                    cat.avatar?.startsWith('/uploads/') ||
+                    (cat.avatar?.startsWith('/api/cats/') && isCanonicalAvatarUrl(cat.avatar))
+                      ? cat.avatar
+                      : null
+                  }
                   alt=""
                   className="h-12 w-12 shrink-0 rounded-full object-cover"
                 />

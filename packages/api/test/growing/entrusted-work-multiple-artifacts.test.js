@@ -47,6 +47,9 @@ function fixture() {
       async listCurrentReceipts() {
         return receipts;
       },
+      async readCurrentReceipts() {
+        return { receipts, coverage: { state: 'complete' } };
+      },
     },
     artifactReader: {
       async readPreparedArtifact({ artifactRef, taskRevision }) {
@@ -89,7 +92,9 @@ function eligibleReceipt(taskId, id) {
 }
 
 describe('F310 reads preserve work with multiple Artifact refs', () => {
-  test('Web and cat retain the canonical Task after a legal multi-material update without inventing a primary', async () => {
+  test('Web and cat retain the canonical Task after a legal multi-material update without inventing a primary', async (t) => {
+    // Compare the two views at one observation time, including execution metadata.
+    t.mock.method(Date, 'now', () => now);
     const { tasks, lifecycle, service, reads } = fixture();
     const taskId = await admit(lifecycle, 'showcase', ['file:showcase.md']);
     await lifecycle.update({

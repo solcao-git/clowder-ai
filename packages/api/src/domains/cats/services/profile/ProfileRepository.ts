@@ -1,12 +1,16 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { catRegistry } from '@cat-cafe/shared';
 import {
   assertProfilePathSegment,
   CURRENT_CORPUS_PROFILE_URI,
   CURRENT_RELATIONSHIP_PROFILE_URI,
+  LEGACY_PROFILE_CAPSULE_RELATIVE_PATH,
+  PROFILE_CAPSULE_RELATIVE_PATH,
   PROFILE_CORPUS_RELATIVE_PATH,
+  PROFILE_MEMORY_TOMBSTONE_PREFIX,
+  profileCapsuleReadRelativePath,
   profileUserRelativePath,
   relationshipKeyFromPrimerRelativePath,
   relationshipPrimerRelativePath,
@@ -23,6 +27,22 @@ export interface FileProfileRepositoryOptions {
   dataDir?: string;
   homeDir?: string;
   relationshipKeyForCat?: (catId: string) => string | undefined;
+}
+
+export interface ProfileFileSnapshot {
+  content: string;
+  path: string;
+  revision: string;
+  updatedAt?: number;
+}
+
+export interface RelationshipPrimerSnapshot extends ProfileFileSnapshot {
+  relationshipKey: string;
+  targetPath: string;
+}
+
+export function isProfileMemoryTombstoneContent(content: string): boolean {
+  return content.startsWith(PROFILE_MEMORY_TOMBSTONE_PREFIX);
 }
 
 function defaultRelationshipKeyForCat(catId: string): string | undefined {
@@ -50,11 +70,23 @@ export class FileProfileRepository {
     return resolve(this.dataDir, ...profileUserRelativePath(userId).split('/'));
   }
 
-  readCapsule(userId: string): { content: string; path: string; revision: string } | null {
-    const path = resolve(this.profileDir(userId), 'operator-capsule.md');
-    if (!existsSync(path)) return null;
-    const content = readFileSync(path, 'utf8');
-    return { content, path, revision: profileRevisionOf(content) };
+  readCapsule(userId: string): ProfileFileSnapshot | null {
+    const profileDir = this.profileDir(userId);
+    const relativePath = profileCapsuleReadRelativePath((path) => existsSync(resolve(profileDir, path)));
+    return readProfileSnapshot(resolve(profileDir, relativePath));
+  }
+
+  capsulePath(userId: string): string {
+    return resolve(this.profileDir(userId), PROFILE_CAPSULE_RELATIVE_PATH);
+  }
+
+  legacyCapsulePath(userId: string): string {
+    return resolve(this.profileDir(userId), LEGACY_PROFILE_CAPSULE_RELATIVE_PATH);
+  }
+
+  resolveCapsuleTarget(userId: string, targetPath: string): string {
+    if (targetPath !== PROFILE_CAPSULE_RELATIVE_PATH) throw new Error('Invalid capsule target');
+    return this.capsulePath(userId);
   }
 
   scope(userId: string, catId: string): ProfileScope {
@@ -103,11 +135,38 @@ export class FileProfileRepository {
     return this.primerPath(scope);
   }
 
-  readPrimer(scope: ProfileScope): { content: string; path: string; revision: string } | null {
+  readPrimer(scope: ProfileScope): ProfileFileSnapshot | null {
     const path = this.primerPath(scope);
-    if (!existsSync(path)) return null;
-    const content = readFileSync(path, 'utf8');
-    return { content, path, revision: profileRevisionOf(content) };
+    return readProfileSnapshot(path);
+  }
+
+  primerPathForRelationship(userId: string, relationshipKey: string): string {
+    const relativePath = relationshipPrimerRelativePath(relationshipKey);
+    return resolve(this.profileDir(userId), ...relativePath.split('/'));
+  }
+
+  listPrimers(userId: string): RelationshipPrimerSnapshot[] {
+    const relationshipDir = resolve(this.profileDir(userId), 'relationship');
+    if (!existsSync(relationshipDir)) return [];
+    const snapshots: RelationshipPrimerSnapshot[] = [];
+    for (const entry of readdirSync(relationshipDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('-primer.md')) continue;
+      const targetPath = `relationship/${entry.name}`;
+      let relationshipKey: string;
+      try {
+        relationshipKey = relationshipKeyFromPrimerRelativePath(targetPath);
+      } catch {
+        continue;
+      }
+      let snapshot: ProfileFileSnapshot | null;
+      try {
+        snapshot = readProfileSnapshot(join(relationshipDir, entry.name));
+      } catch {
+        continue;
+      }
+      if (snapshot) snapshots.push({ ...snapshot, relationshipKey, targetPath });
+    }
+    return snapshots.sort((left, right) => left.relationshipKey.localeCompare(right.relationshipKey));
   }
 
   /**
@@ -121,11 +180,9 @@ export class FileProfileRepository {
    * Phase E: read the owner-wide shared corpus. Returns null if not yet written.
    * INV-4: revision uses the canonical profileRevisionOf function.
    */
-  readCorpus(userId: string): { content: string; path: string; revision: string } | null {
+  readCorpus(userId: string): ProfileFileSnapshot | null {
     const path = this.corpusPath(userId);
-    if (!existsSync(path)) return null;
-    const content = readFileSync(path, 'utf8');
-    return { content, path, revision: profileRevisionOf(content) };
+    return readProfileSnapshot(path);
   }
 
   /**
@@ -148,4 +205,11 @@ export class FileProfileRepository {
   currentCorpusUri(): typeof CURRENT_CORPUS_PROFILE_URI {
     return CURRENT_CORPUS_PROFILE_URI;
   }
+}
+
+function readProfileSnapshot(path: string): ProfileFileSnapshot | null {
+  if (!existsSync(path)) return null;
+  const content = readFileSync(path, 'utf8');
+  if (isProfileMemoryTombstoneContent(content)) return null;
+  return { content, path, revision: profileRevisionOf(content), updatedAt: statSync(path).mtimeMs };
 }

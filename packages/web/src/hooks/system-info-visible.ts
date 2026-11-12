@@ -83,7 +83,7 @@ function routingReasonCopy(reason: unknown): string {
   const code = typeof record.code === 'string' ? record.code : '';
   const stableCopy = ROUTING_REASON_COPY[code];
   if (stableCopy) return stableCopy;
-  return typeof record.summary === 'string' ? (ROUTING_REASON_COPY[record.summary] ?? record.summary) : '';
+  return typeof record.summary === 'string' ? (ROUTING_REASON_COPY[record.summary] ?? '') : '';
 }
 
 function formatRoutingPreflight(
@@ -98,20 +98,16 @@ function formatRoutingPreflight(
   if (!target) return null;
   const targetCatId = typeof target?.targetCatId === 'string' ? target.targetCatId : undefined;
   const disposition = target?.disposition;
-  if (!targetCatId || disposition === 'allowed') return null;
-  if (disposition !== 'warned' && disposition !== 'rejected') return null;
+  // Post-send advisory diagnostics cannot change the selection. Hide them on every
+  // chat path, including legacy persisted receipts.
+  if (!targetCatId || disposition !== 'rejected') return null;
   const reasons = Array.isArray(target.reasons) ? target.reasons.map(routingReasonCopy).filter(Boolean) : [];
-  const reasonCopy = reasons.length > 0 ? [...new Set(reasons)].slice(0, 2).join('；') : '近期供给状态需要留意';
+  const reasonCopy = reasons.length > 0 ? [...new Set(reasons)].slice(0, 2).join('；') : '当前暂不可用';
   const retryAt =
     typeof target.automaticRetryAt === 'number' && Number.isFinite(target.automaticRetryAt)
       ? target.automaticRetryAt
       : undefined;
-  const actionCopy =
-    disposition === 'rejected'
-      ? `本次未执行。${retryAt !== undefined ? `自动调用可在 ${new Date(retryAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 后重新尝试。` : ''}`
-      : target.ownerAttempt === true
-        ? '这次仍会按你的选择尝试。'
-        : '本次仍按原目标尝试。';
+  const actionCopy = `本次未执行，这条消息会等待你重试。${retryAt !== undefined ? `后续新的自动发送可在 ${new Date(retryAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 后重新检查。` : ''}`;
   return {
     content: `${resolveCatName(targetCatId)}：${reasonCopy}。${actionCopy}`,
     variant: 'info',
@@ -132,7 +128,7 @@ function formatA2AFollowupAvailable(
 }
 
 function formatWarning(parsed: Record<string, unknown>): VisibleSystemInfoResult | null {
-  if (parsed?.type !== 'warning') return null;
+  if (parsed?.type !== 'warning' || parsed.presentation !== 'user_action_required') return null;
 
   const warningText = typeof parsed.message === 'string' ? parsed.message : '';
   return {
@@ -156,6 +152,12 @@ export function formatSessionSealRequested(
 
   const catId = typeof parsed.catId === 'string' ? parsed.catId : 'unknown';
   const sessionSeq = typeof parsed.sessionSeq === 'number' ? parsed.sessionSeq : '?';
+  if (parsed.reason === 'native_binding_changed') {
+    return {
+      content: `${resolveCatName(catId)} 的原生配置已更新，会话 #${sessionSeq} 已封存；正在带上历史继续`,
+      variant: 'info',
+    };
+  }
   const continuityDiagnostics =
     typeof parsed.continuityDiagnostics === 'object' && parsed.continuityDiagnostics !== null
       ? (parsed.continuityDiagnostics as Record<string, unknown>)
@@ -213,25 +215,9 @@ function formatInvocationPreempted(parsed: Record<string, unknown>): VisibleSyst
   };
 }
 
-function formatSilentCompletion(
-  parsed: Record<string, unknown>,
-  resolveCatName: ResolveCatName,
-  fallbackCatId?: string,
-): VisibleSystemInfoResult | null {
-  if (parsed?.type !== 'silent_completion') return null;
-
-  const detail = typeof parsed.detail === 'string' ? parsed.detail : '';
-  const catId = typeof parsed.catId === 'string' ? parsed.catId : (fallbackCatId ?? 'Cat');
-  return {
-    content: detail || `${resolveCatName(catId)} completed without a text response.`,
-    variant: 'info',
-  };
-}
-
 export function formatVisibleSystemInfo(
   parsed: Record<string, unknown>,
   resolveCatName: ResolveCatName = identityCatName,
-  fallbackCatId?: string,
 ): VisibleSystemInfoResult | null {
   return (
     formatA2AFollowupAvailable(parsed, resolveCatName) ??
@@ -242,8 +228,7 @@ export function formatVisibleSystemInfo(
     (parsed?.type === 'a2a_role_rejected' ? formatRoleRejected(parsed, resolveCatName) : null) ??
     formatRoutingPreflight(parsed, resolveCatName) ??
     formatModeSwitchProposal(parsed, resolveCatName) ??
-    formatInvocationPreempted(parsed) ??
-    formatSilentCompletion(parsed, resolveCatName, fallbackCatId)
+    formatInvocationPreempted(parsed)
   );
 }
 

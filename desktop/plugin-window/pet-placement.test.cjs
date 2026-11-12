@@ -29,6 +29,73 @@ test('actions sit above the pet and flip below while edge anchors leave room for
     assert.equal(result.panel.y < pet.y, pet.y === 600);
   }
 });
+
+test('split call layout keeps speech above while the lite nameplate stays below except at the screen edge', () => {
+  const call = { presentation: 'lite', bubble: { width: 320, height: 62 } };
+  const roomBelow = placePetPanel({
+    area,
+    pet: { x: -220, y: 560 },
+    panel: { kind: 'actions', width: 220, height: 30, call },
+  });
+  inside(roomBelow.bounds);
+  inside(roomBelow.panel);
+  inside(roomBelow.bubble);
+  disjoint(roomBelow.pet, roomBelow.panel);
+  disjoint(roomBelow.pet, roomBelow.bubble);
+  disjoint(roomBelow.panel, roomBelow.bubble);
+  assert.ok(
+    roomBelow.panel.y > roomBelow.pet.y + roomBelow.pet.height,
+    'the idle call nameplate belongs below the cat when the work area has room',
+  );
+  assert.ok(
+    roomBelow.bubble.y + roomBelow.bubble.height < roomBelow.pet.y,
+    'speech remains a separate surface above the cat',
+  );
+
+  const bottomEdge = placePetPanel({
+    area,
+    pet: { x: -220, y: 720 },
+    panel: { kind: 'actions', width: 220, height: 30, call },
+  });
+  inside(bottomEdge.bounds);
+  inside(bottomEdge.panel);
+  inside(bottomEdge.bubble);
+  disjoint(bottomEdge.pet, bottomEdge.panel);
+  disjoint(bottomEdge.pet, bottomEdge.bubble);
+  disjoint(bottomEdge.panel, bottomEdge.bubble);
+  assert.ok(bottomEdge.panel.y < bottomEdge.pet.y, 'only the bottom edge flips the nameplate above the cat');
+});
+
+test('expanded call controls sit inward with the pet-bottom alignment while speech remains independent', () => {
+  const result = placePetPanel({
+    area,
+    pet: { x: -220, y: 560 },
+    panel: {
+      kind: 'actions',
+      width: 412,
+      height: 116,
+      call: { presentation: 'controls', bubble: { width: 320, height: 62 } },
+    },
+  });
+  inside(result.bounds);
+  inside(result.panel);
+  inside(result.bubble);
+  disjoint(result.pet, result.panel);
+  disjoint(result.pet, result.bubble);
+  disjoint(result.panel, result.bubble);
+  assert.ok(
+    result.panel.x + result.panel.width < result.pet.x,
+    'a right-docked cat opens its compact controls toward the screen interior',
+  );
+  assert.ok(
+    Math.abs(result.panel.y + result.panel.height - (result.pet.y + result.pet.height)) <= 24,
+    'the controls and cat share a visual baseline',
+  );
+  assert.ok(
+    result.bubble.y + result.bubble.height < result.pet.y,
+    'the speech bubble does not become a row inside the controls',
+  );
+});
 test('right-click menu opens inward, off the face, including all four screen corners', () => {
   for (const x of [-1250, -150])
     for (const y of [40, 630]) {
@@ -82,7 +149,7 @@ test('the full living-body union stays inside the native surface at every displa
 });
 
 test('saved ball size scales the hit target and full art union on a negative-origin display', () => {
-  for (const ballSize of [48, 72, 192]) {
+  for (const ballSize of [43, 48, 72, 192]) {
     const metrics = petMetrics(ballSize);
     const result = placePetPanel({
       area,
@@ -101,8 +168,12 @@ test('saved ball size scales the hit target and full art union on a negative-ori
   }
 });
 
+test('the compact saved size is the approved 72 by 78 desktop cat', () => {
+  assert.deepEqual(petMetrics(43).pet, { width: 72, height: 78 });
+});
+
 test('invalid native size input fails closed to the reviewed default geometry', () => {
   assert.deepEqual(petMetrics(Number.NaN), petMetrics(72));
-  assert.deepEqual(petMetrics(47), petMetrics(72));
+  assert.deepEqual(petMetrics(42), petMetrics(72));
   assert.deepEqual(petMetrics(193), petMetrics(72));
 });

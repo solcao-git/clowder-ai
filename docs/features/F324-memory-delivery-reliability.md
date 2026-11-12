@@ -1,19 +1,29 @@
 ---
 feature_ids: [F324]
-related_features: [F038, F148, F167, F188, F203, F209, F227, F231, F236, F237, F254, F260, F263, F276, F286, F287, F296, F316, F321, F323]
+related_features: [F038, F148, F167, F188, F203, F209, F227, F231, F236, F237, F254, F260, F263, F276, F286, F287, F296, F316, F321, F323, F325]
 topics: [memory, context, retrieval, delivery, reliability, command]
 doc_kind: spec
 created: 2026-09-27
+updated: 2026-10-28
 description: "让猫以可控的上下文成本取得可信、完整可续读的记忆，减少旧消息回放、检索绕路与启动时的重复负担。"
 description_source: human
 description_author: codex-astra
 description_updated_at: 2026-09-27T12:29:12Z
-tips_exempt: "Remediates existing memory delivery and startup behavior; introduces no new user action or discoverable capability."
+tips_exempt: "Renewed 2026-10-28 for boot58: this delta records actual index presence and same-request native/qualification observations. It adds no user operation, setting, or discovery surface. Date-query recovery, migration duration and whole acceptance remain open; accepted slices and original owners remain intact."
 ---
 
 # F324: Memory Delivery Reliability｜记忆交付可靠性与上下文成本收口
 
-> **Status**: in-progress（A/B 原 Task 已 satisfied；C 实收与仓内防复发已合入并完成 Alpha 切片，共享文件恢复待权限裁定，D 未启动） | **Owner**: Astra（@codex-astra, gpt-6-astra）与 Opus55（@opus55, claude-opus-5-5），本指挥 thread 全体猫共同负责驱动与愿景守护 | **Priority**: P1
+> **Status**: closed (consolidated into F332; 未完成结果继续承接，非全部交付) | **Owner**: Astra（@codex-astra, gpt-6-astra）与 Opus55（@opus55, claude-opus-5-5），本指挥 thread 全体猫共同负责驱动与愿景守护 | **Priority**: P1
+
+## 2026-10-23 项目收拢至 F332
+
+You 在 `[thread-id]#private-source-id` 明确要求关闭旧记忆项目、
+保留有价值的结果并新立一项。本项目登记据此归入 [F332](F332-experience-informed-memory.md)；
+**本文件仍保留原合同及历史证据的权威，未被逐项替代的合同继续有效。**
+原 AC 实情、Task、owner、accepted scope 和等待不变；本次不声称全部完成、不关闭来源、不迁移数据。
+
+> **关闭前状态快照**: in-progress（A/B/C 原 Task 已 satisfied；D 的 AC-D1 PASS、AC-D2 PARTIAL；boot48 图谱主附身份/完整原文正式通过，F276读取投影与F278有界扫描已有正式证据；消息检索完整旅程、长尾/自然恢复及AC-D3仍未结） | **Owner**: Astra（@codex-astra, gpt-6-astra）与 Opus55（@opus55, claude-opus-5-5），本指挥 thread 全体猫共同负责驱动与愿景守护 | **Priority**: P1
 
 ## Why
 
@@ -32,6 +42,12 @@ Opus55 审阅：`private-source-id`；Astra 边界核验：`private-source-id`�
 ## Current State / 现状基线
 
 本轮源码基线 `00cca7ddf62fe64a070224042c4259d72c81cdf1`；运行态测量不以该 SHA 冒充部署证明。
+
+**2026-10-23 当前运行验收**：Task528 gen5已在boot48/`0c3b28eb…`实际匹配，父独立核ready/三stamp及目标祖先。
+F229原参数图谱命中主文档，PetSkin独立可检索，两源7/3片正常读至EOF；父重组十次MCP返回并与loaded原文逐字节核对。
+F276自然resolver读取已走artifact projection，观察批次toolEvents解析为0；F278原Task913已完成两页共100条正式扫描，duty/reconciler仍暂停。
+F322正式UI一次“确认按钮”请求/导航状态已获限定PASS（actual hybrid、14.179s）；摘要二次截取丢资格证据P2及390原文可读性仍由原168/原C处理。历史Sol宽查询LIMITED PASS、特定事件与更广覆盖不混签。
+F321原首包Task001467已done/satisfied且g4已消费，解除该项依赖；Task229长尾及D的自然恢复/compaction/cue和D3继续原责任，旧503及历史缺值保留。
 
 **2026-09-28 交付更新**：A 已随 [#4858](https://github.com/zts212653/clowder-ai/pull/4858) 合入
 `77376ea15c53b8d1818ac6504008bb4365d1c08b`，AC-A1–A4 由非作者审查并经本 owner 核验证据，原 Task 已 satisfied。
@@ -150,20 +166,26 @@ Alpha `alpha/main-sync` 精确加载 `17561ae8ad94fa74bef2c551528692b1e6302ccc`�
 
 ### Phase C（启动证据）
 - [x] AC-C1: 三载体分别记录实际实收来源、版本、大小与已加载能力，明确可发现/已加载及 unknown。
-- [ ] AC-C2: 已授权清理完成并证明身份/关键能力/其他项目无回归；需要 operator 的变更提供精确 diff，未授权项不假称已完成。
+- [x] AC-C2: 已授权清理完成并证明身份/关键能力/其他项目无回归；需要 operator 的变更提供精确 diff，未授权项不假称已完成。
 
 C1 与 hook 清理引用 启动证据 (internal)、PR #4943 / `fa57426575b2135484b17e8fe66af61969383d83` 及 Sol5.6 exact-HEAD typed approval。
-Alpha 曾重生成共享 Gemini/AGY 配置；startup+GET 防复发随 #4946 / `68acf34b57a22103ad5318ff28686936ae676212` 合入，经 Sol5.6 审查及同版 scoped hash/300项回归验证。既有共享文件恢复仍待 operator，C2 暂不打勾，D 未启动；health running-revision attestation=null/unknown 如实保留。
+Alpha 曾重生成共享 Gemini/AGY 配置；startup+GET 防复发随 #4946 / `68acf34b57a22103ad5318ff28686936ae676212` 合入，经 Sol5.6 审查及同版 scoped hash/300项回归验证。
+10-10 续办实查十处路径已指向现有 runtime，旧 Alpha→main 恢复补丁失效且退役；本执行未写共享配置、外部恢复作者/授权 unknown。
+#5358 / `1602892667ef4f311e07d6d392f51d52f306107b` 默认配置来源修复有 Sonnet 独立审查、43/43 与306/306回归，以及合入态四provider配置验证。
+父规则/四fixture清理按原合同交刷新后的未执行决定包，未授权不改。10-10 原 owner 已全文核终态、三份独立批准、14 个合入源码 hash、11 个 Alpha 产物 hash及当前三源 hash/十个入口；原 C Task `private-source-id` revision=16、closure=satisfied。
+完成来源 `[thread-id]#private-source-id` 经 `development-return-c519aeaee8d8381e9efcecd8bf31cf62` 以 terminal_report 送达；这结算 C 原交付边界，不把未授权清理或 D 的真实运行旅程标绿。
+原09-30 health revision attestation=null/unknown、10-10配置验证mock-spawn边界和ACP既有残余均保留，不冒充runtime loaded或真实模型/MCP调用。
 
 ### Phase D（真实交付）
-- [ ] AC-D1: A/B/C 的合入 revision、Alpha 证据、日常 runtime 加载证明分开记录，重启授权可回查。
+
+- [x] AC-D1: A/B/C 的合入 revision、Alpha 证据、日常 runtime 加载证明分开记录，重启授权可回查。
 - [ ] AC-D2: 非作者完成冷/热/恢复/长回合的组合旅程，预算与重复降低且证据可达性、正确性不退化；#4836 在目标版本复验。
 - [ ] AC-D3: 本 thread 两指挥猫完成愿景守护，全部原诉求有交付或明确 operator 签字 disposition；close 仍按既有权限门。
 
 ## Dependencies
 
 - **Related**: 原合同表；F316/F321 保留独立目标与 authority。
-- **Blocked by**: D 的 live 结论等待目标版本经授权激活；不把 F323 尚未实现的新能力设为所有修复的前置。
+- **Blocked by**: 原Task528 gen5在boot48的加载与图谱正式旅程已满足；剩余为F322原Task168的摘要呈现P2/390可读性及原完整检索范围、Task229自然长尾观测、F325原Task2347的恢复边界、真实compaction/cue及D3。旧503的缺失阶段链按历史unknown保留，不改写为当前每次请求均503，不制造重复模型矩阵或F323新前置。
 - 按 operator 最新指示严格 A → B → C → D 串行；前一 Phase 完成并回流后才提下一张执行 thread 卡，D 的 live 验收另需版本就绪。
 
 ## Review Gate

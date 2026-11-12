@@ -1,17 +1,19 @@
 'use client';
 
-import type { ArtifactReviewView, EntrustedWorkOwnerReadV1, GlobalArtifactDTO } from '@cat-cafe/shared';
+import type { ArtifactReviewView, EntrustedWorkOwnerReadV1 } from '@cat-cafe/shared';
 import { type ReactNode, useEffect, useMemo, useRef } from 'react';
 import { ReviewArtifactButton } from '@/components/content-review/ReviewArtifactButton';
 import { reviewSurfaceFromPreparedRef } from '@/components/workbench/artifact-review-surface';
 import { useEntrustedWorkProjection } from '@/hooks/useEntrustedWorkProjection';
+import { useThreadArtifacts } from '@/hooks/useThreadArtifacts';
 import { useChatStore } from '@/stores/chatStore';
 import { EntrustedWorkBrief } from './EntrustedWorkBrief';
 import { type EligibleNeedsMeReceipt, selectNeedsMeItems } from './needs-me-items';
+import { needsMeRecommendation } from './needs-me-recommendation';
 import { type PreparedArtifactCoordinate, PreparedArtifactPreview } from './PreparedArtifactPreview';
 import { preparedArtifactPresentation, preparedReviewCoordinate } from './prepared-artifact-presentation';
 import { usePreparedReviewTitle } from './prepared-review-presentation';
-import { resolvePreparedArtifact } from './resolve-prepared-artifact';
+import { preparedArtifactThreadId, resolvePreparedArtifact } from './resolve-prepared-artifact';
 
 export { needsMeItemRef } from './needs-me-items';
 
@@ -25,19 +27,31 @@ function whyNow(receipt: EligibleNeedsMeReceipt): string {
 function NeedsMePreparedWork({
   ownerRead,
   coordinate,
-  artifact,
   loading,
   onOpen,
   reviewAction,
 }: {
   ownerRead: EntrustedWorkOwnerReadV1;
   coordinate: PreparedArtifactCoordinate;
-  artifact?: GlobalArtifactDTO;
   loading: boolean;
   /** Receives the review title when known, so the opened tab carries the same name as the card. */
   onOpen: (title?: string) => void;
   reviewAction?: ReactNode;
 }) {
+  const threadId = preparedArtifactThreadId(coordinate);
+  const source = useThreadArtifacts(threadId);
+  useEffect(() => {
+    if (!threadId) return;
+    const refresh = () => void source.refetch();
+    window.addEventListener('cat-cafe:entrusted-work-projection-invalidated', refresh);
+    return () => window.removeEventListener('cat-cafe:entrusted-work-projection-invalidated', refresh);
+  }, [threadId, source.refetch]);
+  const artifact = threadId
+    ? resolvePreparedArtifact(
+        source.artifacts.map((item) => ({ ...item, threadId })),
+        coordinate,
+      )
+    : undefined;
   const review = artifact ? null : preparedReviewCoordinate(coordinate.previewRef);
   const reviewTitle = usePreparedReviewTitle(review?.reviewId ?? null);
   return (
@@ -51,7 +65,7 @@ function NeedsMePreparedWork({
           coordinate={coordinate}
           artifact={artifact}
           reviewTitle={reviewTitle}
-          loading={loading}
+          loading={loading || (threadId !== undefined && source.loading)}
           onOpen={() => onOpen(reviewTitle)}
           reviewAction={reviewAction}
         />
@@ -61,14 +75,12 @@ function NeedsMePreparedWork({
 }
 
 export function NeedsMePanel({
-  artifacts,
   artifactsLoading = false,
   selectedItemRef,
   onOpenArtifact,
   onOpenAction,
   onOpenReview,
 }: {
-  artifacts: GlobalArtifactDTO[];
   artifactsLoading?: boolean;
   selectedItemRef?: string | null;
   onOpenArtifact?: (artifact: PreparedArtifactCoordinate, itemRef: string, title?: string) => void;
@@ -90,7 +102,7 @@ export function NeedsMePanel({
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <p className="text-micro font-bold uppercase tracking-[0.16em] text-cafe-muted">Needs Me</p>
-            {projection.loading || projection.error ? null : (
+            {(projection.loading && !projection.confirmed) || projection.error || projection.partial ? null : (
               <span
                 data-testid="needs-me-count"
                 className="rounded-full bg-cafe-surface px-2 py-0.5 text-micro font-semibold text-cafe-secondary"
@@ -119,7 +131,12 @@ export function NeedsMePanel({
           暂时无法读取需要你判断的事；任务和准备好的内容仍然保留，请稍后刷新。
         </div>
       ) : null}
-      {!projection.loading && !projection.error && items.length === 0 ? (
+      {projection.partial ? (
+        <output className="mt-6 block rounded-xl border border-cafe-subtle p-4 text-sm text-cafe-secondary">
+          部分待办来源暂不可用。已读取的待办仍可处理，完整结果恢复后会自动补齐。
+        </output>
+      ) : null}
+      {!projection.loading && !projection.error && !projection.partial && items.length === 0 ? (
         <div className="mt-6 rounded-xl border border-dashed border-cafe-subtle px-6 py-12 text-center">
           <p
             className="text-cafe-black text-[length:var(--console-font-2xl)] leading-[1.25]"
@@ -143,7 +160,6 @@ export function NeedsMePanel({
         {items.map(({ ownerRead, receipt, itemRef }) => {
           const coordinate = ownerRead.preparedArtifact;
           if (!coordinate) return null;
-          const artifact = resolvePreparedArtifact(artifacts, coordinate);
           const selected = selectedItemRef === itemRef;
           return (
             <article
@@ -164,7 +180,9 @@ export function NeedsMePanel({
                 <div className="min-w-0 flex-1">
                   <p className="text-micro font-bold uppercase tracking-[0.12em] text-cafe-muted">为什么现在需要你</p>
                   <h3 className="mt-1 text-sm font-semibold text-cafe-black">{whyNow(receipt)}</h3>
-                  <p className="mt-2 text-xs leading-5 text-cafe-secondary">建议：{receipt.recommendation}</p>
+                  <p className="mt-2 text-xs leading-5 text-cafe-secondary">
+                    建议：{needsMeRecommendation(receipt, 'zh')}
+                  </p>
                   <details className="mt-1 text-micro text-cafe-muted">
                     <summary className="cursor-pointer">来源判断</summary>
                     <p className="mt-1 break-all">{receipt.reasonCode}</p>
@@ -183,7 +201,6 @@ export function NeedsMePanel({
               <NeedsMePreparedWork
                 ownerRead={ownerRead}
                 coordinate={coordinate}
-                artifact={artifact}
                 loading={artifactsLoading && !reviewSurfaceFromPreparedRef(coordinate.openInWorkspaceRef)}
                 onOpen={(title) => onOpenArtifact?.(coordinate, itemRef, title)}
                 reviewAction={

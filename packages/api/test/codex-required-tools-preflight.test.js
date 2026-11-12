@@ -93,9 +93,27 @@ class ToolInventoryWire {
       this.inbox.push({ id: message.id, result: {} });
       return;
     }
+    if (
+      message.method === 'config/read' ||
+      message.method === 'configRequirements/read' ||
+      message.method === 'account/read'
+    ) {
+      const result =
+        message.method === 'config/read'
+          ? { config: { model_provider: 'openai' } }
+          : message.method === 'configRequirements/read'
+            ? { requirements: null }
+            : { account: { type: 'chatgpt' } };
+      this.inbox.push({ id: message.id, result });
+      return;
+    }
     if (message.method === 'thread/start' || message.method === 'thread/resume') {
       const threadId = message.method === 'thread/resume' ? message.params.threadId : 'native-thread';
       this.inbox.push({ id: message.id, result: { thread: { id: threadId, turns: [] } } });
+      return;
+    }
+    if (message.method === 'thread/turns/list') {
+      this.inbox.push({ id: message.id, result: { data: [], nextCursor: null } });
       return;
     }
     if (message.method === 'mcpServerStatus/list') {

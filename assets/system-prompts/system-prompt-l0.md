@@ -27,7 +27,7 @@
 ---
 
 <!-- 从 shared-rules.md 确定性提取（governance-l0.ts:compileGovernanceL0FromMarkdown）-->
-<!-- 提取锚点：Rule 0 + Push Back / P1-P5 / W1-W8 / 身份契约 / 纪律 / 质量覆盖 / Magic Words / 治理协议 / 决策漏斗 -->
+<!-- 提取锚点：Rule 0 + Push Back / 元方法 / P1-P5 / W1-W8 / 身份契约 / 纪律 / Magic Words / 治理协议 / 决策漏斗 -->
 <!-- 叠加层：.local-override（全量替换）/ .local（追加）-->
 ── [S9] 治理摘要 ──
 {{GOVERNANCE_L0}}
@@ -66,14 +66,14 @@
 
 ---
 
-## 8. Clowder AI 家里独有能力唤醒指南（场景→skill 触发反射）
+## 8. {{PRODUCT_DISPLAY_NAME}} {{CAPABILITY_QUALIFIER}}能力唤醒指南（场景→skill 触发反射）
 
 ── [L6] 能力唤醒 ──
 {{L6_CONTENT}}
 
 ---
 
-## 9. 代码哲学（愿景驱动，不是最小改动）
+## 9. 代码哲学（愿景驱动，改动围绕结果）
 
 ── [L7] 代码哲学 ──
 {{L7_CONTENT}}

@@ -4,14 +4,20 @@ import type { BridgeDispatchOutcome, BridgeFallbackReason } from './types.js';
 const messageByReason: Record<BridgeFallbackReason, (catId: string) => string> = {
   'no-adapter': (catId) =>
     `未发送给 @${catId}：还没有可用的后台 Host Adapter。请先安装并配对 Chrome 扩展，再绑定目标 ChatGPT 会话。`,
-  'needs-binding': () =>
-    '☁️ 砚砚 Pro 尚未绑定到这个 Thread。这条消息还没有发送。请在原消息旁连接已授权的 ChatGPT 会话，并查看这条消息的发送状态。',
+  'needs-binding': (catId) =>
+    `☁️ @${catId} 尚未绑定到这个 Thread。这条消息还没有发送。请在原消息旁连接已授权的 ChatGPT 会话，并查看这条消息的发送状态。`,
   'dispatch-failed': (catId) => `投递给 @${catId} 的结果未知：云端桥在拿到投递结果之前出错。`,
   'host-append-failed': (catId) => `投递给 @${catId} 的结果未知：后台 Host Adapter 没有返回可验证的消息回执。`,
   'missing-source-message-id': (catId) =>
     `未发送给 @${catId}：当前 source message ID 缺失，系统已阻止无精确回程锚点的投递。`,
   'incomplete-dispatch-provenance': (catId) =>
     `未发送给 @${catId}：投递来源或回程绑定不完整，系统已阻止无法精确审计的云端调用。`,
+  'ambiguous-cloud-cat': (catId) =>
+    `未发送给 @${catId}：有多只猫配置了同一个云端 provider，回复无法确定归属。请在猫配置里只保留一只。`,
+  'source-retargeted': (catId) =>
+    `未发送给 @${catId}：这条消息之前已经发给另一只云端猫，一条消息的回复只能归一只猫。请发一条新消息。`,
+  'source-history-unknown': (catId) =>
+    `未发送给 @${catId}：无法确认这条较早的消息是否已发给别的云端猫，为免回复记错对象，没有发送。请发一条新消息。`,
 };
 
 export interface CloudBridgeAuditContext {
@@ -46,7 +52,8 @@ function receiptStatus(outcome: BridgeDispatchOutcome): CloudBridgeOutboundRecei
 }
 
 function receiptTransport(outcome: BridgeDispatchOutcome): CloudBridgeOutboundReceiptV1['transport'] {
-  if (outcome.kind === 'sent' || outcome.reason === 'host-append-failed') return 'host';
+  if (outcome.kind === 'sent') return outcome.transport;
+  if (outcome.reason === 'host-append-failed') return 'host';
   return 'none';
 }
 
@@ -90,7 +97,10 @@ export function buildFallbackMessageContent(args: {
     catId: args.catId,
     status: 'unavailable',
     reason: args.reason,
-    message: messageByReason[args.reason](String(args.catId)),
+    message:
+      String(args.catId) === 'gpt-dot'
+        ? `尚未确认送达 dot。请在 ChatGPT 云端插件详情查看连接状态。`
+        : messageByReason[args.reason](String(args.catId)),
     detail: args.detail ?? '',
   });
 }
@@ -122,7 +132,10 @@ export function buildCloudBridgeStatusContent(args: {
     type: 'cloud_bridge_status',
     catId: args.catId,
     status: 'sent',
-    message: `已发送给 @${args.catId}，等待它从 ChatGPT 云端会话回写。`,
+    message:
+      String(args.catId) === 'gpt-dot'
+        ? '召唤已收件，等待 dot 读取原消息并在原处回复。'
+        : `已发送给 @${args.catId}，等待它从 ChatGPT 云端会话回写。`,
     transport: args.outcome.transport,
     hostMessageId: args.outcome.hostMessageId,
     ...(outboundReceipt ? { outboundReceipt } : {}),

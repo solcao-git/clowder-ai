@@ -10,6 +10,9 @@ vi.mock('../use-open-destination', () => ({ useOpenDestination: () => ({ openEnt
 vi.mock('@/hooks/usePinnedSections', () => ({
   usePinnedSections: () => ({ isPinned: () => false, pin: vi.fn(), unpin: vi.fn() }),
 }));
+vi.mock('@/hooks/useCoCreatorConfig', () => ({
+  useCoCreatorConfig: () => ({ name: 'You', avatar: '/uploads/avatar-operator.png' }),
+}));
 
 import { SettingsShellV2 } from '@/components/settings/SettingsShellV2';
 
@@ -34,7 +37,7 @@ describe('F322 settings secondary navigation contracts', () => {
   });
   it('Right Arrow reaches the next settings tab', () => {
     const current = host.querySelector<HTMLElement>('[data-testid="settings-tab-members"]');
-    const next = host.querySelector<HTMLElement>('[data-testid="settings-tab-profiles"]');
+    const next = host.querySelector<HTMLElement>('[data-testid="settings-tab-accounts"]');
     if (!current || !next) throw new Error('Settings tabs are missing');
     act(() => {
       current.focus();
@@ -50,6 +53,14 @@ describe('F322 settings secondary navigation contracts', () => {
     expect(panel?.getAttribute('aria-labelledby')).toBe(tab?.id);
   });
   it('workspace-team secondary destination offers a pin action', () => {
-    expect(host.querySelector('button[aria-label="固定「成员能力与路由状态」到侧栏"]')).not.toBeNull();
+    expect(host.querySelector('button[aria-label="固定「成员能力与路由状态」到窄栏"]')).not.toBeNull();
+  });
+  it('opens the personal page from the first owner row, with the actual avatar and name', () => {
+    const owner = host.querySelector<HTMLButtonElement>('[data-testid="settings-entry-you"]');
+    expect(owner?.textContent).toContain('You');
+    expect(owner?.querySelector('img')?.getAttribute('src')).toBe('/uploads/avatar-operator.png');
+    act(() => owner?.click());
+    expect(host.querySelector('[data-testid="owner-content"]')?.textContent).toBe('you');
+    expect(host.querySelector('[data-testid="settings-entry-you"]')?.getAttribute('aria-current')).toBe('page');
   });
 });

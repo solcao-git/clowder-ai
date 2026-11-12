@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
+import { busyReference, observeProcessRefs } from './worktree-process-refs.mjs';
 
 const MAX_BUFFER = 256 * 1024 * 1024;
 export const WALK_CAP = 5000;
@@ -42,17 +43,31 @@ export function safeRealpath(p) {
  * (`--worktree`) or the clone's own config (`--local`), so a key set in the shared repository config
  * can never make every worktree look declared. `{}` = undeclared; null = unreadable.
  */
-export function lifecycleConfig(dir, scope) {
-  const res = git(dir, ['config', scope, '--get-regexp', '^catcafe\\.lifecycle\\.']);
+export function lifecycleConfig(dir, scope, env = {}) {
+  const res = git(dir, ['config', scope, '--get-regexp', '^catcafe\\.lifecycle\\.'], env);
   if (!res.ok) return res.code === 1 ? {} : null; // 1 = no matching key
   // git lower-cases variable names; map them back to the declared camelCase keys.
-  const names = { owner: 'owner', policy: 'policy', createdat: 'createdAt', expiresat: 'expiresAt' };
+  const names = {
+    owner: 'owner',
+    policy: 'policy',
+    createdat: 'createdAt',
+    expiresat: 'expiresAt',
+    retention: 'retention',
+    origin: 'origin',
+    prsource: 'prSource',
+  };
   /** @type {Record<string, string>} */
   const out = {};
   for (const line of res.out.split('\n').filter(Boolean)) {
     const i = line.indexOf(' ');
     const key = names[line.slice('catcafe.lifecycle.'.length, i).toLowerCase()];
-    if (key) out[key] = line.slice(i + 1);
+    if (key === 'retention' || key === 'origin') {
+      try {
+        out[key] = JSON.parse(line.slice(i + 1));
+      } catch {
+        out[key] = null;
+      } // corrupt owner intent must fail closed, never disappear
+    } else if (key) out[key] = line.slice(i + 1);
   }
   return out;
 }
@@ -180,52 +195,18 @@ export function isContainedIn(repo, head, ref) {
   }
 }
 
-function psCommandLines() {
-  try {
-    const out = execFileSync('ps', ['-axww', '-o', 'command='], { encoding: 'utf8', maxBuffer: MAX_BUFFER });
-    const lines = out.split('\n').filter(Boolean);
-    return lines.length > 0 ? lines : null;
-  } catch {
-    return null;
-  }
-}
-
-function lsofCwds() {
-  let out = '';
-  try {
-    out = execFileSync('lsof', ['-n', '-d', 'cwd', '-Fn'], {
-      encoding: 'utf8',
-      maxBuffer: MAX_BUFFER,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-  } catch (err) {
-    out = String(err.stdout ?? ''); // lsof exits 1 when some processes are unreadable; output is still valid
-  }
-  const cwds = out
-    .split('\n')
-    .filter((l) => l.startsWith('n'))
-    .map((l) => l.slice(1));
-  return cwds.length > 0 ? cwds.map(safeRealpath) : null;
-}
-
 /** Live processes' cwds and command lines; null (unknown) when either probe failed. */
-export function processRefs() {
-  const cwds = lsofCwds();
-  const argv = psCommandLines();
-  return cwds === null || argv === null ? null : { cwds, argv };
+export function processRefs(options = {}) {
+  return observeProcessRefs({ ...options, realpath: safeRealpath });
 }
 
-function escapeRe(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+export function busyProcess(dir, refs) {
+  return busyReference(dir, refs, safeRealpath);
 }
 
 export function isBusy(dir, refs) {
-  if (refs === null) return null;
-  const forms = [...new Set([dir, safeRealpath(dir)])];
-  const underDir = (c) => forms.some((f) => c === f || c.startsWith(`${f}/`));
-  // Match the dir as a whole path token inside a command line (not `…/cat-cafe-x-2` for `…/cat-cafe-x`).
-  const inArgv = (line) => forms.some((f) => new RegExp(`${escapeRe(f)}(/|\\s|$|["'])`).test(line));
-  return refs.cwds.some(underDir) || refs.argv.some(inArgv);
+  const reference = busyProcess(dir, refs);
+  return reference === null ? null : reference !== false;
 }
 
 const JUNK_FILES = new Set(['.DS_Store']);

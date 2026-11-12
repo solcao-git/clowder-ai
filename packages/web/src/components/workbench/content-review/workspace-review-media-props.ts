@@ -6,9 +6,21 @@ import type {
   WorkspaceContentVisualMarkResolution,
 } from '@cat-cafe/shared';
 import type { ReactNode } from 'react';
+import type { PendingChatMark } from '@/components/content-review/ReviewPendingChatMarks';
 import type { ContentReviewAnnotation, ContentReviewVisualMark } from './content-review-contract';
 import type { CanvasFocusRequest, DiscussionFocusRequest } from './workspace-review-media-focus';
 export interface WorkspaceReviewMediaProps {
+  readonly seekRequest?: { id: number; seconds: number };
+  readonly markRequest?: number;
+  readonly selectionRequest?: { id: number; anchor: ArtifactReviewAnchor };
+  readonly playbackHidden?: boolean;
+  readonly onPlaybackTime?: (seconds: number) => void;
+  readonly chapterNavigation?: ReactNode;
+  readonly originalUrl?: string;
+  readonly filename?: string;
+  readonly mime?: string;
+  readonly byteLength?: number;
+  download?: { src: string | null; filename: string };
   readonly sourceError?: string | null;
   readonly draftKey?: string;
   readonly canMarkup?: boolean;
@@ -16,6 +28,13 @@ export interface WorkspaceReviewMediaProps {
   /** An unsaved comment text is present (e.g. restored on return), so its composer should be showing. */
   readonly restoreComment?: boolean;
   readonly composer: ReactNode;
+  readonly chatPlaceEditor?: {
+    readonly anchor: ArtifactReviewAnchor;
+    readonly content: ReactNode;
+    readonly cancel: () => void;
+  };
+  readonly imageChatPrimary?: boolean;
+  readonly wholeWorkAction?: ReactNode;
   readonly onOpenDiscussion: () => void;
   readonly reviewId: string;
   readonly sourceRevision: string;
@@ -36,4 +55,6 @@ export interface WorkspaceReviewMediaProps {
   readonly modificationOpenRequest?: number;
   readonly onSaveVisualMarks: (marks: readonly ArtifactReviewDrawing[]) => Promise<boolean>;
   readonly onDeleteVisualMark: (markId: string) => Promise<boolean>;
+  /** Places of this work already waiting in the chat composer, numbered as their chips are. */
+  readonly pendingChatMarks?: readonly PendingChatMark[];
 }

@@ -1,6 +1,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { apiSessionIdentity, observeApiSessionOwner } from '@/utils/api-session-identity';
 
 const mocks = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock('@/utils/api-client', () => ({ apiFetch: mocks.apiFetch }));
@@ -17,7 +18,7 @@ const source = (overrides: Record<string, unknown> = {}) => ({
 });
 
 function readBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     version: 1,
     status: 'available',
     scope: 'owner_all_projects',
@@ -31,6 +32,30 @@ function readBody(overrides: Record<string, unknown> = {}): Record<string, unkno
     page: { offset: 0, limit: 20, scope: 'known_rows', hasMore: false },
     ...overrides,
   };
+  body.sources = { ...(body.sources as Record<string, unknown>), personalPreferences: source() };
+  body.items = (body.items as Array<Record<string, unknown>>).map((item) => ({
+    ...item,
+    preferenceCoordinate: { kind: 'mailbox', decisionRef: item.decisionRef, version: 'sha256:server-version' },
+  }));
+  if (!('attentionCount' in overrides)) body.attentionCount = body.totalCount;
+  body.personalView =
+    'personalView' in overrides
+      ? overrides.personalView
+      : {
+          mode: 'visible',
+          ...(typeof body.totalCount === 'number'
+            ? {
+                preferenceRevision: 4,
+                originalTotalCount: body.totalCount,
+                visibleTotalCount: body.totalCount,
+                ignoredTotalCount: 0,
+                originalAttentionCount: body.attentionCount,
+                visibleAttentionCount: body.attentionCount,
+                ignoredAttentionCount: 0,
+              }
+            : {}),
+        };
+  return body;
 }
 
 interface Deferred {
@@ -87,11 +112,87 @@ describe('useUnifiedAttention — one verified read of the owner’s attention',
     route(() => Promise.resolve(Response.json(readBody())));
     await mount();
 
-    expect(UNIFIED_ATTENTION_PATH).toBe('/api/concierge/work/decisions?view=unified&offset=0&limit=20');
+    expect(UNIFIED_ATTENTION_PATH).toBe(
+      '/api/concierge/work/decisions?view=unified&includeUserMentions=true&offset=0&limit=20&personalView=visible',
+    );
     expect(mocks.apiFetch).toHaveBeenCalledWith(UNIFIED_ATTENTION_PATH, expect.anything(), { afterCurrentGet: true });
     expect(mocks.apiFetch).toHaveBeenCalledWith('/api/session', expect.anything());
     expect(latest.result.kind).toBe('ok');
     expect(latest.staleRead).toBeNull();
+  });
+
+  it('refuses an old canonical response to a personal-view request', async () => {
+    route(() => Promise.resolve(Response.json(readBody({ personalView: undefined }))));
+    await mount();
+    expect(latest.result).toEqual({ kind: 'failed', reason: 'unavailable' });
+  });
+
+  it('reads ignored items from the same owner and refuses a response for the other mode', async () => {
+    route(() => Promise.resolve(Response.json(readBody())));
+    await mount();
+    expect(latest.setPersonalView).toBeTypeOf('function');
+    mocks.apiFetch.mockImplementation((path: string) => {
+      if (path === '/api/session') return Promise.resolve(Response.json({ userId: 'owner-1' }));
+      return Promise.resolve(
+        Response.json(
+          readBody({
+            personalView: {
+              mode: 'ignored',
+              preferenceRevision: 4,
+              originalTotalCount: 2,
+              visibleTotalCount: 1,
+              ignoredTotalCount: 1,
+              originalAttentionCount: 2,
+              visibleAttentionCount: 1,
+              ignoredAttentionCount: 1,
+            },
+          }),
+        ),
+      );
+    });
+    await act(async () => latest.setPersonalView?.('ignored'));
+    expect(mocks.apiFetch).toHaveBeenCalledWith(
+      UNIFIED_ATTENTION_PATH.replace('personalView=visible', 'personalView=ignored'),
+      expect.anything(),
+      { afterCurrentGet: true },
+    );
+    expect(latest.result.kind === 'ok' && latest.result.read.personalView?.mode).toBe('ignored');
+    route(() => Promise.resolve(Response.json(readBody())));
+    await act(async () => latest.refetch());
+    expect(latest.result).toEqual({ kind: 'failed', reason: 'unavailable' });
+  });
+
+  it('refreshes exact counts after the existing personal preference writer reports a change', async () => {
+    route(() => Promise.resolve(Response.json(readBody())));
+    await mount();
+    const before = latest.readsStarted();
+    await fire('cat-cafe:ignored-item-preferences-updated');
+    expect(latest.readsStarted()).toBe(before + 1);
+  });
+
+  it('reads the next and previous owner-fenced pages, and invalidation brings new requests back to page one', async () => {
+    mocks.apiFetch.mockImplementation((path: string) => {
+      if (path === '/api/session') return Promise.resolve(Response.json({ userId: 'owner-1' }));
+      const offset = Number(new URL(path, 'http://localhost').searchParams.get('offset'));
+      return Promise.resolve(
+        Response.json(
+          readBody({
+            page: { offset, limit: 20, scope: 'known_rows', hasMore: offset === 0 },
+            items: [{ decisionRef: `page:${offset}`, kind: 'judgment', summary: `第 ${offset} 件`, linkedNeedsMe: [] }],
+            totalCount: 26,
+          }),
+        ),
+      );
+    });
+    await mount();
+    expect(latest.nextPage).toBeTypeOf('function');
+    await act(async () => latest.nextPage?.());
+    expect(latest.result.kind === 'ok' && latest.result.read.page.offset).toBe(20);
+    await act(async () => latest.previousPage?.());
+    expect(latest.result.kind === 'ok' && latest.result.read.page.offset).toBe(0);
+    await act(async () => latest.nextPage?.());
+    await fire('cat-cafe:user-mention-updated');
+    expect(latest.result.kind === 'ok' && latest.result.read.page.offset).toBe(0);
   });
 
   it('is loading until the first read settles — never an empty or zero claim', async () => {
@@ -179,6 +280,7 @@ describe('useUnifiedAttention — one verified read of the owner’s attention',
     'cat-cafe:proposal-created',
     'cat-cafe:runtime-interaction-updated',
     'cat-cafe:entrusted-work-projection-invalidated',
+    'cat-cafe:collective-attention-invalidated',
   ])('re-reads on %s from the original invalidation chain', async (eventName) => {
     route(() => Promise.resolve(Response.json(readBody())));
     await mount();
@@ -186,6 +288,31 @@ describe('useUnifiedAttention — one verified read of the owner’s attention',
     await fire(eventName);
     const after = mocks.apiFetch.mock.calls.filter(([path]) => path === UNIFIED_ATTENTION_PATH).length;
     expect(after).toBe(before + 1);
+  });
+
+  it('retains the last confirmed badge through a same-scope refresh, clears it on scope or identity change', async () => {
+    route(() => Promise.resolve(Response.json(readBody())));
+    await mount();
+    const first = latest.result;
+    const pending = deferred();
+    const sessionPending = deferred();
+    route(
+      () => pending.promise,
+      () => sessionPending.promise,
+    );
+    await act(async () => latest.refetch());
+    expect(latest.badgeResult).toEqual(first);
+    expect(latest.result.kind).toBe('loading');
+    await act(async () => sessionPending.resolve(Response.json({ userId: 'owner-2' })));
+    expect(latest.badgeResult).toEqual({ kind: 'loading' });
+    await act(async () => pending.resolve(Response.json(readBody({ identity: { ownerUserId: 'owner-2' } }))));
+    expect(latest.badgeResult?.kind).toBe('ok');
+    route(
+      () => deferred().promise,
+      () => Promise.resolve(Response.json({ userId: 'owner-2' })),
+    );
+    await act(async () => latest.setPersonalView?.('ignored'));
+    expect(latest.badgeResult).toEqual({ kind: 'loading' });
   });
 
   it('withdraws the previous claim while re-reading and offers the old rows only as stale', async () => {
@@ -204,6 +331,9 @@ describe('useUnifiedAttention — one verified read of the owner’s attention',
     await act(async () => pending.resolve(new Response('{}', { status: 500 })));
     expect(latest.result).toEqual({ kind: 'failed', reason: 'unavailable' });
     expect(latest.staleRead).toBeNull();
+    route(() => deferred().promise);
+    await fire('cat-cafe:proposal-updated');
+    expect(latest.badgeResult).toEqual({ kind: 'loading' });
   });
 
   describe('previous rows are only ever shown to the person who read them', () => {
@@ -334,6 +464,111 @@ describe('useUnifiedAttention — one verified read of the owner’s attention',
       expect(latest.readsStarted).toBe(first);
       expect(first()).toBe(2);
     });
+  });
+
+  it('does not redownload or clear the same query when reopening or changing presentation tabs', async () => {
+    route(() => Promise.resolve(Response.json(readBody())));
+    await mount();
+    const result = latest.result;
+    await act(async () => {
+      latest.setPersonalView?.('visible', 'week');
+      latest.setMentionPeriod?.('week');
+    });
+    expect(mocks.apiFetch.mock.calls.filter(([path]) => path !== '/api/session')).toHaveLength(1);
+    expect(latest.result).toBe(result);
+    expect(latest.resultGeneration).toBe(1);
+  });
+
+  it('coalesces simultaneous invalidations into one fresh read, without losing the write barrier', async () => {
+    route(() => Promise.resolve(Response.json(readBody())));
+    await mount();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('cat-cafe:proposal-updated'));
+      window.dispatchEvent(new CustomEvent('cat-cafe:runtime-interaction-updated'));
+      window.dispatchEvent(new CustomEvent('cat-cafe:user-mention-updated'));
+    });
+    expect(latest.readsStarted()).toBe(2);
+    expect(mocks.apiFetch.mock.calls.filter(([path]) => path !== '/api/session')).toHaveLength(2);
+  });
+
+  it('keeps a verified cached history on refresh failure, but withdraws it when session verification fails', async () => {
+    route(() => Promise.resolve(Response.json(readBody())));
+    await mount();
+    route(() => Promise.resolve(Response.json(readBody({ mentionPeriod: 'handled' }))));
+    await act(async () => latest.setMentionPeriod?.('handled'));
+    const previous = latest.result.kind === 'ok' ? latest.result.read : null;
+    expect(previous).not.toBeNull();
+    route(() => Promise.resolve(new Response('{}', { status: 500 })));
+    await act(async () => latest.refetch());
+    expect(latest.result.kind).toBe('failed');
+    expect(latest.staleRead).toBe(previous);
+    route(
+      () => Promise.resolve(new Response('{}', { status: 500 })),
+      () => Promise.resolve(new Response('{}', { status: 401 })),
+    );
+    await act(async () => latest.refetch());
+    expect(latest.staleRead).toBeNull();
+  });
+  it('refuses a late old principal after an external session owner change', async () => {
+    const session = deferred(),
+      body = deferred();
+    route(
+      () => body.promise,
+      () => session.promise,
+    );
+    await mount();
+    await act(async () => observeApiSessionOwner('owner-2'));
+    await act(async () => session.resolve(Response.json({ userId: 'owner-1' })));
+    await act(async () => body.resolve(Response.json(readBody())));
+    expect(apiSessionIdentity.getSnapshot().ownerUserId).toBe('owner-2');
+    expect(latest.result.kind).toBe('failed');
+    expect(latest.staleRead).toBeNull();
+  });
+
+  it('keeps old history pages visible across refresh failures without treating them as newly verified', async () => {
+    route(() => Promise.resolve(Response.json(readBody())));
+    await mount();
+    const head = readBody({
+      mentionPeriod: 'handled',
+      totalCount: 21,
+      page: { offset: 0, limit: 20, scope: 'known_rows', hasMore: true },
+    });
+    route(() => Promise.resolve(Response.json(head)));
+    await act(async () => latest.setMentionPeriod?.('handled'));
+    const tail = readBody({
+      mentionPeriod: 'handled',
+      totalCount: 21,
+      page: { offset: 20, limit: 20, scope: 'known_rows', hasMore: false },
+    });
+    route(() => Promise.resolve(Response.json(tail)));
+    await act(async () => latest.nextPage?.());
+    expect(latest.pages).toHaveLength(2);
+    expect(latest.currentPages).toHaveLength(2);
+
+    const refresh = deferred();
+    route(() => refresh.promise);
+    await act(async () => latest.refetch());
+    expect(latest.pages).toHaveLength(2);
+    expect(latest.currentPages).toHaveLength(0);
+    await act(async () => refresh.resolve(Response.json(head)));
+    expect(latest.pages).toHaveLength(2);
+    expect(latest.currentPages).toHaveLength(1);
+
+    route(() => Promise.resolve(new Response('{}', { status: 500 })));
+    await act(async () => latest.refetch());
+    expect(latest.staleRead).not.toBeNull();
+    expect(latest.pages).toHaveLength(2);
+    expect(latest.currentPages).toHaveLength(0);
+    await act(async () => latest.refetch());
+    expect(latest.staleRead).not.toBeNull();
+    expect(latest.pages).toHaveLength(2);
+    expect(latest.currentPages).toHaveLength(0);
+  });
+  it('refuses a response for another mention window rather than caching it under the requested query', async () => {
+    route(() => Promise.resolve(Response.json(readBody())));
+    await mount();
+    await act(async () => latest.setMentionPeriod?.('handled'));
+    expect(latest.result.kind).toBe('failed');
   });
 
   it('aborts the in-flight read on unmount', async () => {

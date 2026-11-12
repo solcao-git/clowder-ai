@@ -1,11 +1,12 @@
 ---
 name: worktree
-tips_exempt: "Renewed 2026-09-29 for Alpha Redis 6397 and shared developer Redis 6398 safety guidance; this internal checkout setup has no separate end-user command or useful Hub discovery moment."
-description: 为代码、脚本、API 与第一方执行面创建隔离 Git worktree，并配置 Redis 6398；classifier 放行的 co-creation docs direct push 不进入本流程。
+tips_exempt: "2026-10-27: developer CLI birth/inventory/finish and automatic merged-checkout retirement; no separate end-user Hub action."
+description: "Use when: 创建代码/脚本/API工位或收尾。Not for: docs直推、代清其他owner。Output: 隔离worktree（Redis6398）、实际移除工位的released回执或具名retained回执。"
 triggers:
   - "开始开发"
   - "新 worktree"
   - "开 worktree"
+  - "worktree 收尾"
 renamed-from: using-git-worktrees
 ---
 
@@ -41,7 +42,7 @@ search_evidence("{topic}", scope="all")
 **Clowder AI 项目：`../cat-cafe-{feature-name}`（relay-station/ 同级）**
 
 ```bash
-pnpm worktree:new ../cat-cafe-{feature-name} --branch feat/{feature-name} --owner {你的 catId} --policy merged
+pnpm worktree:new ../cat-cafe-{feature-name} --branch feat/{feature-name} --source-ref {原Task或PR的ref} --owner {你的 catId} --policy merged
 ```
 
 - 🔴 **禁止在项目内部创建**（不要用 `.worktrees/` 子目录）
@@ -101,12 +102,13 @@ gh pr diff <n> --name-only          # 或 gh pr view <n> --json files --jq '.fil
 
 ```bash
 # 1. 创建 worktree（唯一入口；owner 默认取 $CAT_CAFE_CAT_ID，policy 默认 merged，登记随创建完成）
-#    满额时直接拒绝并按 owner 列出谁占着位置（见「异常」）；它从不挪动任何人的目录
+#    不设工位数量上限；创建本身不挪动或删除已有目录
 pnpm worktree:new ../cat-cafe-{feature-name} --branch feat/{feature-name}
 cd ../cat-cafe-{feature-name}
 
-# 2. 安装依赖（必须清除 NODE_ENV，否则跳过 devDeps 导致 build 失败！）
-env -u NODE_ENV pnpm install
+# 2. 只有任务需要编译/依赖测试时才安装；只读/纯文档/Node 内置脚本无需先铺依赖。
+#    清除 NODE_ENV，使用本分支锁文件。开发中的依赖和构建缓存保留，不在每次 gate 后删除。
+env -u NODE_ENV pnpm install --frozen-lockfile
 
 # 3. 创建 .env（Redis 隔离，必须！）
 cat > .env <<EOF
@@ -121,6 +123,29 @@ echo $REDIS_URL   # 必须是 redis://localhost:6398，不能是 6399
 pnpm check:skills   # skill surface
 pnpm test           # 仅在跨包行为 / high-assurance 需要全量 baseline 时
 ```
+
+新工位默认延后检出大型历史媒体，代码、文字、元数据及已识别的运行/测试素材照常保留。
+要查历史图片/视频时，在工位内用 `pnpm worktree:assets project-evidence/<目录>` 补齐；
+裸 `pnpm worktree:assets` 列出尚未检出的路径，`pnpm worktree:assets --all` 补齐全部。
+从创建起就需要完整素材的任务，在 `worktree:new` 加 `--full`。
+补齐取当前工位分支，不能把 main 的资料目录或整个 `node_modules` 链过来。
+动态拼接的素材路径可能需要主动补齐；检查缺素材时先补本分支文件，不伪造替代图片。
+
+pnpm 复用它自己的 store；每个工位保有独立 workspace 链接和构建产物。
+不把目录显示的 `node_modules` 大小当独占占盘量，不承诺固定恢复秒数。
+
+暂时不用且希望回收空间时，从工位外显式执行：
+
+```bash
+pnpm worktree:trim ../cat-cafe-{feature-name} --source-ref {原Task或PR的ref}
+```
+
+它先核本人登记、保护对象、进程和排队任务，只回收 `.next/cache` 下的 webpack / swc / next-minifier。
+依赖、dist、生产构建、运行缓存、配置和证据保留；继续工作时直接 dev/build，编译器会重建缓存。
+没有 paused 状态，无需 resume。`--retain` 不会自动 trim，也不在每次 gate 后 trim。
+回执分别列目录逻辑大小和文件系统可用空间前后值；后者包含同期其他写入，不等于可归因释放量。
+这是进程/持久记录检查后 rename，不是新任务 admission 锁；别与同一工位的编译同时发起。
+rename 或删除中断时原件不受影响，再次显式 trim 会清理已移开的缓存；EXDEV 不会退回原地删除。
 
 ## Redis 隔离（数据安全红线）
 
@@ -187,36 +212,76 @@ pnpm check:worktree-port-offset   # 验证全部 7 个大赛 OFFSET 派生 + 端
 
 详细设计见 *(internal reference removed)*。
 
-## 收工：合入后当场清理
+## 出生来源与 PR 关联
 
-分支合入 main 后**当场清理**（merge-gate Step 8 同一套），不要留到下次：
+`worktree:new` 记录本 invocation 的 thread/user/source/role 到工位私有 config，保留原 owner 与出生时间。
+独立 CLI 没有 callback 环境时，带 `--thread-id {原threadId} --user-id {原userId} --source-ref {原Task或PRref}`。
+只在真实创建/使用记录支持时填写；未知旧目录不通过 declare-only 补造出生记录。
+
+作者创建 PR 后，将它关联到自己的 exact HEAD 工位（不改原出生来源）：
 
 ```bash
-git worktree remove ../cat-cafe-{feature-name}
-git branch -d feat/{feature-name}
-git worktree prune
+pnpm worktree:bind-pr {精确工位路径} pr:{OWNER}/{REPO}#{PR_NUMBER}
 ```
 
-**忘了清会怎样（如实说明）**：什么都不会自动发生——没有定时回收，`worktree:new` 也从不挪动任何目录。
-你忘清的目录会一直占你的名额，直到满额时它出现在拒绝消息的 owner 清单里。登记只是让工具**看得出**
-哪些已被主人放行（`merged`：内容已进 origin/main〔含 squash 合入〕且闲置 7 天；`ttl`：到期）；
-真正挪进隔离区（`pnpm worktree:reap --apply`）和删除（`--purge`）都是显式命令，由获授权的人执行。
-所以收工那三行是你的事。
+只读普查用 `pnpm worktree:inventory`，包含 legacy 与非标准路径；capacity 只回答名额，不是完整库存。
+API 每五分钟扫描本部署仓库的续留及已合入未收尾事实，每轮最多四个 PR subject 轮转。
+已登记且来源 thread/user 核对通过、PR 已合入并包含当前 exact HEAD、没有有效续留的工位，
+扫描会调用原生收尾：再次核对干净状态、进程与持久任务、保护名单及 Git 可见 index，
+保全被忽略的本地数据/环境配置和私有 Git metadata，再用无 force 的 Git remove 释放目录、保留分支。
+常驻目录、Alpha、policy=never、locked、未提交改动和仍有消费者的工位保留。
+结果/恢复入口用已有幂等消息回原 thread，投递中断从原收尾账本补投，不唤醒模型或创建 Queue 任务。
+自动归档/删除失败后，同一路径与 HEAD 暂停自动重试，回原 thread 提醒手动收尾，不重复复制多份原件。
+删除尚未开始且原工位仍在时，失败或中断留下的本次重复归档会清除；删除已开始则保留恢复材料。
+下轮扫描从同一账本核对中断：目录和登记已消失、归档验证通过时补发明确的中断对账通知，
+不伪造原 finish 的完成回执。可能部分删除或无法核验时保留归档并报原 thread。
+来源缺失/损坏会写运行日志并保留在 inventory 中，由原维护查证，不能猜同 catId 的另一个线程。
+过期提醒在代码部署后才生效，源码存在不算线上已验收。
 
-## 异常：满额、想保留、要恢复
+## 收工：核验释放或具名续留
+
+工作结束时，从持有 main 且已包含当前收尾版本的主仓执行唯一收尾入口（merge-gate Step 8 同一套）。旧 feature/review 快照里的 CLI 可能仍执行完整隔离；离开目标目录后调用主仓的 CLI，不从另一份旧快照运行收尾：
+
+```bash
+pnpm worktree:finish ../cat-cafe-{feature-name} --source-ref {原Task或PR的ref}
+pnpm worktree:finish ../cat-cafe-{feature-name} --source-ref {同一ref} --check
+```
+
+只有工具核实工位实际移除、恢复归档验证通过、ledger 有匹配的完成记录，才返回 `state=released` / exit 0。
+它核 owner、保护名单、锁、进程和目标状态；`merged` 还核内容已在 `origin/main`（含 squash）。
+这是 owner 显式收尾，不再等 7 天闲置或 14 天隔离窗：工具先验证归档独有 ignored 原件、工位私有 Git metadata，并保住 HEAD reflog 对象，然后用无 force 的 Git 命令移除工位。分支与源码留在共享 Git；依赖、构建与浏览器测试缓存直接回收，不复制进归档。未知 ignored 内容默认保留，真实 tracked/untracked 源文件仍阻塞释放。
+新回执为 `storageDisposition: removed`，包含归档位置、恢复命令和删除前后可用空间读数。归档里的用户原件持久保留，不自动过期。恢复时重建依赖和构建缓存；不要把全部目录移动到隔离区当作磁盘清理。
+旧隔离回执的 `storageDisposition: quarantined` 只证明离开活跃库存，目录仍占磁盘；不用于声明空间已回收。
+
+仍需预览、验收或接续时，写一条 worktree-local 的 owner/source/原因/截止事实，再核验：
+
+```bash
+pnpm worktree:finish ../cat-cafe-{feature-name} --source-ref {原Task或PR的ref} --retain --reason "等待原Alpha验收" --until {未来ISO时刻}
+pnpm worktree:finish ../cat-cafe-{feature-name} --source-ref {同一ref} --check
+```
+
+单次续留最多30天，`--until` 必须带明确时区（Z 或 offset）；超出范围拒绝，不写登记。到期确需接续须由 owner 重新给出原因与截止。
+`retained` 仍占工位；到期、HEAD 改变或 source 不符时 `--check` 非零，不能当已收尾。
+reaper 尊重有效续留，过期或损坏的续留只报告 review，不能静默按旧策略处置。
+将实际 JSON 回执留在原 Task/PR；`blocked`、merge 成功或单纯命令退出都不替代工位处置。
+
+创建不受登记数量阻挡，也不触发同步清理。已合入工位由上述周期扫描收尾；
+既有 `reap --apply`/`--purge` 仍是单独授权的显式动作。原始未登记旧目录仍只报告。
+
+## 异常：想保留、收尾受阻、要恢复
 
 | 场景 | 你看到什么 | 怎么做 |
 |------|-----------|--------|
-| 满额被拒 | `capacity: 40/40 …` + 按 owner 列出的占位目录 | 先收掉自己列表里做完的；其余在对应 owner 的 thread 问一句。**不要去清别人的目录，也不用管 undeclared 老库存**（它们不占名额，由维护者一次性处理） |
-| 想长期保留 | — | 建时加 `--policy never`；已有的（包括已在隔离区里的）：`pnpm worktree:new <path> --declare-only --policy never`，之后不会被 purge |
+| 工位数量很多 | `worktree:check` 显示库存数量 | 数量只是观测，不阻止创建；不要为了开工先替别的 owner 清目录 |
+| 工作结束但还需保留 | — | 用 `worktree:finish --retain --reason ... --until ... --source-ref ...`；核 `retained` 回执与截止。`never` 是主动长期政策，不替代这次收尾的具名理由 |
 | 临时沙盒 | — | `--policy ttl --ttl-days N`（review 沙盒默认 7） |
-| 目录被挪走了 | 原路径不见了 | 在 `../.reaper-quarantine/ledger.jsonl` 按原路径找到那条，执行其 `restore` 命令（`git worktree move <隔离路径> <原路径>`） |
+| 工位已完成移除，要恢复 | 原路径不见了 | 按 finish 回执/ledger 的 `archivePath` 与 `restore` 恢复源码及原件，再重装依赖；旧 `quarantinePath` 回执仍用它自己的 move 恢复命令 |
 | 隔离后又在里面干活了 / 改了登记 | — | 不用管：隔离后有改动、新提交或重新登记的目录**不会被 purge**（`review:changed-in-quarantine` / `redeclared-in-quarantine`），恢复回去即可 |
 
 规则细节留给工具（`scripts/lib/worktree-reaper-core.mjs`），这里只记要点：
-- **名额只算登记过的活跃 worktree**（上限 40）；隔离区里的、白名单的（`runtime`/`alpha`/`tutorials`/`sharing`/`recovery-backups`）、没登记的老目录都不算。`pnpm worktree:check` 看当前数字。
+- **数量只作观测，不设硬上限**。`pnpm worktree:check` 分别报告登记工位和未登记旧库存；旧调用的 `--max` 仅供对比，不拒绝创建或令数量检查失败。
 - **只动出生时登记过的目录**；没登记的只进报告（`pnpm worktree:reap` dry-run，账本 `.cat-cafe/tmp/reaper-<date>.tsv`）。
-- **有未提交改动、locked、有进程在用的永远不动**；隔离满 14 天且期间没人动过，才进入 `--purge` 候选。
+- **有未提交改动、locked、有进程在用的永远不动**；自动 reaper 仅凭闲置/TTL 推断时仍先隔离，满 14 天且期间无人改动才进入 `--purge` 候选。owner 的显式 finish 用上面的真实移除路径。
 
 ## Commit / Stash 溯源 Footer（F193 Phase E）
 

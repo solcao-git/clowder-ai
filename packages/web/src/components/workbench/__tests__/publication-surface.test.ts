@@ -1,11 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { createMessagePublicationSurface, resolveMessagePublicationSource } from '../message-publication-surface';
-import { createPublicationSurface, resolvePublicationTarget } from '../publication-surface';
+import { createPublicationSurface, parsePublicationTarget, resolvePublicationTarget } from '../publication-surface';
 import { artifactObjectId, isRealSurfaceOwnerAvailable, legacyArtifactObjectId } from '../real-surface-adapters';
 import { createInitialWorkbenchState, restoreWorkbenchState } from '../workbench-model';
 
 const contentRef = `prepared-media:${'a'.repeat(64)}`;
 describe('canonical publication Workspace target', () => {
+  it('opens and restores a fixed independent work version without a source message or a new surface owner', () => {
+    const workRef = `work:${'c'.repeat(64)}`;
+    expect(parsePublicationTarget({ contentRef: workRef, ownerRevision: 3 })).toEqual({
+      contentRef: workRef,
+      ownerRevision: 3,
+    });
+    const surface = createPublicationSurface({ contentRef: workRef, ownerRevision: 3, title: '真实视频作品' });
+    const restored = restoreWorkbenchState(
+      { ...createInitialWorkbenchState(), surfaces: [surface], activeSurfaceId: surface.id },
+      { isOwnerRefAvailable: isRealSurfaceOwnerAvailable },
+    );
+    expect(restored.surfaces.map(resolvePublicationTarget)).toEqual([{ contentRef: workRef, ownerRevision: 3 }]);
+    expect(surface.ownerStateRef.owner).toBe('f138-publication');
+    expect(surface.messagePublicationSource).toBeUndefined();
+    expect(parsePublicationTarget({ contentRef: `widget:${'c'.repeat(64)}`, ownerRevision: 3 })).toBeNull();
+  });
   it('restores an unresolved exact item without inventing a publication or admitting a forged descriptor', () => {
     const source = {
       kind: 'message' as const,
@@ -56,4 +72,56 @@ describe('canonical publication Workspace target', () => {
     expect(resolvePublicationTarget(restored.surfaces[0]!)).toEqual({ contentRef, ownerRevision: 1 });
     expect(resolvePublicationTarget({ ...first, objectRef: { ...first.objectRef, id: 'foreign' } })).toBeNull();
   });
+  it('carries the review a receipt is committed to as part of the exact target, and changes nothing for a plain open', () => {
+    const reviewId = `review-${'b'.repeat(64)}`;
+    const plain = createPublicationSurface({ contentRef, ownerRevision: 2, title: '晨光' });
+    const bound = createPublicationSurface({ contentRef, ownerRevision: 2, reviewId, title: '晨光' });
+    // One work stays one object however it was opened.
+    expect(bound.id).toBe(plain.id);
+    expect(resolvePublicationTarget(bound)).toEqual({ contentRef, ownerRevision: 2, reviewId });
+    // A plain target, and every descriptor saved before there was a bound one, carry no review key at all.
+    expect(plain.ownerStateRef.key).toBe(JSON.stringify({ contentRef, ownerRevision: 2 }));
+    expect(resolvePublicationTarget(plain)).toEqual({ contentRef, ownerRevision: 2 });
+    const restored = restoreWorkbenchState(
+      { ...createInitialWorkbenchState(), surfaces: [bound], activeSurfaceId: bound.id },
+      { isOwnerRefAvailable: isRealSurfaceOwnerAvailable },
+    );
+    expect(resolvePublicationTarget(restored.surfaces[0]!)).toEqual({ contentRef, ownerRevision: 2, reviewId });
+  });
+  it('refuses a review id that is not one, instead of carrying it to the owner', () => {
+    const reviewId = `review-${'b'.repeat(64)}`;
+    expect(parsePublicationTarget({ contentRef, ownerRevision: 2, reviewId })).toEqual({
+      contentRef,
+      ownerRevision: 2,
+      reviewId,
+    });
+    expect(parsePublicationTarget({ contentRef, ownerRevision: 2, reviewId: 'not-a-review' })).toBeNull();
+    expect(() =>
+      createPublicationSurface({ contentRef, ownerRevision: 2, reviewId: 'not-a-review', title: '晨光' }),
+    ).toThrow();
+  });
+});
+
+it('restores Work read context separately from the fixed owner identity and the Home return', () => {
+  const target = { contentRef: `work:${'d'.repeat(64)}`, ownerRevision: 2 };
+  const surface = createPublicationSurface({
+    ...target,
+    title: 'HTML',
+    htmlWorkSourceThreadId: 'actual-source',
+    navigationOrigin: {
+      kind: 'artifact-list',
+      threadId: 'default',
+      view: { scope: 'global', filter: 'all', query: '', grouping: 'time', catFilter: null, collapsed: [] },
+    },
+  });
+  const restore = (candidate: unknown) =>
+    restoreWorkbenchState(
+      { ...createInitialWorkbenchState(), surfaces: [candidate], activeSurfaceId: surface.id },
+      { isOwnerRefAvailable: isRealSurfaceOwnerAvailable },
+    );
+  const restored = restore(JSON.parse(JSON.stringify(surface))).surfaces[0];
+  expect(resolvePublicationTarget(restored)).toEqual(target);
+  expect(restored.htmlWorkSourceThreadId).toBe('actual-source');
+  expect(restored.navigationOrigin).toMatchObject({ threadId: 'default' });
+  expect(restore({ ...surface, htmlWorkSourceThreadId: 'bad\0source' }).surfaces).toEqual([]);
 });

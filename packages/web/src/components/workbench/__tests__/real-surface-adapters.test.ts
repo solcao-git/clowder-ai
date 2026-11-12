@@ -1,5 +1,6 @@
 import type { ActiveExecutionProjection, GlobalArtifactDTO, ThreadArtifactDTO } from '@cat-cafe/shared';
 import { describe, expect, it } from 'vitest';
+import { resolvePublicationTarget } from '../publication-surface';
 import {
   createAgentRunSurface,
   createArtifactSurface,
@@ -25,6 +26,42 @@ import { createInitialWorkbenchState } from '../workbench-model';
 import { restoreWorkbenchState } from '../workbench-restore';
 
 describe('F307 real surface adapters', () => {
+  it('opens a silently retained video through its exact owner version without inventing a message', () => {
+    const work = { contentRef: `work:${'c'.repeat(64)}`, ownerRevision: 2, currentOwnerRevision: 3 };
+    const artifact: GlobalArtifactDTO = {
+      type: 'video',
+      name: '真实成片',
+      sourceMessageId: null,
+      catId: 'codex61-sol',
+      createdAt: 1,
+      threadId: 'source-thread',
+      threadTitle: '影片',
+      work,
+    };
+    const surface = createArtifactSurface({
+      threadId: 'host-thread',
+      artifact,
+      navigationOrigin: { kind: 'workspace-home-search', query: '真实成片' },
+    });
+    expect(surface.ownerStateRef.owner).toBe('f138-publication');
+    expect(resolvePublicationTarget(surface)).toEqual({ contentRef: work.contentRef, ownerRevision: 2 });
+    expect(surface.navigationOrigin).toEqual({ kind: 'workspace-home-search', query: '真实成片' });
+    expect(restoreWorkbenchState(createInitialWorkbenchState([surface])).surfaces).toEqual([surface]);
+    expect(JSON.stringify(surface)).not.toContain('sourceMessageId');
+  });
+  it.each([
+    { name: 'guide.md', type: 'file' as const, context: 'Markdown' },
+    { name: 'guide.MARKDOWN', type: 'file' as const, context: 'Markdown' },
+    { name: 'report.pdf', type: 'file' as const, context: '文件' },
+    { name: 'photo.png', type: 'image' as const, context: '图片' },
+    { name: 'example.ts', type: 'code' as const, context: '代码' },
+  ])('names $name with a human-readable artifact type', ({ name, type, context }) => {
+    const artifact: ThreadArtifactDTO = { name, type, catId: null, sourceMessageId: null, createdAt: 1 };
+    const surface = createArtifactSurface({ threadId: 'thread-artifact-copy', artifact });
+    expect(surface.context).toBe(context);
+    expect(resolveArtifactTarget(surface)?.artifactId).toBe(surface.objectRef.id);
+  });
+
   it('persists only F309 content/session refs for a DOCX editor surface', () => {
     const contentRef = 'project:alpha/assets/proposal.docx';
     const sessionRef = `editor-session:${'a'.repeat(64)}`;
@@ -298,7 +335,7 @@ describe('F307 real surface adapters', () => {
       catId: 'codex-sol',
       createdAt: 1787880000000,
       sourceMessageId: 'message-review-ready',
-      ref: 'zts212653/cat-cafe#4030',
+      ref: 'zts212653/clowder-ai#4030',
     };
 
     const surface = createArtifactSurface({ threadId: 'thread-f307', artifact });

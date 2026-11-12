@@ -2,7 +2,7 @@
  * Callback task routes — MCP post_message 回传的任务更新端点
  */
 
-import type { CatId, TaskItem } from '@cat-cafe/shared';
+import type { CatId, EntrustedWorkTerminalClosureV1, TaskItem, UpdateTaskInput } from '@cat-cafe/shared';
 import {
   catRegistry,
   createCatId,
@@ -15,11 +15,17 @@ import {
 } from '@cat-cafe/shared';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { adoptOrdinaryTaskTenant } from '../domains/ball-custody/adopt-ordinary-task-tenant.js';
+import type { OrdinaryTaskHandoffService } from '../domains/ball-custody/OrdinaryTaskHandoffService.js';
+import type { OwnedWaitStatusReader } from '../domains/ball-custody/OwnedWaitStatus.js';
 import { resolveCatTarget } from '../domains/cats/services/agents/routing/cat-target-resolver.js';
 import type { IMessageStore } from '../domains/cats/services/stores/ports/MessageStore.js';
 import { queryTaskItems } from '../domains/cats/services/stores/ports/TaskQuery.js';
 import type { ITaskStore } from '../domains/cats/services/stores/ports/TaskStore.js';
-import { isEntrustedWorkTerminalActionRequiredError } from '../domains/cats/services/stores/ports/TaskStoreContract.js';
+import {
+  isEntrustedWorkTerminalActionRequiredError,
+  isOrdinaryImplementTask,
+} from '../domains/cats/services/stores/ports/TaskStoreContract.js';
 import type { IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
 import type { DevelopmentScopeDocuments } from '../domains/growing/DevelopmentScopeResolver.js';
 import {
@@ -33,8 +39,11 @@ import { recordAnchorFullDrill, recordAnchorReturned } from './anchor-telemetry.
 import { anchorTaskWhy } from './callback-anchor-helpers.js';
 import { requireCallbackAuth } from './callback-auth-prehandler.js';
 import { registerCallbackDevelopmentWorkRoutes } from './callback-development-work-routes.js';
+import { updateOrdinaryTaskFromCallback } from './callback-ordinary-task-update.js';
 import { deriveCallbackActor, getDeletedCallbackThreadGuard, resolveScopedThreadId } from './callback-scope-helpers.js';
+import { reconcileOwnedTaskWaits } from './callback-task-reconciliation.js';
 import { admissionSourceContext, assertDirectAdmissionSourceCustody } from './entrusted-work-source-custody.js';
+import { type LiveTaskAuthority, withLiveTaskAuthority } from './live-task-authority.js';
 
 // F193-E1: shared refine — single source for status-dependent dispatch gate validation.
 // dispatched → require both dispatchedThreadId AND dispatchedMessageId (trace IDs).
@@ -67,6 +76,7 @@ const updateDispatchGateSchema = z
 /** @internal Exported for contract testing only — not part of public API */
 export const updateTaskSchema = z.object({
   taskId: z.string().min(1),
+  expectedOwnerRevision: z.number().int().nonnegative().optional(),
   status: z.enum(['todo', 'doing', 'blocked', 'done']).optional(),
   why: z.string().max(1000).optional(),
   // F193-E1 P1-4: allow patching dispatchGate
@@ -147,14 +157,54 @@ const listTasksQuerySchema = z.object({
   taskId: z.string().min(1).optional(),
 });
 
+function carriesHumanTerminalEvidence(closure: EntrustedWorkTerminalClosureV1): boolean {
+  return (
+    (closure.state === 'satisfied' && closure.confirmation !== undefined) ||
+    (closure.state !== 'satisfied' && closure.disposition.actorKind === 'human')
+  );
+}
+
+type CatTerminalAccessResult =
+  | { readonly ok: true; readonly task: TaskItem }
+  | { readonly ok: false; readonly statusCode: 403 | 404; readonly body: { error: string; code?: string } };
+
+function validateCatTerminalAccess(
+  task: TaskItem | null,
+  actor: { readonly threadId: string; readonly catId: string },
+  closure: EntrustedWorkTerminalClosureV1,
+): CatTerminalAccessResult {
+  if (!task) return { ok: false, statusCode: 404, body: { error: 'Task not found' } };
+  if (task.threadId !== actor.threadId) {
+    return { ok: false, statusCode: 403, body: { error: 'Task belongs to a different thread' } };
+  }
+  if (task.ownerCatId !== actor.catId) {
+    return { ok: false, statusCode: 403, body: { error: 'Entrusted work is owned by another cat' } };
+  }
+  if (carriesHumanTerminalEvidence(closure)) {
+    return {
+      ok: false,
+      statusCode: 403,
+      body: { error: 'Human terminal evidence is server-issued only', code: 'HUMAN_TERMINAL_ROUTE_REQUIRED' },
+    };
+  }
+  return { ok: true, task };
+}
+
 export function registerCallbackTaskRoutes(
   app: FastifyInstance,
   deps: {
     taskStore: ITaskStore;
+    registry?: Pick<
+      import('../domains/cats/services/agents/invocation/InvocationRegistry.js').InvocationRegistry,
+      'verify'
+    >;
+    ownedWaitStatusReader?: OwnedWaitStatusReader;
     messageStore: IMessageStore;
     socketManager: SocketManager;
     threadStore?: IThreadStore;
     developmentDocuments?: DevelopmentScopeDocuments;
+    liveTaskAuthority?: LiveTaskAuthority;
+    ordinaryTaskHandoffs?: OrdinaryTaskHandoffService;
   },
 ): void {
   const { taskStore, messageStore, socketManager, threadStore } = deps;
@@ -165,243 +215,342 @@ export function registerCallbackTaskRoutes(
       socketManager.emitToUser(ownerUserId, 'entrusted_work_projection_invalidated', { ownerUserId }),
   });
 
-  app.post('/api/callbacks/update-task', async (request, reply) => {
-    const record = requireCallbackAuth(request, reply);
-    if (!record) return;
-    const actor = deriveCallbackActor(record);
+  app.post(
+    '/api/callbacks/update-task',
+    withLiveTaskAuthority(deps.liveTaskAuthority, async (request, reply, live, assertCurrent) => {
+      const record = requireCallbackAuth(request, reply);
+      if (!record) return;
+      const actor = deriveCallbackActor(record);
 
-    const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
-    if (deletedThreadGuard) {
-      reply.status(deletedThreadGuard.statusCode);
-      return deletedThreadGuard.body;
-    }
-
-    const parsed = updateTaskSchema.safeParse(request.body);
-    if (!parsed.success) {
-      reply.status(400);
-      return { error: 'Invalid request body', details: parsed.error.issues };
-    }
-
-    const { taskId, status, why, dispatchGate } = parsed.data;
-
-    const existing = await taskStore.get(taskId);
-    if (!existing) {
-      reply.status(404);
-      return { error: 'Task not found' };
-    }
-    if (existing.threadId !== actor.threadId) {
-      reply.status(403);
-      return { error: 'Task belongs to a different thread' };
-    }
-    if (existing.ownerCatId && existing.ownerCatId !== actor.catId) {
-      reply.status(403);
-      return { error: 'Task is owned by another cat' };
-    }
-
-    const updateData: Record<string, unknown> = {};
-    if (status) updateData.status = status;
-    if (why) updateData.why = why;
-    // F193-E1 P1-4: allow patching dispatchGate on existing tasks
-    if (dispatchGate) updateData.dispatchGate = dispatchGate;
-
-    let updated: TaskItem | null;
-    try {
-      updated = await taskStore.update(taskId, updateData);
-    } catch (error) {
-      if (isEntrustedWorkTerminalActionRequiredError(error)) {
-        reply.status(409);
-        return {
-          error: 'Entrusted work requires an evidence-backed typed closure action',
-          code: error.code,
-        };
+      const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
+      if (deletedThreadGuard) {
+        reply.status(deletedThreadGuard.statusCode);
+        return deletedThreadGuard.body;
       }
-      throw error;
-    }
-    if (!updated) {
-      reply.status(500);
-      return { error: 'Failed to update task' };
-    }
 
-    socketManager.broadcastToRoom(`thread:${updated.threadId}`, 'task_updated', updated);
-    return { status: 'ok', task: updated };
-  });
-
-  app.post('/api/callbacks/admit-entrusted-work', async (request, reply) => {
-    const record = requireCallbackAuth(request, reply);
-    if (!record) return;
-    const actor = deriveCallbackActor(record);
-    const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
-    if (deletedThreadGuard) {
-      reply.status(deletedThreadGuard.statusCode);
-      return deletedThreadGuard.body;
-    }
-    const parsed = admitEntrustedWorkSchema.safeParse(request.body);
-    if (!parsed.success) {
-      reply.status(400);
-      return { error: 'Invalid request body', details: parsed.error.issues };
-    }
-
-    try {
-      const source = await assertDirectAdmissionSourceCustody(messageStore, actor, parsed.data.admission);
-      const admission = await entrustedWorkLifecycle.admitOrResume(
-        {
-          task: {
-            threadId: actor.threadId,
-            title: parsed.data.title,
-            why: parsed.data.why,
-            createdBy: actor.catId,
-            ownerCatId: actor.catId,
-            userId: actor.userId,
-          },
-          admission: parsed.data.admission,
-          closure: parsed.data.closure,
-          time: parsed.data.time,
-          artifactRefs: parsed.data.artifactRefs,
-        },
-        admissionSourceContext(source),
-      );
-      if (admission.result === 'needs_clarification') {
-        return { status: 'needs_clarification', admission };
+      const parsed = updateTaskSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.status(400);
+        return { error: 'Invalid request body', details: parsed.error.issues };
       }
-      const taskId = admission.ownerRef.slice('task:item:'.length);
-      const task = await taskStore.get(taskId);
-      if (!task) {
+
+      const { taskId, status, why, dispatchGate } = parsed.data;
+
+      let existing = await taskStore.get(taskId);
+      if (!existing) {
+        reply.status(404);
+        return { error: 'Task not found' };
+      }
+      const ordinary = isOrdinaryImplementTask(existing);
+      if (ordinary && !existing.userId) {
+        if (existing.threadId !== actor.threadId)
+          return reply.code(403).send({ error: 'Task belongs to a different thread' });
+        if (existing.ownerCatId && existing.ownerCatId !== actor.catId)
+          return reply.code(403).send({ error: 'Task is owned by another cat' });
+        const adopted = await adoptOrdinaryTaskTenant({
+          task: existing,
+          userId: actor.userId,
+          tasks: taskStore,
+          threads: threadStore,
+        });
+        if (!adopted) return reply.code(403).send({ error: 'Task tenant mismatch' });
+        existing = adopted;
+      }
+      if (ordinary && existing.userId !== actor.userId) return reply.code(403).send({ error: 'Task tenant mismatch' });
+      if (!ordinary && existing.threadId !== actor.threadId) {
+        reply.status(403);
+        return { error: 'Task belongs to a different thread' };
+      }
+      if (!ordinary && existing.ownerCatId && existing.ownerCatId !== actor.catId) {
+        reply.status(403);
+        return { error: 'Task is owned by another cat' };
+      }
+      if (
+        live &&
+        (existing.kind !== 'work' || existing.ownerCatId !== actor.catId || existing.userId !== actor.userId)
+      ) {
+        reply.status(403);
+        return { error: 'Live may mutate only its own owner-scoped work Task' };
+      }
+
+      const updateData: UpdateTaskInput = {};
+      if (status) updateData.status = status;
+      if (why) updateData.why = why;
+      // F193-E1 P1-4: allow patching dispatchGate on existing tasks
+      if (dispatchGate) updateData.dispatchGate = dispatchGate;
+
+      let updated: TaskItem | null;
+      try {
+        await assertCurrent();
+        if (ordinary) {
+          const result = await updateOrdinaryTaskFromCallback({
+            task: existing,
+            record,
+            data: updateData,
+            expectedOwnerRevision: parsed.data.expectedOwnerRevision,
+            tasks: taskStore,
+            messages: messageStore,
+            handoffs: deps.ordinaryTaskHandoffs,
+            fence: {
+              async assertCurrent() {
+                await assertCurrent();
+                if (deps.registry && !(await deps.registry.verify(record.invocationId, record.callbackToken)).ok)
+                  throw new Error('TASK_CALLBACK_AUTHORITY_RETIRED');
+              },
+            },
+          });
+          if (result.kind !== 'updated' && result.kind !== 'replayed')
+            return reply.code(409).send({
+              error: 'Task assignment changed',
+              reason: result.kind === 'refused' ? result.reason : 'not_found',
+            });
+          updated = result.task;
+        } else updated = await taskStore.update(taskId, updateData);
+      } catch (error) {
+        if (isEntrustedWorkTerminalActionRequiredError(error)) {
+          reply.status(409);
+          return {
+            error: 'Entrusted work requires an evidence-backed typed closure action',
+            code: error.code,
+          };
+        }
+        throw error;
+      }
+      if (!updated) {
         reply.status(500);
-        return { error: 'Task admission returned an unreadable owner reference' };
+        return { error: 'Failed to update task' };
       }
-      if (admission.result === 'admitted') {
-        socketManager.broadcastToRoom(`thread:${task.threadId}`, 'task_created', task);
+
+      socketManager.broadcastToRoom(`thread:${updated.threadId}`, 'task_updated', updated);
+      return {
+        status: 'ok',
+        task: updated,
+        ...(await reconcileOwnedTaskWaits(taskStore, deps.ownedWaitStatusReader, actor)),
+      };
+    }),
+  );
+
+  app.post(
+    '/api/callbacks/admit-entrusted-work',
+    withLiveTaskAuthority(deps.liveTaskAuthority, async (request, reply, _live, assertCurrent) => {
+      const record = requireCallbackAuth(request, reply);
+      if (!record) return;
+      const actor = deriveCallbackActor(record);
+      const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
+      if (deletedThreadGuard) {
+        reply.status(deletedThreadGuard.statusCode);
+        return deletedThreadGuard.body;
       }
-      return { status: admission.result, admission, task };
-    } catch (error) {
-      return replyEntrustedWorkLifecycleError(reply, error);
-    }
-  });
+      const parsed = admitEntrustedWorkSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.status(400);
+        return { error: 'Invalid request body', details: parsed.error.issues };
+      }
 
-  app.post('/api/callbacks/close-entrusted-work', async (request, reply) => {
-    const record = requireCallbackAuth(request, reply);
-    if (!record) return;
-    const actor = deriveCallbackActor(record);
-    const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
-    if (deletedThreadGuard) {
-      reply.status(deletedThreadGuard.statusCode);
-      return deletedThreadGuard.body;
-    }
-    const parsed = closeEntrustedWorkSchema.safeParse(request.body);
-    if (!parsed.success) {
-      reply.status(400);
-      return { error: 'Invalid request body', details: parsed.error.issues };
-    }
-    const existing = await taskStore.get(parsed.data.taskId);
-    if (!existing) {
-      reply.status(404);
-      return { error: 'Task not found' };
-    }
-    if (existing.threadId !== actor.threadId) {
-      reply.status(403);
-      return { error: 'Task belongs to a different thread' };
-    }
-    if (existing.ownerCatId !== actor.catId) {
-      reply.status(403);
-      return { error: 'Entrusted work is owned by another cat' };
-    }
-    try {
-      const task = await entrustedWorkLifecycle.close(parsed.data);
-      socketManager.broadcastToRoom(`thread:${task.threadId}`, 'task_updated', task);
-      return { status: 'closed', task };
-    } catch (error) {
-      return replyEntrustedWorkLifecycleError(reply, error);
-    }
-  });
+      try {
+        const source = await assertDirectAdmissionSourceCustody(messageStore, actor, parsed.data.admission);
+        await assertCurrent();
+        const admission = await entrustedWorkLifecycle.admitOrResume(
+          {
+            task: {
+              threadId: actor.threadId,
+              title: parsed.data.title,
+              why: parsed.data.why,
+              createdBy: actor.catId,
+              ownerCatId: actor.catId,
+              userId: actor.userId,
+            },
+            admission: parsed.data.admission,
+            closure: parsed.data.closure,
+            time: parsed.data.time,
+            artifactRefs: parsed.data.artifactRefs,
+          },
+          admissionSourceContext(source),
+        );
+        if (admission.result === 'needs_clarification') {
+          return { status: 'needs_clarification', admission };
+        }
+        const taskId = admission.ownerRef.slice('task:item:'.length);
+        const task = await taskStore.get(taskId);
+        if (!task) {
+          reply.status(500);
+          return { error: 'Task admission returned an unreadable owner reference' };
+        }
+        if (admission.result === 'admitted') {
+          socketManager.broadcastToRoom(`thread:${task.threadId}`, 'task_created', task);
+        }
+        return { status: admission.result, admission, task };
+      } catch (error) {
+        return replyEntrustedWorkLifecycleError(reply, error);
+      }
+    }),
+  );
 
-  app.post('/api/callbacks/update-entrusted-work', async (request, reply) => {
-    const record = requireCallbackAuth(request, reply);
-    if (!record) return;
-    const actor = deriveCallbackActor(record);
-    const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
-    if (deletedThreadGuard) {
-      reply.status(deletedThreadGuard.statusCode);
-      return deletedThreadGuard.body;
-    }
-    const parsed = updateEntrustedWorkSchema.safeParse(request.body);
-    if (!parsed.success) {
-      reply.status(400);
-      return { error: 'Invalid request body', details: parsed.error.issues };
-    }
-    const existing = await taskStore.get(parsed.data.taskId);
-    if (!existing) {
-      reply.status(404);
-      return { error: 'Task not found' };
-    }
-    if (existing.threadId !== actor.threadId) {
-      reply.status(403);
-      return { error: 'Task belongs to a different thread' };
-    }
-    // An authenticated current same-Task delegate may register Artifact evidence.
-    // The callback scope guard permits only artifactRefs + revision for this capability.
-    if (existing.ownerCatId !== actor.catId && record.collectiveWorkBinding?.taskId !== existing.id) {
-      reply.status(403);
-      return { error: 'Entrusted work is owned by another cat' };
-    }
-    try {
-      const task = await entrustedWorkLifecycle.update(parsed.data);
-      socketManager.broadcastToRoom(`thread:${task.threadId}`, 'task_updated', task);
-      return { status: 'updated', task };
-    } catch (error) {
-      return replyEntrustedWorkLifecycleError(reply, error);
-    }
-  });
+  app.post(
+    '/api/callbacks/close-entrusted-work',
+    withLiveTaskAuthority(deps.liveTaskAuthority, async (request, reply, live, assertCurrent) => {
+      const record = requireCallbackAuth(request, reply);
+      if (!record) return;
+      const actor = deriveCallbackActor(record);
+      const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
+      if (deletedThreadGuard) {
+        reply.status(deletedThreadGuard.statusCode);
+        return deletedThreadGuard.body;
+      }
+      const parsed = closeEntrustedWorkSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.status(400);
+        return { error: 'Invalid request body', details: parsed.error.issues };
+      }
+      const access = validateCatTerminalAccess(await taskStore.get(parsed.data.taskId), actor, parsed.data.closure);
+      if (!access.ok) {
+        reply.status(access.statusCode);
+        return access.body;
+      }
+      const existing = access.task;
+      if (live && existing.userId !== actor.userId) {
+        reply.status(403);
+        return { error: 'Foreign Live Task owner' };
+      }
+      try {
+        await assertCurrent();
+        const task = await entrustedWorkLifecycle.close(parsed.data, assertCurrent);
+        socketManager.broadcastToRoom(`thread:${task.threadId}`, 'task_updated', task);
+        return {
+          status: 'closed',
+          task,
+          ...(await reconcileOwnedTaskWaits(taskStore, deps.ownedWaitStatusReader, actor)),
+        };
+      } catch (error) {
+        return replyEntrustedWorkLifecycleError(reply, error);
+      }
+    }),
+  );
+
+  app.post(
+    '/api/callbacks/update-entrusted-work',
+    withLiveTaskAuthority(deps.liveTaskAuthority, async (request, reply, live, assertCurrent) => {
+      const record = requireCallbackAuth(request, reply);
+      if (!record) return;
+      const actor = deriveCallbackActor(record);
+      const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
+      if (deletedThreadGuard) {
+        reply.status(deletedThreadGuard.statusCode);
+        return deletedThreadGuard.body;
+      }
+      const parsed = updateEntrustedWorkSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.status(400);
+        return { error: 'Invalid request body', details: parsed.error.issues };
+      }
+      const existing = await taskStore.get(parsed.data.taskId);
+      if (!existing) {
+        reply.status(404);
+        return { error: 'Task not found' };
+      }
+      if (existing.threadId !== actor.threadId) {
+        reply.status(403);
+        return { error: 'Task belongs to a different thread' };
+      }
+      // An authenticated current same-Task delegate may register Artifact evidence.
+      // The callback scope guard permits only artifactRefs + revision for this capability.
+      if (existing.ownerCatId !== actor.catId) {
+        reply.status(403);
+        return { error: 'Entrusted work is owned by another cat' };
+      }
+      if (live && (existing.ownerCatId !== actor.catId || existing.userId !== actor.userId)) {
+        reply.status(403);
+        return { error: 'Live may update only its own entrusted work' };
+      }
+      try {
+        await assertCurrent();
+        const task = await entrustedWorkLifecycle.update(parsed.data);
+        socketManager.broadcastToRoom(`thread:${task.threadId}`, 'task_updated', task);
+        return {
+          status: 'updated',
+          task,
+          ...(await reconcileOwnedTaskWaits(taskStore, deps.ownedWaitStatusReader, actor)),
+        };
+      } catch (error) {
+        return replyEntrustedWorkLifecycleError(reply, error);
+      }
+    }),
+  );
 
   // F160: create-task — kind forced to 'work' (KD-4)
-  app.post('/api/callbacks/create-task', async (request, reply) => {
-    const record = requireCallbackAuth(request, reply);
-    if (!record) return;
-    const actor = deriveCallbackActor(record);
+  app.post(
+    '/api/callbacks/create-task',
+    withLiveTaskAuthority(deps.liveTaskAuthority, async (request, reply, live, assertCurrent) => {
+      const record = requireCallbackAuth(request, reply);
+      if (!record) return;
+      const actor = deriveCallbackActor(record);
 
-    const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
-    if (deletedThreadGuard) {
-      reply.status(deletedThreadGuard.statusCode);
-      return deletedThreadGuard.body;
-    }
-
-    const parsed = createTaskSchema.safeParse(request.body);
-    if (!parsed.success) {
-      reply.status(400);
-      return { error: 'Invalid request body', details: parsed.error.issues };
-    }
-
-    const { title, why, ownerCatId, relatedFeatureId, detectedFeatureIds, dispatchGate } = parsed.data;
-
-    // F182 AC-C2: B class — validate ownerCatId is available (contract 400 on disabled)
-    let resolvedOwnerCatId: CatId | null = null;
-    if (ownerCatId) {
-      const resolved = resolveCatTarget(ownerCatId);
-      if ('error' in resolved) {
-        reply.status(400);
-        return resolved.error;
+      const deletedThreadGuard = await getDeletedCallbackThreadGuard(threadStore, actor.threadId);
+      if (deletedThreadGuard) {
+        reply.status(deletedThreadGuard.statusCode);
+        return deletedThreadGuard.body;
       }
-      resolvedOwnerCatId = createCatId(resolved.ok);
-    }
 
-    const task = await taskStore.create({
-      threadId: actor.threadId,
-      title,
-      why: why ?? '',
-      createdBy: actor.catId,
-      kind: 'work',
-      subjectKey: null,
-      ownerCatId: resolvedOwnerCatId,
-      userId: actor.userId,
-      // F193 Phase E (dispatch gate) — pass through to store
-      ...(relatedFeatureId ? { relatedFeatureId } : {}),
-      ...(detectedFeatureIds?.length ? { detectedFeatureIds } : {}),
-      ...(dispatchGate ? { dispatchGate } : {}),
-    });
+      const parsed = createTaskSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.status(400);
+        return { error: 'Invalid request body', details: parsed.error.issues };
+      }
 
-    socketManager.broadcastToRoom(`thread:${task.threadId}`, 'task_created', task);
-    reply.status(201);
-    return { status: 'ok', task };
-  });
+      const { title, why, ownerCatId, relatedFeatureId, detectedFeatureIds, dispatchGate } = parsed.data;
+      if (live && ownerCatId && ownerCatId !== actor.catId) {
+        reply.status(403);
+        return { error: 'Live Task creation cannot assign another cat' };
+      }
+
+      // F182 AC-C2: B class — validate ownerCatId is available (contract 400 on disabled)
+      let resolvedOwnerCatId: CatId | null = null;
+      if (ownerCatId) {
+        const resolved = resolveCatTarget(ownerCatId);
+        if ('error' in resolved) {
+          reply.status(400);
+          return resolved.error;
+        }
+        resolvedOwnerCatId = createCatId(resolved.ok);
+      }
+
+      await assertCurrent();
+      const task = await taskStore.create({
+        threadId: actor.threadId,
+        title,
+        why: why ?? '',
+        createdBy: actor.catId,
+        kind: 'work',
+        subjectKey: null,
+        ownerCatId: live ? actor.catId : resolvedOwnerCatId,
+        userId: actor.userId,
+        ...((record.originTriggerMessageId ?? record.a2aTriggerMessageId)
+          ? {
+              sourceMessageId: record.originTriggerMessageId ?? record.a2aTriggerMessageId,
+            }
+          : {}),
+        ...((live ? actor.catId : resolvedOwnerCatId) === actor.catId
+          ? {
+              initialExecutionRef: {
+                invocationId: actor.invocationId,
+                parentInvocationId: actor.parentInvocationId ?? actor.invocationId,
+                catId: actor.catId,
+                threadId: actor.threadId,
+                sourceMessageId: record.originTriggerMessageId ?? record.a2aTriggerMessageId ?? null,
+              },
+            }
+          : {}),
+        // F193 Phase E (dispatch gate) — pass through to store
+        ...(relatedFeatureId ? { relatedFeatureId } : {}),
+        ...(detectedFeatureIds?.length ? { detectedFeatureIds } : {}),
+        ...(dispatchGate ? { dispatchGate } : {}),
+      });
+
+      socketManager.broadcastToRoom(`thread:${task.threadId}`, 'task_created', task);
+      reply.status(201);
+      return { status: 'ok', task, ...(await reconcileOwnedTaskWaits(taskStore, deps.ownedWaitStatusReader, actor)) };
+    }),
+  );
 
   app.get('/api/callbacks/list-tasks', async (request, reply) => {
     const record = requireCallbackAuth(request, reply);

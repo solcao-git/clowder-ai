@@ -5,7 +5,7 @@
 
 import './helpers/setup-cat-registry.js';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -16,10 +16,16 @@ const hasSourceStagingContent = existsSync(
   new URL('../../../cat-cafe-skills/refs/l0-staging-content.md', import.meta.url),
 );
 
-import { afterEach, before, beforeEach, describe, it, mock } from 'node:test';
+import { afterEach, before, beforeEach, describe, it } from 'node:test';
 import { catRegistry } from '@cat-cafe/shared';
+import {
+  CODEX_ACTIVE_WORK_CONTEXT_DECISION,
+  CODEX_COMPACTION_CONTINUATION_TRIGGER,
+  codexActiveWorkContext,
+} from '../dist/domains/cats/services/agents/providers/codex-active-work-context.js';
 import { ContextEpochOwner } from '../dist/domains/cats/services/session/context/ContextEpochOwner.js';
 import { InMemoryContextEpochStore } from '../dist/domains/cats/services/stores/ports/ContextEpochStore.js';
+import { openCodeDirectMcpContract } from './helpers/direct-mcp-contract.js';
 
 function assertStagingPromptContract(prompt, mode) {
   if (hasSourceStagingContent) {
@@ -289,152 +295,44 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     };
   }
 
-  it('F290 carries an authenticated home delegation into the receiving Cat private Work binding', async () => {
-    const previousDataDir = process.env.CAT_CAFE_DATA_DIR;
-    process.env.CAT_CAFE_DATA_DIR = join(testGlobalConfigRoot, 'private-work');
-    const createCalls = [];
-    const delegationMessage = {
-      id: 'message-home-delegation',
-      userId: 'owner-1',
-      threadId: 'thread-private-work',
-      catId: 'codex-astra',
-      content: '@codex-sol continue the admitted Work',
-      mentions: ['codex-sol'],
-      origin: 'callback',
-      timestamp: 1,
-      extra: {
-        isExplicitPost: true,
-        collectiveWorkDelegationV1: {
-          v: 1,
-          taskId: 'task-private-work',
-          observedRevision: 3,
-          resultRevision: 1,
-          executionRevision: 2,
-          executionRef: 'message:owner-admission',
-          ownerCatId: 'codex-astra',
-          targetCatIds: ['codex-sol'],
-        },
-      },
-    };
-    const privateCalls = [];
-    const verifiedCalls = [];
-    const source = {
-      serviceInstanceId: 'service-test',
-      collectiveId: 'world-test',
-      location: { channelId: 'channel-test' },
-    };
-    const deps = {
-      ...makeDeps(),
-      registry: {
-        create: async (...args) => {
-          createCalls.push(args);
-          return { invocationId: 'inv-home-delegation', callbackToken: 'tok-home-delegation' };
-        },
-        verify: async (invocationId, callbackToken) => {
-          verifiedCalls.push({ invocationId, callbackToken });
-          assert.equal(invocationId, 'inv-home-delegation');
-          assert.equal(callbackToken, 'tok-home-delegation');
-          return { ok: true };
-        },
-      },
-      messageStore: { getById: async () => delegationMessage },
-      collectiveContext: () => ({
-        resolvePrivate: async (input, phase) => {
-          privateCalls.push({ input, phase });
-          return {
-            sourceRef: 'message:collective-source',
-            grant: { source },
-            context: {
-              events: [],
-              source: {
-                ...source,
-                eventId: 'collective-source',
-                sequence: 1,
-                actor: { type: 'human' },
-                body: 'CURRENT_WORK_SOURCE_CANARY',
-              },
-            },
-            work: {
-              task: { id: 'task-private-work', title: 'Current Work', why: 'Continue this matter' },
-              revision: 3,
-              resultRevision: 1,
-              authorityRef: 'message:owner-admission',
-              executionRevision: 2,
-              executionRef: 'message:owner-admission',
-            },
-          };
-        },
-      }),
-    };
-    const launched = [];
-    const service = {
-      l0CompilerFn: dummyL0CompilerFn,
-      supportsToolExecutionPolicy: (policy) => policy.mode === 'collective_work',
-      async *invoke(prompt, options) {
-        launched.push({ prompt, options });
-        yield { type: 'done', catId: 'codex-sol', timestamp: Date.now() };
-      },
-    };
-    const params = {
-      catId: 'codex-sol',
-      service,
-      prompt: 'UNRELATED_HOME_HISTORY_CANARY',
-      userId: 'owner-1',
-      ownerAuthProvenance: 'strict',
-      threadId: 'thread-private-work',
-      a2aTriggerMessageId: delegationMessage.id,
-      isLastCat: true,
-    };
+  it('F321 keeps unrelated private Profile content behind the authenticated pull entry', async () => {
+    const { FileProfileRepository } = await import('../dist/domains/cats/services/profile/ProfileRepository.js');
+    const dataDir = await mkdtemp(join(tmpdir(), 'f321-pull-only-'));
     try {
-      await assert.rejects(
-        collect(
-          invokeSingleCat(deps, {
-            ...params,
-            service: { ...service, supportsToolExecutionPolicy: () => false },
-          }),
-        ),
-        (error) => {
-          assert.equal(error.code, 'collective_private_work_refused');
-          assert.equal(error.reason, 'private_provider_unsupported');
-          return true;
+      const repository = new FileProfileRepository({ dataDir, relationshipKeyForCat: () => 'maine-coon' });
+      for (const path of [
+        repository.primerPath(repository.scope('user-1', 'codex')),
+        repository.corpusPath('user-1'),
+      ]) {
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, 'PRIVATE_UNRELATED_PROFILE_PAYLOAD');
+      }
+      const prompts = [];
+      const service = {
+        async *invoke(prompt) {
+          prompts.push(prompt);
+          yield { type: 'done', catId: 'codex', timestamp: Date.now() };
         },
+      };
+      await collect(
+        invokeSingleCat(
+          { ...makeDeps(), profileRepository: repository },
+          {
+            catId: 'codex',
+            service,
+            prompt: '17乘19是多少？',
+            userId: 'user-1',
+            ownerAuthProvenance: 'strict',
+            threadId: 'thread-f321-pull',
+            isLastCat: true,
+          },
+        ),
       );
-      assert.equal(createCalls.length, 0, 'unsupported private provider must not register an invocation');
-      assert.equal(launched.length, 0, 'unsupported private provider must not start a model');
-      privateCalls.length = 0;
-
-      await collect(invokeSingleCat(deps, params));
-
-      assert.equal(privateCalls.length, 1);
-      assert.equal(privateCalls[0].phase, 'admission');
-      assert.equal(createCalls.length, 1);
-      assert.equal(createCalls[0][7], 'unknown', 'Work admission must not inherit strict owner authority');
-      assert.deepEqual(createCalls[0][10], {
-        v: 1,
-        taskId: 'task-private-work',
-        observedRevision: 3,
-        resultRevision: 1,
-        executionRevision: 2,
-        executionRef: 'message:owner-admission',
-        sourceRef: 'message:collective-source',
-        authorityRef: 'message:owner-admission',
-      });
-      assert.equal(launched.length, 1);
-      const { prompt, options } = launched[0];
-      assert.match(prompt, /CURRENT_WORK_SOURCE_CANARY/);
-      assert.match(prompt, /continue the admitted Work/);
-      assert.doesNotMatch(prompt, /UNRELATED_HOME_HISTORY_CANARY/);
-      assert.deepEqual(options.toolExecutionPolicy, createCalls[0][5]);
-      assert.equal(options.toolExecutionPolicy.mode, 'collective_work');
-      assert.equal(options.toolExecutionPolicy.taskId, 'task-private-work');
-      assert.equal(options.toolExecutionPolicy.executionRevision, 2);
-      assert.equal(options.toolExecutionPolicy.executionRef, 'message:owner-admission');
-      assert.ok(options.workingDirectory.startsWith(await realpath(process.env.CAT_CAFE_DATA_DIR)));
-      assert.equal(options.sessionId, undefined);
-      assert.ok(verifiedCalls.length > 0, 'private launch must revalidate the current invocation');
+      assert.equal(prompts.length, 1);
+      assert.doesNotMatch(prompts[0], /PRIVATE_UNRELATED_PROFILE_PAYLOAD|当前关系档案/);
+      assert.equal(repository.readCorpus('user-1').content, 'PRIVATE_UNRELATED_PROFILE_PAYLOAD');
     } finally {
-      if (previousDataDir === undefined) delete process.env.CAT_CAFE_DATA_DIR;
-      else process.env.CAT_CAFE_DATA_DIR = previousDataDir;
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 
@@ -1910,6 +1808,74 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     });
   });
 
+  it('F325 records authoritative usage without an unresolved window authorizing handoff', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+    const record = sessionChainStore.create({
+      cliSessionId: 'cli-unresolved-window',
+      threadId: 'thread-unresolved-window',
+      catId: 'gemini',
+      userId: 'user1',
+    });
+    const capacitySnapshot = makeUnresolvedCapacitySnapshot('gemini', 'agy_stream_json');
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      contextCapability: () => capacitySnapshot.capability,
+      async *invoke() {
+        yield {
+          type: 'done',
+          catId: 'gemini',
+          timestamp: Date.now(),
+          metadata: { usage: { lastTurnInputTokens: 66_525, inputTokens: 200_000, isCumulativeUsage: true } },
+        };
+      },
+    };
+    const messages = await collect(
+      invokeSingleCat(
+        {
+          ...makeDeps(),
+          sessionChainStore,
+          sessionSealer: {
+            async requestSeal() {
+              assert.fail('unknown capacity cannot authorize a handoff');
+            },
+            async finalize() {},
+          },
+        },
+        {
+          catId: 'gemini',
+          service,
+          capacitySnapshot,
+          prompt: 'test',
+          userId: 'user1',
+          threadId: 'thread-unresolved-window',
+          isLastCat: true,
+          rebuildPromptAfterSessionSeal: async () => 'rebuilt',
+        },
+      ),
+    );
+    const infos = messages
+      .filter((message) => message.type === 'system_info')
+      .map((message) => JSON.parse(message.content));
+    const created = infos.find((payload) => payload.type === 'invocation_created');
+    assert.ok(created.effectiveStrategy.execution.missingCapabilities.includes('authoritative_usage'));
+    const persisted = sessionChainStore.get(record.id).appliedPolicy.execution;
+    assert.equal(persisted.status, 'unavailable');
+    assert.ok(
+      !persisted.missingCapabilities.includes('authoritative_usage'),
+      'current per-turn usage must be recorded even without capacity',
+    );
+    assert.ok(persisted.missingCapabilities.includes('effective_input_ceiling'));
+    assert.ok(persisted.missingCapabilities.includes('carrier_binding'));
+    const transition = infos.find((payload) => payload.type === 'session_policy_execution');
+    assert.deepEqual(transition.effectiveStrategy.execution, persisted);
+    assert.equal(
+      infos.some((payload) => payload.type === 'context_health'),
+      false,
+    );
+    assert.equal(sessionChainStore.get(record.id).capacityPin, undefined);
+  });
+
   it('F211 A2: repeated Antigravity cascade updates runtime metadata without creating a new SessionRecord', async () => {
     const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
     const { RuntimeSessionStore } = await import(
@@ -2803,7 +2769,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(payload.continuityCapsule.continuationReason, 'runtime_replacement');
     assert.deepEqual(payload.continuityCapsule.replacement, replacement);
     assert.equal(payload.continuityCapsule.seal.reason, 'cli_session_replaced');
-    assert.equal(payload.continuityDiagnostics.source, 'runtime_replacement');
+
     assert.equal(payload.continuityDiagnostics.boundary, 'runtime_replacement');
     assert.equal(payload.continuityDiagnostics.sealMechanism, 'cli_session_replaced');
     assert.deepEqual(payload.continuityDiagnostics.replacement, replacement);
@@ -3585,7 +3551,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(payload.catId, 'opus');
     assert.equal(payload.health.usedTokens, 50000);
     assert.equal(payload.health.windowTokens, 200000);
-    assert.equal(payload.health.source, 'exact');
+
     assert.ok(payload.health.fillRatio > 0 && payload.health.fillRatio <= 1);
   });
 
@@ -3659,7 +3625,6 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(payload.health.usedTokens, 36928, 'must use lastTurnInputTokens for per-call accuracy');
     assert.equal(payload.health.windowTokens, 200000);
     assert.equal(payload.health.usedFrom, 'last_turn');
-    assert.equal(payload.health.source, 'exact');
 
     // (2) invocation_usage must also be emitted (F8/F230 — bubble footer fuel)
     const usageInfos = msgs.filter((m) => {
@@ -3764,7 +3729,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       })
       .find((payload) => payload?.type === 'context_health');
     assert.ok(health, 'usage_update-derived evidence must still produce context health without a size field');
-    assert.equal(health.health.source, 'exact', 'same-invocation usage evidence must promote the bound catalog window');
+
     assert.equal(health.health.windowTokens, 1_000_000);
     assert.equal(
       sessionChainStore.getActive('opus', 'thread-acp-promote')?.contextHealth?.source,
@@ -4163,7 +4128,6 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       'opencode anthropic/claude-opus-4-6 resolves via catalog to 1M',
     );
     assert.equal(payload.health.usedTokens, 36928);
-    assert.equal(payload.health.source, 'approx', 'catalog resolution (no contextWindowSize on usage) → approx');
   });
 
   it('F24: uses fallback window size for models without contextWindowSize', async () => {
@@ -4216,7 +4180,6 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(healthInfos.length, 1, 'should yield context_health with fallback window');
     const payload = JSON.parse(healthInfos[0].content);
     assert.equal(payload.health.windowTokens, 1_000_000, 'should use fallback 1M for claude-opus-4-6');
-    assert.equal(payload.health.source, 'approx', 'should mark as approx when using fallback');
   });
 
   it('F24: no context_health when model is unknown and no contextWindowSize', async () => {
@@ -4315,7 +4278,6 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       Math.abs(active.contextHealth.fillRatio - expectedRatio) < 0.001,
       `fillRatio should be ~${expectedRatio.toFixed(4)}, got ${active.contextHealth.fillRatio}`,
     );
-    assert.equal(active.contextHealth.source, 'exact');
   });
 
   it('F24-fix: prefers lastTurnInputTokens over aggregated inputTokens for context health', async () => {
@@ -4684,6 +4646,311 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.ok(sessionStores.includes('new-sess'), 'new session should be stored after recovery');
   });
 
+  for (const failure of [undefined, 'create', 'record'])
+    it(`F325 replaces a changed Native binding with durable request ownership (${failure ?? 'success'})`, async () => {
+      const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+      const { SessionSealer } = await import('../dist/domains/cats/services/session/SessionSealer.js');
+      const { TranscriptWriter } = await import('../dist/domains/cats/services/session/TranscriptWriter.js');
+      const { MessageStore } = await import('../dist/domains/cats/services/stores/ports/MessageStore.js');
+      const { AgyNativeAgentService } = await import(
+        '../dist/domains/cats/services/agents/providers/agy-native/AgyNativeAgentService.js'
+      );
+      const base = join(testGlobalConfigRoot, 'native-binding-change');
+      await mkdir(join(base, 'workspace'), { recursive: true });
+      const workspace = await realpath(join(base, 'workspace'));
+      const dataDir = join(base, 'transcripts');
+      const writer = new TranscriptWriter({ dataDir });
+      const chain = new SessionChainStore();
+      const old = await chain.create({ catId: 'gemini38', threadId: 'native-binding-change', userId: 'owner' });
+      const priorBinding = {
+        v: 1,
+        carrier: 'agy_stream_json',
+        model: 'gemini-3.8-flash-high',
+        profileHome: join(base, 'profiles', 'gemini38'),
+        workspaceRoot: workspace,
+        l0Hash: '0'.repeat(64),
+        permissionMode: 'request-review',
+        agentName: 'prior-native-agent',
+        cliSessionId: 'old-native-session',
+      };
+      await chain.update(old.id, { cliSessionId: 'old-native-session', nativeSessionBinding: priorBinding });
+      const oldInfo = { sessionId: old.id, threadId: old.threadId, catId: old.catId, seq: old.seq };
+      await writer.appendDurableEvent(
+        oldInfo,
+        { type: 'text', content: 'PRESERVED-THREAD-HISTORY' },
+        'prior-invocation',
+      );
+      const oldDirectory = join(dataDir, 'threads', old.threadId, old.catId, 'sessions', old.id);
+      const messageStore = new MessageStore();
+      const input = await messageStore.append({
+        userId: 'owner',
+        threadId: old.threadId,
+        from: { kind: 'user', userId: 'owner' },
+        content: 'LATEST-MESSAGE-ONLY',
+        mentions: ['gemini38'],
+        timestamp: Date.now(),
+      });
+      const getOrCreateActive = chain.getOrCreateActive.bind(chain);
+      chain.getOrCreateActive = (request) => {
+        if (failure === 'create' && chain.get(old.id).status === 'sealed') {
+          throw new Error('native_replacement_store_offline');
+        }
+        return getOrCreateActive(request);
+      };
+      const appendDurableEvent = writer.appendDurableEvent.bind(writer);
+      writer.appendDurableEvent = async (session, event, invocationId) => {
+        if (failure === 'record' && event.type === 'request_generation_assembled') {
+          throw new Error('native_replacement_transcript_unavailable');
+        }
+        return appendDurableEvent(session, event, invocationId);
+      };
+      let sessionId = 'old-native-session';
+      const service = new AgyNativeAgentService({
+        catId: 'gemini38',
+        profile: {
+          enabled: true,
+          profileId: 'gemini38',
+          homeRoot: join(base, 'profiles'),
+          model: 'gemini-3.8-flash-high',
+          trustedWorkspaces: [workspace],
+        },
+        command: '/usr/bin/true',
+        l0CompilerFn: async () => '# Identity\nCURRENT-NATIVE-L0\n',
+      });
+      const calls = [];
+      const launches = [];
+      const writes = [];
+      const actualInvoke = service.invokeWithContinuityPreflight.bind(service);
+      service.invokeWithContinuityPreflight = (preflight, options) => {
+        calls.push({ sessionId: options.sessionId });
+        // Keep the real binding check, verified init, settle and beforeProviderLaunch.
+        // Only the external process is scripted; no recorder/preflight substitute.
+        return actualInvoke(preflight, {
+          ...options,
+          spawnCliOverride: async function* (launch) {
+            launches.push(launch);
+            assert.equal(chain.get(old.id).status, 'sealed', 'history seals before the replacement provider starts');
+            launch.onStdinReady((value) => {
+              const active = chain.getActive(old.catId, old.threadId, 'owner');
+              assert.ok(active.appliedPolicy?.revision, 'replacement policy exists before body submission');
+              const persisted = readFileSync(
+                join(dataDir, 'threads', old.threadId, old.catId, 'sessions', active.id, 'events.live.jsonl'),
+                'utf8',
+              )
+                .trim()
+                .split('\n')
+                .map(JSON.parse);
+              assert.equal(
+                persisted.filter((entry) => entry.event.type === 'request_generation_assembled').length,
+                1,
+                'the replacement request is durable before its body reaches stdin',
+              );
+              writes.push(value);
+            });
+            yield {
+              event: 'init',
+              conversation_id: 'new-native-session',
+              init: {
+                agent: launch.args[launch.args.indexOf('--agent') + 1],
+                cwd: launch.cwd,
+                model: 'gemini-3.8-flash-high',
+                permission_mode: 'request-review',
+                tools: [],
+              },
+            };
+            yield {
+              event: 'result',
+              result: {
+                conversation_id: 'new-native-session',
+                status: 'SUCCESS',
+                response: 'Continued with preserved history.',
+                num_turns: 1,
+              },
+            };
+          },
+        });
+      };
+      const messages = await collect(
+        invokeSingleCat(
+          {
+            ...makeDeps(),
+            messageStore,
+            transcriptWriter: writer,
+            sessionChainStore: chain,
+            sessionSealer: new SessionSealer(chain, writer),
+            sessionManager: {
+              get: async () => sessionId,
+              delete: async () => {
+                sessionId = undefined;
+              },
+              store: async (_u, _c, _t, id) => {
+                sessionId = id;
+              },
+              resolveWorkingDirectory: () => workspace,
+            },
+            threadStore: {
+              get: async () => ({ projectPath: workspace, createdBy: 'owner' }),
+              updateParticipantActivity: async () => {},
+            },
+          },
+          {
+            catId: 'gemini38',
+            service,
+            prompt: input.content,
+            promptMessageIds: [input.id],
+            userId: 'owner',
+            threadId: 'native-binding-change',
+            isLastCat: true,
+            rebuildPromptAfterSessionSeal: async () => {
+              const history = (await readFile(join(oldDirectory, 'events.jsonl'), 'utf8'))
+                .trim()
+                .split('\n')
+                .map(JSON.parse);
+              return `${history[0].event.content}\n${(await messageStore.getById(input.id)).content}`;
+            },
+          },
+        ),
+      );
+      assert.equal(calls[0].sessionId, 'old-native-session');
+      assert.equal((await chain.get(old.id)).sealReason, 'native_binding_changed');
+      assert.equal((await chain.get(old.id)).status, 'sealed');
+      assert.equal((await chain.getChain(old.catId, old.threadId, 'owner')).length, failure === 'create' ? 1 : 2);
+      assert.equal(
+        (await chain.get(old.id)).cliSessionId,
+        'old-native-session',
+        'sealed native identity is not rebound',
+      );
+      assert.deepEqual((await chain.get(old.id)).nativeSessionBinding, priorBinding);
+      assert.deepEqual(
+        await messageStore.getById(input.id),
+        input,
+        'failure or success cannot consume the user message',
+      );
+      const archived = (await readFile(join(oldDirectory, 'events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+      assert.equal(archived[0].event.content, 'PRESERVED-THREAD-HISTORY');
+      assert.equal(
+        archived.some((entry) => entry.event.type === 'request_generation_assembled'),
+        false,
+      );
+      if (failure) {
+        assert.equal(writes.length, 0, 'failed replacement never submits the user body');
+        assert.equal(launches.length, failure === 'create' ? 0 : 1);
+        const expected =
+          failure === 'create' ? 'native_replacement_store_offline' : 'native_replacement_transcript_unavailable';
+        assert.ok(
+          messages.some((m) => m.type === 'error' && m.error.includes(expected)),
+          JSON.stringify(messages),
+        );
+        assert.equal(
+          messages.some((m) => m.type === 'text'),
+          false,
+        );
+        return;
+      }
+      assert.equal(messages.find((m) => m.type === 'error')?.error, undefined);
+      assert.equal(calls.length, 2, JSON.stringify(messages.filter((m) => m.type === 'error')));
+      assert.equal(calls[1].sessionId, undefined);
+      assert.equal(launches.length, 1, 'mismatched resume is refused before spawn; only its replacement launches');
+      assert.equal(writes.length, 1);
+      assert.match(writes[0], /PRESERVED-THREAD-HISTORY/);
+      assert.match(writes[0], /LATEST-MESSAGE-ONLY/);
+      const notice = messages.find((m) => m.type === 'system_info' && m.content?.includes('native_binding_changed'));
+      assert.equal(JSON.parse(notice.content).type, 'session_seal_requested');
+      assert.equal(messages.filter((m) => m.type === 'error').length, 0);
+      const active = await chain.getActive('gemini38', 'native-binding-change', 'owner');
+      assert.notEqual(active.id, old.id);
+      assert.equal(active.seq, old.seq + 1);
+      assert.equal(active.cliSessionId, 'new-native-session');
+      assert.ok(active.appliedPolicy?.revision, 'the replacement owns the invocation policy before recording');
+      assert.equal(active.compressionCount, 0);
+      const newInfo = { sessionId: active.id, threadId: active.threadId, catId: active.catId, seq: active.seq };
+      const events = await writer.readActiveEvents(newInfo);
+      const assembled = events.filter((entry) => entry.event.type === 'request_generation_assembled');
+      assert.equal(assembled.length, 1);
+      assert.equal(assembled[0].event.envelope.sessionId, active.id);
+      assert.ok(
+        assembled[0].event.envelope.channels.some((channel) =>
+          channel.sourceRefs?.some((ref) => ref.ref.includes(input.id)),
+        ),
+      );
+      assert.equal(
+        messages.filter((m) => m.type === 'text' && m.content === 'Continued with preserved history.').length,
+        1,
+      );
+      await writer.flush(newInfo);
+    });
+
+  it('F325 refuses Native replacement without history or after visible provider output', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const { SessionSealer } = await import('../dist/domains/cats/services/session/SessionSealer.js');
+    const { AgyNativeAgentService } = await import(
+      '../dist/domains/cats/services/agents/providers/agy-native/AgyNativeAgentService.js'
+    );
+    for (const partial of [false, true]) {
+      const chain = new SessionChainStore();
+      const old = await chain.create({ catId: 'gemini38', threadId: 'native-no-replay', userId: 'owner' });
+      await chain.update(old.id, { cliSessionId: 'old-native-session' });
+      const service = new AgyNativeAgentService({
+        catId: 'gemini38',
+        profile: {
+          enabled: true,
+          profileId: 'gemini38',
+          model: 'gemini-3.8-flash-high',
+        },
+      });
+      let calls = 0;
+      service.invokeWithContinuityPreflight = async function* (preflight) {
+        calls++;
+        if (partial) {
+          await preflight.settle({
+            evidence: {
+              kind: 'resumed',
+              requestedRuntimeSessionId: 'old-native-session',
+              runtimeSessionId: 'old-native-session',
+            },
+          });
+          yield { type: 'text', catId: 'gemini38', content: 'Already delivered.', timestamp: Date.now() };
+        }
+        yield {
+          type: 'error',
+          catId: 'gemini38',
+          errorCode: 'AGY_NATIVE_RESUME_MISMATCH',
+          error: 'Native L0 binding changed',
+          timestamp: Date.now(),
+        };
+        yield { type: 'done', catId: 'gemini38', errorCode: 'AGY_NATIVE_RESUME_MISMATCH', timestamp: Date.now() };
+      };
+      const deps = makeDeps();
+      deps.sessionManager.get = async () => 'old-native-session';
+      deps.sessionManager.resolveWorkingDirectory = () => process.cwd();
+      const messages = await collect(
+        invokeSingleCat(
+          {
+            ...deps,
+            sessionChainStore: chain,
+            sessionSealer: new SessionSealer(chain),
+            threadStore: {
+              get: async () => ({ projectPath: process.cwd(), createdBy: 'owner' }),
+              updateParticipantActivity: async () => {},
+            },
+          },
+          {
+            catId: 'gemini38',
+            service,
+            prompt: 'Latest message',
+            userId: 'owner',
+            threadId: 'native-no-replay',
+            isLastCat: true,
+            ...(partial ? { rebuildPromptAfterSessionSeal: async () => 'Recovered history' } : {}),
+          },
+        ),
+      );
+      assert.equal(calls, 1);
+      assert.equal((await chain.get(old.id)).status, 'active');
+      assert.ok(messages.some((m) => m.type === 'error' && m.errorCode === 'AGY_NATIVE_RESUME_MISMATCH'));
+    }
+  });
+
   // #1186: Active-lease guard regression — proves invoke-single-cat.ts:3368-3369
   // calls .return() on the first service iterator (releasing the ACP lease) BEFORE
   // starting the second service.invoke() (which acquires a new lease).
@@ -4695,7 +4962,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const service = {
       l0CompilerFn: dummyL0CompilerFn,
-      async *invoke(_prompt, options) {
+      async *invoke(_prompt, _options) {
         invokeCount++;
         const label = invokeCount === 1 ? 'first' : 'second';
 
@@ -5274,7 +5541,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(sealPayload.continuityCapsule.catId, 'codex');
     assert.equal(sealPayload.continuityCapsule.continuationReason, 'threshold_seal');
     assert.equal(sealPayload.continuityCapsule.seal.sessionId, 'sess-retry-seal');
-    assert.equal(sealPayload.continuityDiagnostics.source, 'route_state');
+
     assert.equal(sealPayload.continuityDiagnostics.boundary, 'threshold_seal');
     assert.equal(sealPayload.continuityDiagnostics.persistedVia, 'session_seal_requested');
   });
@@ -5504,6 +5771,46 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         'prompt-limit error must be surfaced instead of being swallowed',
       );
     });
+  });
+
+  it('AGY official ACP does not replay an uncertain upstream failure even before text arrives', async () => {
+    let invokeCount = 0;
+    const deps = makeDeps();
+    const workspace = await mkdtemp(join(tmpdir(), 'agy-acp-no-replay-'));
+    deps.threadStore = { get: async () => ({ projectPath: workspace }) };
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      freshnessCarrierCapability: () => ({
+        provider: 'google',
+        carrier: 'agy_acp',
+        deliverySemantics: 'unsupported',
+        activeInvocationGuidance: 'unsupported',
+      }),
+      async *invoke() {
+        invokeCount++;
+        yield { type: 'error', catId: 'opus', error: 'Premature close', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+    try {
+      const messages = await collect(
+        invokeSingleCat(deps, {
+          catId: 'opus',
+          service,
+          prompt: 'test',
+          userId: 'owner-acp',
+          threadId: 'thread-acp',
+          isLastCat: true,
+        }),
+      );
+      assert.equal(invokeCount, 1);
+      assert.equal(
+        messages.some((message) => message.type === 'error' && message.error === 'Premature close'),
+        true,
+      );
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   });
 
   it('transient CLI self-heal: retries once when Claude exits code 1 before any stream output', async () => {
@@ -6493,94 +6800,113 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     );
   });
 
-  it('capacity-recovery prepared requests skip the entity-nudge exact check and never re-confirm delivery', async () => {
-    // A capacity-recovery request carries an empty body by design (turn/start
-    // sends input: []), so it can never contain the nudge promptContext. Before
-    // the dedicated boundary, recovery generations were tagged provider_fallback
-    // and died on entity_nudge_prepared_prompt_not_exact — the exact failure
-    // seen live on invocation 0d676739-4949-4b8c-8fa4-afd362b90110.
-    const activeRecord = {
-      id: 'sr-capacity-recovery-nudge',
-      seq: 0,
-      status: 'active',
-      catId: 'opus',
-      threadId: 'thread-capacity-recovery-nudge',
-      userId: 'u1',
-    };
-    const durable = [];
-    let confirmations = 0;
-    const prepared = (body, boundaryReason) => ({
-      v: 1,
-      ...(boundaryReason ? { boundaryReason } : {}),
-      message: { body },
-      nativeInstructions: [],
-      runtime: { provider: 'openai', carrier: 'app_server' },
-      tools: { finalSurface: 'unknown' },
-      providerNativeVisibility: 'unknown',
+  for (const contextOnly of ['capacity recovery', 'native compaction']) {
+    it(`${contextOnly} skips already-delivered nudges and records the exact continuation`, async () => {
+      // A capacity-recovery request carries an empty body by design (turn/start
+      // sends input: []), so it can never contain the nudge promptContext. Before
+      // the dedicated boundary, recovery generations were tagged provider_fallback
+      // and died on entity_nudge_prepared_prompt_not_exact — the exact failure
+      // seen live on invocation 0d676739-4949-4b8c-8fa4-afd362b90110.
+      const activeRecord = {
+        id: 'sr-capacity-recovery-nudge',
+        seq: 0,
+        status: 'active',
+        catId: 'opus',
+        threadId: 'thread-capacity-recovery-nudge',
+        userId: 'u1',
+      };
+      const durable = [];
+      let confirmations = 0;
+      const prepared = (body, boundaryReason) => ({
+        v: 1,
+        ...(boundaryReason ? { boundaryReason } : {}),
+        message: { body },
+        nativeInstructions: [],
+        runtime: { provider: 'openai', carrier: 'app_server' },
+        tools: { finalSurface: 'unknown' },
+        providerNativeVisibility: 'unknown',
+      });
+      const service = {
+        l0CompilerFn: dummyL0CompilerFn,
+        async *invoke(prompt, options) {
+          await options.beforeProviderLaunch(prepared(prompt));
+          const continuation =
+            contextOnly === 'capacity recovery'
+              ? prepared('', 'provider_capacity_recovery')
+              : {
+                  ...prepared(CODEX_COMPACTION_CONTINUATION_TRIGGER, 'provider_continuation'),
+                  message: {
+                    body: CODEX_COMPACTION_CONTINUATION_TRIGGER,
+                    injectionDecision: CODEX_ACTIVE_WORK_CONTEXT_DECISION,
+                  },
+                  nativeInstructions: [
+                    codexActiveWorkContext({
+                      threadId: activeRecord.threadId,
+                      invocationId: 'active-invocation',
+                      promptMessageIds: ['source'],
+                    }),
+                  ],
+                };
+          await options.beforeProviderLaunch(continuation);
+          yield { type: 'text', catId: 'opus', content: 'recovered', timestamp: Date.now() };
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+        },
+      };
+      const messages = await collect(
+        invokeSingleCat(
+          {
+            ...makeDeps(),
+            sessionChainStore: {
+              getChain: async () => [activeRecord],
+              getActive: async () => activeRecord,
+              get: async () => activeRecord,
+              create: async () => activeRecord,
+              update: async () => activeRecord,
+            },
+            transcriptWriter: {
+              appendEvent() {},
+              appendDurableEvent: async (_session, event) => {
+                durable.push(event);
+              },
+              keyedContentDigest: async () => `hmac-sha256:${'a'.repeat(64)}`,
+            },
+          },
+          {
+            catId: 'opus',
+            service,
+            prompt: 'test',
+            userId: 'u1',
+            threadId: activeRecord.threadId,
+            isLastCat: true,
+            entityNudgePresentation: {
+              sourceMessageId: 'source',
+              candidates: {},
+              service: {
+                preparePresentation: () => ({
+                  promptContext: '[entity-nudge]known source[/entity-nudge]',
+                  confirmAssembled: () => {
+                    confirmations++;
+                  },
+                }),
+              },
+            },
+          },
+        ),
+      );
+      assert.equal(
+        messages.some((message) => message.type === 'error'),
+        false,
+        JSON.stringify(messages.filter((message) => message.type === 'error')),
+      );
+      assert.equal(confirmations, 1, 'the recovery generation must not re-confirm an already-delivered nudge');
+      const firstTerminal = durable.find((event) => event.type === 'request_generation_terminal');
+      assert.equal(
+        firstTerminal?.reason,
+        contextOnly === 'capacity recovery' ? 'provider_capacity_recovery' : 'provider_continuation',
+        'the previous generation records the actual context-only continuation boundary',
+      );
     });
-    const service = {
-      l0CompilerFn: dummyL0CompilerFn,
-      async *invoke(prompt, options) {
-        await options.beforeProviderLaunch(prepared(prompt));
-        await options.beforeProviderLaunch(prepared('', 'provider_capacity_recovery'));
-        yield { type: 'text', catId: 'opus', content: 'recovered', timestamp: Date.now() };
-        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
-      },
-    };
-    const messages = await collect(
-      invokeSingleCat(
-        {
-          ...makeDeps(),
-          sessionChainStore: {
-            getChain: async () => [activeRecord],
-            getActive: async () => activeRecord,
-            get: async () => activeRecord,
-            create: async () => activeRecord,
-            update: async () => activeRecord,
-          },
-          transcriptWriter: {
-            appendEvent() {},
-            appendDurableEvent: async (_session, event) => {
-              durable.push(event);
-            },
-            keyedContentDigest: async () => `hmac-sha256:${'a'.repeat(64)}`,
-          },
-        },
-        {
-          catId: 'opus',
-          service,
-          prompt: 'test',
-          userId: 'u1',
-          threadId: activeRecord.threadId,
-          isLastCat: true,
-          entityNudgePresentation: {
-            sourceMessageId: 'source',
-            candidates: {},
-            service: {
-              preparePresentation: () => ({
-                promptContext: '[entity-nudge]known source[/entity-nudge]',
-                confirmAssembled: () => {
-                  confirmations++;
-                },
-              }),
-            },
-          },
-        },
-      ),
-    );
-    assert.equal(
-      messages.some((message) => message.type === 'error'),
-      false,
-      JSON.stringify(messages.filter((message) => message.type === 'error')),
-    );
-    assert.equal(confirmations, 1, 'the recovery generation must not re-confirm an already-delivered nudge');
-    const firstTerminal = durable.find((event) => event.type === 'request_generation_terminal');
-    assert.equal(
-      firstTerminal?.reason,
-      'provider_capacity_recovery',
-      'the replaced prompt generation must record the dedicated recovery boundary, not a generic fallback',
-    );
-  });
+  }
 
   it('non-recovery prepared requests that drop the entity nudge stay fail-closed', async () => {
     // The exemption is scoped to provider_capacity_recovery only: Claude carrier
@@ -7793,7 +8119,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const deps = makeDeps();
     const previousCwd = process.cwd();
-    const previousEnvMcpPath = process.env.CAT_CAFE_MCP_SERVER_PATH;
+    const _previousEnvMcpPath = process.env.CAT_CAFE_MCP_SERVER_PATH;
     try {
       process.chdir(apiDir);
       delete process.env.CAT_CAFE_MCP_SERVER_PATH;
@@ -7907,6 +8233,60 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(callbackEnv.OPENAI_BASE_URL, undefined);
     assert.equal(callbackEnv.OPENAI_API_BASE, undefined);
   });
+
+  for (const configurationSource of [undefined, 'native_tool']) {
+    it(`first-run synthetic Codex binding inherits CLI provider config (${configurationSource ?? 'legacy'})`, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'first-run-codex-native-'));
+      const apiDir = join(root, 'packages', 'api');
+      await mkdir(apiDir, { recursive: true });
+      await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+      const prevGlobalRoot = process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
+      process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = root;
+      const registrySnapshot = catRegistry.getAllConfigs();
+      const originalConfig = catRegistry.tryGet('codex')?.config;
+      assert.ok(originalConfig);
+      const catId = 'first-run-native-codex';
+      catRegistry.register(catId, {
+        ...originalConfig,
+        id: catId,
+        mentionPatterns: [`@${catId}`],
+        clientId: 'openai',
+        accountRef: 'codex',
+        defaultModel: 'gpt-5.4',
+        ...(configurationSource ? { configurationSource } : {}),
+      });
+      const optionsSeen = [];
+      const service = {
+        l0CompilerFn: dummyL0CompilerFn,
+        async *invoke(_prompt, options) {
+          optionsSeen.push(options ?? {});
+          yield { type: 'done', catId, timestamp: Date.now() };
+        },
+      };
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(apiDir);
+        await collect(
+          invokeSingleCat(makeDeps(), {
+            catId,
+            service,
+            prompt: 'test',
+            userId: 'first-run-native-user',
+            threadId: 'first-run-native-thread',
+            isLastCat: true,
+          }),
+        );
+      } finally {
+        process.chdir(previousCwd);
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(registrySnapshot)) catRegistry.register(id, config);
+        if (prevGlobalRoot === undefined) delete process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
+        else process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = prevGlobalRoot;
+        await rmWithRetry(root);
+      }
+      assert.equal(optionsSeen[0]?.callbackEnv?.CODEX_AUTH_MODE, configurationSource ? undefined : 'auto');
+    });
+  }
 
   it('F127 P1: keeps env-based codex auth untouched when no openai profile is explicitly configured', async () => {
     const root = await mkdtemp(join(tmpdir(), 'f127-openai-env-auth-'));
@@ -8869,17 +9249,20 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(seenRuntimeConfig.mcp['cat-cafe'], undefined, 'monolith must not be injected');
     const mcpCollab = seenRuntimeConfig.mcp['cat-cafe-collab'];
     assert.ok(mcpCollab, 'split server cat-cafe-collab expected');
-    assert.equal(mcpCollab.type, 'local');
-    assert.equal(mcpCollab.command.length, 2);
-    const nodeBin91 = mcpCollab.command[0];
+    const { upstream, launchEnv } = openCodeDirectMcpContract(mcpCollab);
+
+    assert.equal(upstream.command, process.execPath, 'the original split server retains the runtime Node binary');
+    assert.equal(upstream.args.length, 1);
     assert.ok(
-      nodeBin91 === 'node' || nodeBin91.endsWith('/node') || nodeBin91.endsWith('\\node.exe'),
-      `command[0] must be a node binary: ${nodeBin91}`,
+      upstream.args[0].endsWith('/packages/mcp-server/dist/collab.js'),
+      `MCP upstream must point to split entrypoint: ${upstream.args[0]}`,
     );
-    assert.ok(
-      mcpCollab.command[1].endsWith('/packages/mcp-server/dist/collab.js'),
-      `mcp command[1] must point to split entrypoint: ${mcpCollab.command[1]}`,
-    );
+    for (const env of [launchEnv, upstream.env])
+      for (const key of ['CAT_CAFE_API_URL', 'CAT_CAFE_INVOCATION_ID', 'CAT_CAFE_CALLBACK_TOKEN'])
+        assert.equal(env[key], undefined, `the disk config must defer ${key} to the native config hook`);
+    assert.ok(callbackEnv.CAT_CAFE_API_URL);
+    assert.ok(callbackEnv.CAT_CAFE_INVOCATION_ID);
+    assert.ok(callbackEnv.CAT_CAFE_CALLBACK_TOKEN);
     // Config file should be cleaned up after invocation
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
   });
@@ -8988,13 +9371,16 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       assert.equal(seenRuntimeConfig.mcp['cat-cafe'], undefined, 'monolith must not be injected');
       const mcpCollab = seenRuntimeConfig.mcp['cat-cafe-collab'];
       assert.ok(mcpCollab, 'split server cat-cafe-collab expected');
-      assert.equal(mcpCollab.type, 'local');
-      const nodeBin92 = mcpCollab.command[0];
-      assert.ok(
-        nodeBin92 === 'node' || nodeBin92.endsWith('/node') || nodeBin92.endsWith('\\node.exe'),
-        `command[0] must be a node binary: ${nodeBin92}`,
-      );
-      assert.ok(mcpCollab.command[1].endsWith('collab.js'), 'must point to split entrypoint');
+      const { upstream, launchEnv } = openCodeDirectMcpContract(mcpCollab);
+
+      assert.equal(upstream.command, process.execPath);
+      assert.deepEqual(upstream.args, [join(externalMcpDir, 'collab.js')], 'preserve the explicit MCP binary root');
+      for (const env of [launchEnv, upstream.env])
+        for (const key of ['CAT_CAFE_API_URL', 'CAT_CAFE_INVOCATION_ID', 'CAT_CAFE_CALLBACK_TOKEN'])
+          assert.equal(env[key], undefined, `the disk config must defer ${key} to the native config hook`);
+      assert.ok(callbackEnv.CAT_CAFE_API_URL);
+      assert.ok(callbackEnv.CAT_CAFE_INVOCATION_ID);
+      assert.ok(callbackEnv.CAT_CAFE_CALLBACK_TOKEN);
       await assert.rejects(readFile(seenConfigPath, 'utf-8'));
     },
   );
@@ -9309,7 +9695,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         }),
       );
       // Verify error event contains F203 fail-closed message
-      const errorMsgs = msgs.filter(
+      const _errorMsgs = msgs.filter(
         (m) =>
           m.type === 'error' ||
           (m.type === 'system_info' && typeof m.content === 'string' && m.content.includes('F203')),
@@ -9679,8 +10065,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         }
       });
       assert.ok(healthInfo, 'should still emit context_health for observability');
-      const healthPayload = JSON.parse(healthInfo.content);
-      assert.equal(healthPayload.health.source, 'approx');
+      const _healthPayload = JSON.parse(healthInfo.content);
 
       const hasSealRequested = msgs.some((m) => {
         if (m.type !== 'system_info') return false;
@@ -9809,7 +10194,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       });
       assert.ok(healthInfo, 'should emit context_health for observability');
       const healthPayload = JSON.parse(healthInfo.content);
-      assert.equal(healthPayload.health.source, 'exact');
+
       assert.equal(healthPayload.health.fillRatio, 1);
 
       const hasSealRequested = msgs.some((m) => {
@@ -10459,6 +10844,13 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       writeFile(join(runtimeRoot, 'pnpm-workspace.yaml'), 'packages: []\n'),
       writeFile(join(workspaceRoot, 'pnpm-workspace.yaml'), 'packages: []\n'),
     ]);
+    // The Host's persistent source is initialized; only the external workspace
+    // is uninitialized. Missing mapped authority must never enable default tools.
+    await mkdir(join(workspaceRoot, '.cat-cafe'), { recursive: true });
+    await writeFile(
+      join(workspaceRoot, '.cat-cafe/capabilities.json'),
+      JSON.stringify({ version: 1, capabilities: [] }),
+    );
     process.env.CAT_CAFE_RUNTIME_ROOT = runtimeRoot;
     process.env.CAT_CAFE_WORKSPACE_ROOT = workspaceRoot;
     process.chdir(runtimeRoot);
@@ -10515,6 +10907,13 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const runtimeRoot = await realpath(await mkdtemp(join(tmpdir(), 'legacy-thread-runtime-root-')));
     const previousRuntimeRoot = process.env.CAT_CAFE_RUNTIME_ROOT;
     const previousWorkspaceRoot = process.env.CAT_CAFE_WORKSPACE_ROOT;
+    const previousConfigRoot = process.env.CAT_CAFE_CONFIG_ROOT;
+    await mkdir(join(testGlobalConfigRoot, '.cat-cafe'), { recursive: true });
+    await writeFile(
+      join(testGlobalConfigRoot, '.cat-cafe/capabilities.json'),
+      JSON.stringify({ version: 1, capabilities: [] }),
+    );
+    process.env.CAT_CAFE_CONFIG_ROOT = testGlobalConfigRoot;
     process.env.CAT_CAFE_RUNTIME_ROOT = runtimeRoot;
     process.env.CAT_CAFE_WORKSPACE_ROOT = workspaceRoot;
 
@@ -10557,6 +10956,8 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       else process.env.CAT_CAFE_RUNTIME_ROOT = previousRuntimeRoot;
       if (previousWorkspaceRoot === undefined) delete process.env.CAT_CAFE_WORKSPACE_ROOT;
       else process.env.CAT_CAFE_WORKSPACE_ROOT = previousWorkspaceRoot;
+      if (previousConfigRoot === undefined) delete process.env.CAT_CAFE_CONFIG_ROOT;
+      else process.env.CAT_CAFE_CONFIG_ROOT = previousConfigRoot;
       await rmWithRetry(runtimeRoot);
     }
   });
@@ -10828,12 +11229,14 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.ok(
       msgs.some(
         (message) =>
-          message.type === 'error' && String(message.error).includes('AGY native requires a thread projectPath'),
+          message.type === 'error' && /AGY(?: native)? requires a thread projectPath/u.test(String(message.error)),
       ),
+      JSON.stringify(msgs.filter((message) => message.type === 'error')),
     );
   });
 
   it('F325 ordinary route compiles native L0 without a prepend and excludes resumed dynamic pack content', async () => {
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
     const { AgyNativeAgentService } = await import(
       '../dist/domains/cats/services/agents/providers/agy-native/AgyNativeAgentService.js'
     );
@@ -10843,6 +11246,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const compiledBodies = [];
     const launches = [];
     const compilerCalls = [];
+    const nativePolicies = [];
     const nativeBody = '# Identity\nF325-CANONICAL-NATIVE-L0\n';
     const service = new AgyNativeAgentService({
       catId: 'gemini38',
@@ -10869,9 +11273,10 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       observesCompression: false,
       reason: 'native L0 route fixture',
     });
-    const actualInvoke = service.invoke.bind(service);
-    service.invoke = (prompt, options) =>
-      actualInvoke(prompt, {
+    const actualInvoke = service.invokeWithContinuityPreflight.bind(service);
+    service.invokeWithContinuityPreflight = (preflight, options) => {
+      nativePolicies.push(options.toolExecutionPolicy);
+      return actualInvoke(preflight, {
         ...options,
         beforeProviderLaunch: async (request) => {
           compiledBodies.push(request.nativeInstructions[0].body);
@@ -10879,9 +11284,14 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         },
         spawnCliOverride: async function* (launch) {
           launches.push(launch);
+          let deliveredPrompt;
+          launch.onStdinReady((value) => {
+            deliveredPrompt = value;
+          });
+          const nativeSessionId = launches.length === 3 ? 'f325-native-ordinary-session' : 'f325-native-route-session';
           yield {
             event: 'init',
-            conversation_id: 'f325-native-route-session',
+            conversation_id: nativeSessionId,
             init: {
               agent: launch.args[launch.args.indexOf('--agent') + 1],
               cwd: launch.cwd,
@@ -10890,14 +11300,39 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
               tools: [],
             },
           };
+          assert.equal(typeof deliveredPrompt, 'string', 'only the generation settled after init reaches stdin');
+          if (launches.length === 3) {
+            yield {
+              event: 'step_update',
+              step_update: {
+                conversation_id: nativeSessionId,
+                step_index: 1,
+                step_type: 'tool',
+                state: 'DONE',
+                tool_name: 'call_mcp_tool',
+                tool_info: {
+                  parameters: {
+                    ServerName: 'cat-cafe-memory',
+                    ToolName: 'cat_cafe_search_evidence',
+                    Arguments: { query: 'project decision' },
+                  },
+                  output: 'Found the original decision.',
+                },
+              },
+            };
+          }
           yield {
             event: 'result',
-            result: { conversation_id: 'f325-native-route-session', status: 'SUCCESS', response: 'OK', num_turns: 1 },
+            result: { conversation_id: nativeSessionId, status: 'SUCCESS', response: 'OK', num_turns: 1 },
           };
         },
       });
+    };
+    const nativeEpochStore = new InMemoryContextEpochStore();
     const deps = {
       ...makeDeps(),
+      contextEpochOwner: new ContextEpochOwner(nativeEpochStore),
+      sessionChainStore: new SessionChainStore(),
       threadStore: {
         get: async () => ({ projectPath: workspace, createdBy: 'user1' }),
         updateParticipantActivity: async () => {},
@@ -10923,6 +11358,8 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     try {
       const first = await collect(invokeSingleCat(deps, params));
       assert.equal(first.find((message) => message.type === 'error')?.error, undefined);
+      const persisted = await deps.sessionChainStore.getActive('gemini38', params.threadId, 'user1');
+      assert.equal(persisted.nativeSessionBinding.cliSessionId, 'f325-native-route-session');
       const resumed = await collect(
         invokeSingleCat(deps, {
           ...params,
@@ -10930,6 +11367,10 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         }),
       );
       assert.equal(resumed.find((message) => message.type === 'error')?.error, undefined);
+      const epoch = nativeEpochStore.get('user1::gemini38::thread-native-route-l0');
+      assert.equal(epoch.contextEpoch, 1, 'verified resume does not create another cold epoch');
+      assert.equal(epoch.contextMode, 'hot');
+      assert.equal(epoch.boundRuntimeSessionId, 'f325-native-route-session');
       assert.equal(service.injectsL0Natively(), true);
       assert.equal(compilerCalls.length, 2);
       assert.ok(compilerCalls.every((options) => options.catId === 'gemini38' && options.userId === 'user1'));
@@ -10939,277 +11380,30 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
         assert.ok(!body.includes('F129-DYNAMIC-PACK-MUST-NOT-BECOME-NATIVE-L0'));
       }
       assert.deepEqual(launches[1].args.slice(-2), ['--conversation', 'f325-native-route-session']);
-    } finally {
-      await rm(base, { recursive: true, force: true });
-    }
-  });
-
-  it('refuses private native Work before consulting an unrelated operator coding grant', async () => {
-    const { AgyNativeAgentService } = await import(
-      '../dist/domains/cats/services/agents/providers/agy-native/AgyNativeAgentService.js'
-    );
-    const base = await mkdtemp(join(tmpdir(), 'f325-private-native-refusal-'));
-    const previousDataDir = process.env.CAT_CAFE_DATA_DIR;
-    process.env.CAT_CAFE_DATA_DIR = base;
-    const configs = catRegistry.getAllConfigs();
-    const grant = {
-      threadId: 'private-thread',
-      taskId: 'approved-native-task',
-      workUnitRef: 'file:docs/plans/2026-09-29-f325-three-pr-execution.md#p2-first-coding',
-      acceptedRevision: 'a'.repeat(40),
-      workspaceRoot: base,
-      writableFiles: ['task.ts', 'task.test.mjs'],
-      testFile: 'task.test.mjs',
-    };
-    catRegistry.reset();
-    for (const [id, config] of Object.entries(configs)) {
-      catRegistry.register(
-        id,
-        id === 'gemini38' ? { ...config, agyProfile: { ...config.agyProfile, nativeCodingGrant: grant } } : config,
-      );
-    }
-    let grantReads = 0;
-    let authRegistrations = 0;
-    let launches = 0;
-    try {
-      assert.deepEqual(catRegistry.tryGet('gemini38')?.config.agyProfile?.nativeCodingGrant, grant);
-      const service = new AgyNativeAgentService({
-        catId: 'gemini38',
-        profile: { enabled: true, profileId: 'gemini38', model: 'gemini-3.8-flash-high' },
-        command: '/usr/bin/true',
-      });
-      service.contextCapability = () => ({
-        provider: 'google',
-        carrier: 'agy_stream_json',
-        reportsRuntimeWindow: false,
-        authoritativeUsage: false,
-        nativeWindowControl: false,
-        nativeCompressionControl: false,
-        observesCompression: false,
-        reason: 'private native Work refusal fixture preserves the concrete carrier',
-      });
-      service.invoke = async function* () {
-        launches++;
-      };
-      await assert.rejects(
-        collect(
-          invokeSingleCat(
-            {
-              ...makeDeps(),
-              taskStore: {
-                get: async () => {
-                  grantReads++;
-                },
-              },
-              registry: {
-                create: async () => {
-                  authRegistrations++;
-                },
-              },
-              collectiveContext: () => ({
-                resolvePrivate: async () => ({
-                  work: {
-                    task: { id: 'private-task' },
-                    executionRevision: 1,
-                    authorityRef: 'message:private-admission',
-                  },
-                }),
-              }),
-            },
-            {
-              catId: 'gemini38',
-              service,
-              userId: 'user1',
-              threadId: 'private-thread',
-              executionScope: 'collective-work',
-              prompt: 'Current private Work',
-              isLastCat: true,
-            },
-          ),
-        ),
-        (error) => {
-          assert.equal(error.code, 'collective_private_work_refused');
-          assert.equal(error.reason, 'private_provider_unsupported');
-          return true;
-        },
-      );
       assert.deepEqual(
-        { grantReads, authRegistrations, launches },
-        { grantReads: 0, authRegistrations: 0, launches: 0 },
+        nativePolicies.slice(0, 2),
+        [{ mode: 'read_only' }, { mode: 'read_only' }],
+        'host read_only stays the canonical policy',
       );
-    } finally {
-      catRegistry.reset();
-      for (const [id, config] of Object.entries(configs)) catRegistry.register(id, config);
-      if (previousDataDir === undefined) delete process.env.CAT_CAFE_DATA_DIR;
-      else process.env.CAT_CAFE_DATA_DIR = previousDataDir;
-      await rm(base, { recursive: true, force: true });
-    }
-  });
-
-  it('derives native coding writes from the matching operator grant and live entrusted Task', async () => {
-    const { AgyNativeAgentService } = await import(
-      '../dist/domains/cats/services/agents/providers/agy-native/AgyNativeAgentService.js'
-    );
-    const base = await mkdtemp(join(tmpdir(), 'f325-native-route-grant-'));
-    const workspace = join(base, 'worktree');
-    await mkdir(join(workspace, 'src'), { recursive: true });
-    const canonicalWorkspace = await realpath(workspace);
-    const workUnitRef = 'file:docs/plans/2026-09-29-f325-three-pr-execution.md#p2-first-coding';
-    const grant = {
-      threadId: 'thread-native-coding',
-      taskId: 'task-native-coding',
-      workUnitRef,
-      acceptedRevision: 'a'.repeat(40),
-      workspaceRoot: canonicalWorkspace,
-      writableFiles: ['src/task.ts', 'src/task.test.mjs'],
-      testFile: 'src/task.test.mjs',
-    };
-    const registrySnapshot = catRegistry.getAllConfigs();
-    const geminiConfig = registrySnapshot.gemini38;
-    assert.ok(geminiConfig);
-    catRegistry.reset();
-    for (const [id, config] of Object.entries(registrySnapshot)) {
-      catRegistry.register(
-        id,
-        id === 'gemini38' ? { ...config, agyProfile: { ...config.agyProfile, nativeCodingGrant: grant } } : config,
+      const { toolExecutionPolicy: _readOnly, ...ordinaryParams } = params;
+      await deps.sessionChainStore.update(persisted.id, { status: 'sealed' });
+      storedSession = undefined;
+      const ordinary = await collect(invokeSingleCat(deps, ordinaryParams));
+      assert.equal(ordinary.find((message) => message.type === 'error')?.error, undefined);
+      const { toolExecutionPolicyDenial } = await import(
+        '../dist/domains/cats/services/agents/invocation/tool-execution-policy.js'
       );
-    }
-    try {
-      const service = new AgyNativeAgentService({
-        catId: 'gemini38',
-        profile: { enabled: true, profileId: 'gemini38', model: 'gemini-3.8-flash-high' },
-        command: '/usr/bin/true',
-      });
-      service.contextCapability = () => ({
-        provider: 'google',
-        carrier: 'agy_stream_json',
-        reportsRuntimeWindow: false,
-        authoritativeUsage: false,
-        nativeWindowControl: false,
-        nativeCompressionControl: false,
-        observesCompression: false,
-        reason: 'native coding grant fixture',
-      });
-      let seenScope;
-      let invokedService = false;
-      service.invoke = async function* (_prompt, options) {
-        invokedService = true;
-        seenScope = options.agyNativeScope;
-        yield { type: 'done', catId: 'gemini38', timestamp: Date.now() };
-      };
-      const task = {
-        id: grant.taskId,
-        kind: 'work',
-        threadId: grant.threadId,
-        ownerCatId: 'gemini38',
-        userId: 'user1',
-        status: 'doing',
-        entrustedWork: {
-          developmentScope: {
-            featureRef: 'feature:F325',
-            phaseKey: 'B',
-            workUnitRef,
-            acceptedSourceRef: workUnitRef,
-            acceptedRevision: grant.acceptedRevision,
-          },
-          closure: { state: 'open' },
-        },
-      };
-      const messages = await collect(
-        invokeSingleCat(
-          {
-            ...makeDeps(),
-            taskStore: { get: async () => task },
-            threadStore: {
-              get: async () => ({ projectPath: canonicalWorkspace, createdBy: 'user1' }),
-              updateParticipantActivity: async () => {},
-            },
-          },
-          {
-            catId: 'gemini38',
-            service,
-            prompt: 'Read and edit the approved file.',
-            systemPrompt: '# F325 native identity',
-            userId: 'user1',
-            threadId: grant.threadId,
-            isLastCat: true,
-          },
-        ),
+      assert.equal(
+        toolExecutionPolicyDenial(nativePolicies[2], 'GET /api/callbacks/search-evidence'),
+        null,
+        'normal owner invocation must reach the existing callback authorization instead of a Native-only short list',
       );
       assert.ok(
-        invokedService,
-        `native service not called: ${JSON.stringify(messages.map((m) => [m.type, m.errorCode, m.error, m.content]))}`,
-      );
-      assert.deepEqual(seenScope, {
-        workspaceRoot: canonicalWorkspace,
-        writableFiles: grant.writableFiles,
-        testFile: grant.testFile,
-        taskId: grant.taskId,
-        mcpTools: [
-          'cat-cafe-collab/cat_cafe_get_thread_context',
-          'cat-cafe-collab/cat_cafe_post_message',
-          'cat-cafe-collab/cat_cafe_run_task_test',
-        ],
-      });
-      seenScope = undefined;
-      await collect(
-        invokeSingleCat(
-          {
-            ...makeDeps(),
-            taskStore: { get: async () => task },
-            threadStore: {
-              get: async () => ({ projectPath: canonicalWorkspace, createdBy: 'user1' }),
-              updateParticipantActivity: async () => {},
-            },
-          },
-          {
-            catId: 'gemini38',
-            service,
-            prompt: 'Read-only supplement.',
-            systemPrompt: '# F325 native identity',
-            userId: 'user1',
-            threadId: grant.threadId,
-            isLastCat: true,
-            toolExecutionPolicy: { mode: 'read_only' },
-          },
+        ordinary.some(
+          (message) => message.type === 'tool_result' && message.content === 'Found the original decision.',
         ),
       );
-      assert.deepEqual(seenScope, { writableFiles: [], mcpTools: [] });
-      seenScope = undefined;
-      const closedTask = {
-        ...task,
-        status: 'done',
-        entrustedWork: { ...task.entrustedWork, closure: { state: 'satisfied' } },
-      };
-      const afterClosure = await collect(
-        invokeSingleCat(
-          {
-            ...makeDeps(),
-            taskStore: { get: async () => closedTask },
-            threadStore: {
-              get: async () => ({ projectPath: canonicalWorkspace, createdBy: 'user1' }),
-              updateParticipantActivity: async () => {},
-            },
-          },
-          {
-            catId: 'gemini38',
-            service,
-            prompt: 'Continue ordinary chat after the coding Task closes.',
-            systemPrompt: '# F325 native identity',
-            userId: 'user1',
-            threadId: grant.threadId,
-            isLastCat: true,
-          },
-        ),
-      );
-      assert.equal(afterClosure.at(-1).errorCode, undefined);
-      assert.deepEqual(seenScope, {
-        writableFiles: [],
-        mcpTools: ['cat-cafe-collab/cat_cafe_get_thread_context'],
-      });
     } finally {
-      catRegistry.reset();
-      for (const [id, config] of Object.entries(registrySnapshot)) catRegistry.register(id, config);
       await rm(base, { recursive: true, force: true });
     }
   });

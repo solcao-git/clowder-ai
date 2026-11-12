@@ -29,7 +29,24 @@ function sanitizePreferences(value: unknown): ResolvedPreferences {
         isStableThreadAttentionAnchor(entry[0]) && (entry[1] === 'manual' || entry[1] === 'running-first'),
     ),
   );
-  return { aliases, open, ...(Object.keys(memberSort).length ? { memberSort } : {}) };
+  const collapsedPeek = Object.fromEntries(
+    Object.entries(candidate.collapsedPeek ?? {}).filter(
+      (entry): entry is [string, boolean] => isStableThreadAttentionAnchor(entry[0]) && typeof entry[1] === 'boolean',
+    ),
+  );
+  return {
+    aliases,
+    open,
+    ...(Array.isArray(candidate.recentGroupIds)
+      ? {
+          recentGroupIds: [
+            ...new Set(candidate.recentGroupIds.filter((id) => typeof id === 'string' && GROUP_ID_RE.test(id))),
+          ],
+        }
+      : {}),
+    ...(Object.keys(memberSort).length ? { memberSort } : {}),
+    ...(Object.keys(collapsedPeek).length ? { collapsedPeek } : {}),
+  };
 }
 
 export function isStableThreadAttentionAnchor(anchor: string): boolean {
@@ -54,6 +71,7 @@ export function saveThreadAttentionPreference(
     anchor: string;
     alias?: string | null;
     open?: boolean | null;
+    collapsedPeek?: boolean | null;
     memberSort?: ThreadAttentionMemberSort | null;
   },
 ): ResolvedPreferences {
@@ -62,6 +80,7 @@ export function saveThreadAttentionPreference(
     const aliases = { ...existing.aliases };
     const open = { ...existing.open };
     const memberSort = { ...existing.memberSort };
+    const collapsedPeek = { ...existing.collapsedPeek };
     if (input.alias !== undefined) {
       if (input.alias === null) delete aliases[input.anchor];
       else aliases[input.anchor] = input.alias.trim();
@@ -74,10 +93,33 @@ export function saveThreadAttentionPreference(
       if (input.memberSort === null) delete memberSort[input.anchor];
       else memberSort[input.anchor] = input.memberSort;
     }
+    if (input.collapsedPeek !== undefined) {
+      if (input.collapsedPeek === null) delete collapsedPeek[input.anchor];
+      else collapsedPeek[input.anchor] = input.collapsedPeek;
+    }
     return {
       ...current,
-      threadAttention: { aliases, open, ...(Object.keys(memberSort).length ? { memberSort } : {}) },
+      threadAttention: {
+        ...(existing.recentGroupIds ? { recentGroupIds: existing.recentGroupIds } : {}),
+        aliases,
+        open,
+        ...(Object.keys(memberSort).length ? { memberSort } : {}),
+        ...(Object.keys(collapsedPeek).length ? { collapsedPeek } : {}),
+      },
     };
   });
   return resolveThreadAttentionPreferences(projectRoot);
+}
+
+export function recordRecentThreadAttentionGroup(projectRoot: string, groupId: string): void {
+  updateUserPreferences(projectRoot, (current) => {
+    const existing = sanitizePreferences(current.threadAttention);
+    return {
+      ...current,
+      threadAttention: {
+        ...existing,
+        recentGroupIds: [groupId, ...(existing.recentGroupIds ?? []).filter((id) => id !== groupId)],
+      },
+    };
+  });
 }

@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -106,6 +106,7 @@ export function openGateResourcePool(databasePath) {
     ensureColumn(database, 'gate_resource_requests', 'aging_started_at', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(database, 'gate_resource_requests', 'drain_started_at', 'INTEGER');
     ensureColumn(database, 'gate_resource_requests', 'pressure_blocked_at', 'INTEGER');
+    ensureColumn(database, 'gate_resource_requests', 'pressure_observation_json', 'TEXT');
     ensureColumn(database, 'gate_resource_requests', 'job_token', 'TEXT');
     ensureColumn(database, 'gate_resource_requests', 'logical_request_key', 'TEXT');
     ensureColumn(database, 'gate_resource_requests', 'request_generation', 'INTEGER');
@@ -195,4 +196,17 @@ export function openGateResourcePool(databasePath) {
     database.close();
     throw error;
   }
+}
+
+/**
+ * Open persisted gate truth without running schema creation, migrations, WAL
+ * negotiation, or any other write-capable initialization. Recovery admission
+ * must not mutate the evidence it is deciding whether to trust.
+ */
+export function openGateResourcePoolReadOnly(databasePath) {
+  if (!existsSync(databasePath)) throw new Error(`gate resource database does not exist: ${databasePath}`);
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  database.exec('PRAGMA busy_timeout = 5000');
+  database.exec('PRAGMA foreign_keys = ON');
+  return database;
 }

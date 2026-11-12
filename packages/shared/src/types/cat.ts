@@ -4,6 +4,7 @@
  */
 
 import type { CliConfig } from './cat-breed.js';
+import type { CatCarrier } from './cat-carrier.js';
 import type { CatId, SessionId } from './ids.js';
 import { createCatId } from './ids.js';
 import type { VoiceConfig } from './tts.js';
@@ -17,6 +18,7 @@ export type ClientId =
   | 'openai'
   | 'google'
   | 'kimi'
+  | 'pi'
   | 'antigravity'
   | 'opencode'
   | 'a2a'
@@ -50,41 +52,37 @@ export interface CatColor {
 export interface AgyProfileConfig {
   readonly enabled?: boolean;
   /** F325 staged migration: each profile has exactly one selected execution carrier. */
-  readonly carrier?: 'legacy' | 'native';
+  readonly carrier?: 'legacy' | 'native' | 'acp';
   readonly profileId?: string;
   readonly homeRoot?: string;
   readonly model?: string;
   readonly autoApprove?: boolean;
   readonly trustedWorkspaces?: readonly string[];
-  /** Operator-issued P1 coding grant bound to one durable entrusted Task and worktree. */
-  readonly nativeCodingGrant?: AgyNativeCodingGrantConfig;
-}
-
-export interface AgyNativeCodingGrantConfig {
-  readonly threadId: string;
-  readonly taskId: string;
-  readonly workUnitRef: string;
-  readonly acceptedRevision: string;
-  readonly workspaceRoot: string;
-  readonly writableFiles: readonly string[];
-  readonly testFile: string;
 }
 
 /**
  * Cat configuration (immutable)
  */
 export interface CatConfig {
+  readonly accountBindingMode?: 'follow' | 'override';
   readonly id: CatId;
   readonly name: string;
   readonly displayName: string;
   /** Nickname given by co-creator (e.g. 宪宪, 砚砚). See docs/stories/cat-names/ */
   readonly nickname?: string;
   readonly avatar: string;
+  readonly banner?: string;
   readonly color: CatColor;
   readonly mentionPatterns: readonly string[];
   readonly accountRef?: string;
+  /** Native tools own authentication and omitted model/effort defaults. */
+  readonly configurationSource?: 'native_tool' | 'managed_account';
+  /** Explicit runtime choice: null uses the member's native/manual carrier; absent keeps legacy bindings. */
+  readonly agentProvider?: string | null;
   /** clowder-ai#340 P5: CLI client identity (renamed from `provider`). */
   readonly clientId: ClientId;
+  /** Canonical, config-resolved member access mode. */
+  readonly carrier: CatCarrier;
   readonly defaultModel: string;
   readonly mcpSupport: boolean;
   readonly cli?: CliConfig;

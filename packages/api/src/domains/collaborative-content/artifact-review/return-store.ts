@@ -1,5 +1,12 @@
-import type { ArtifactReview, ArtifactReviewReceipt } from '@cat-cafe/shared';
+import { isDeepStrictEqual } from 'node:util';
+import type { ArtifactReview, ArtifactReviewReceipt, ContentModificationRecord } from '@cat-cafe/shared';
 import type Database from 'better-sqlite3';
+import type { MediaPublicationReturnIntent } from '../modification/media-publication/media-publication-return.js';
+import {
+  type TextWritebackCompletionIntent,
+  textCompletionBinding,
+} from '../modification/text/text-writeback-completion-intent.js';
+import { PublicationGenerationStore } from './publication-generation-store.js';
 import type { ReviewMutation } from './store.js';
 
 export interface ReviewReturnTarget {
@@ -21,7 +28,14 @@ export interface ReviewReturnIntent extends ReviewReturnTarget {
   contentRef: string;
   ownerRevision: number;
   state: 'pending' | 'queued' | 'retired';
-  kind: 'submit_feedback' | 'decide' | 'reopen' | 'request_image_edit' | 'request_media_edit' | 'supersede_request';
+  kind:
+    | 'submit_feedback'
+    | 'decide'
+    | 'reopen'
+    | 'request_image_edit'
+    | 'request_media_edit'
+    | 'supersede_request'
+    | 'judge_response';
   createdAt: string;
   messageId?: string;
   retirementReason?: string;
@@ -43,13 +57,19 @@ export interface TextModificationReturnIntent extends ReviewReturnTarget {
   messageId?: string;
   retirementReason?: string;
 }
-export type ContentReturnIntent = ReviewReturnIntent | TextModificationReturnIntent;
+export type ContentReturnIntent =
+  | ReviewReturnIntent
+  | TextModificationReturnIntent
+  | MediaPublicationReturnIntent
+  | TextWritebackCompletionIntent;
 
 export class ArtifactReviewReturnStore {
+  readonly publications: PublicationGenerationStore;
   constructor(private readonly database: Database.Database) {
     database.exec(`CREATE TABLE IF NOT EXISTS artifact_review_returns (
       receipt_ref TEXT PRIMARY KEY, state TEXT NOT NULL, created_at TEXT NOT NULL, body TEXT NOT NULL
     ); CREATE INDEX IF NOT EXISTS artifact_review_returns_pending ON artifact_review_returns(state, created_at);`);
+    this.publications = new PublicationGenerationStore(database);
   }
 
   /** Called inside the review mutation transaction, never independently of the human decision receipt. */
@@ -62,7 +82,8 @@ export class ArtifactReviewReturnStore {
       kind !== 'reopen' &&
       kind !== 'request_image_edit' &&
       kind !== 'request_media_edit' &&
-      kind !== 'supersede_request'
+      kind !== 'supersede_request' &&
+      kind !== 'judge_response'
     )
       return;
     const round = review.rounds.find((item) => item.number === input.round);
@@ -94,6 +115,71 @@ export class ArtifactReviewReturnStore {
       .run(intent.receiptRef, intent.state, intent.createdAt, JSON.stringify(intent));
   }
 
+  /** Validated completion shares the request journal's cancellation/order fence, not a new ledger. */
+  recordTextCompletion(intent: TextWritebackCompletionIntent, requestRevision: number): void {
+    this.database
+      .transaction(() => {
+        const row = this.database
+          .prepare('SELECT revision,body FROM content_modification_requests WHERE request_id=? AND owner_user_id=?')
+          .get(intent.requestId, intent.ownerUserId) as { revision: number; body: string } | undefined;
+        const record = row ? (JSON.parse(row.body) as ContentModificationRecord) : undefined;
+        if (
+          !record ||
+          row?.revision !== requestRevision ||
+          record.control ||
+          record.progress.task?.taskId !== intent.taskId ||
+          record.payload.targetCatId !== intent.targetCatId ||
+          record.payload.threadId !== intent.threadId ||
+          record.progress.sourceMessageId !== intent.sourceMessageId
+        )
+          throw new Error('Text completion request changed before registration');
+        const prior = this.get(intent.receiptRef);
+        if (prior) {
+          if (
+            prior.kind !== intent.kind ||
+            !isDeepStrictEqual(textCompletionBinding(prior), textCompletionBinding(intent))
+          )
+            throw new Error('Text completion binding reused');
+          return;
+        }
+        this.database
+          .prepare('INSERT INTO artifact_review_returns(receipt_ref,state,created_at,body) VALUES(?,?,?,?)')
+          .run(intent.receiptRef, intent.state, intent.createdAt, JSON.stringify(intent));
+      })
+      .immediate();
+  }
+
+  /** Native publication registration, not a forged human review receipt. Shares the original owner outbox. */
+  recordPublication(intent: MediaPublicationReturnIntent): void {
+    if (!this.database.inTransaction) throw new Error('Publication return must share request validation transaction');
+    if (intent.recovery) throw new Error('Recovery must share its generation CAS transaction');
+    const existing = this.get(intent.receiptRef);
+    if (existing) {
+      const { state: _state, messageId: _message, retirementReason: _reason, ...prior } = existing;
+      const { state: _nextState, messageId: _nextMessage, retirementReason: _nextReason, ...next } = intent;
+      if (JSON.stringify(prior) !== JSON.stringify(next)) throw new Error('Publication return binding reused');
+      return;
+    }
+    this.database
+      .prepare('INSERT INTO artifact_review_returns(receipt_ref,state,created_at,body) VALUES(?,?,?,?)')
+      .run(intent.receiptRef, intent.state, intent.createdAt, JSON.stringify(intent));
+    this.publications.initial(intent);
+  }
+
+  recordPublicationRecovery(intent: MediaPublicationReturnIntent, fingerprint: string): void {
+    if (!this.database.inTransaction) throw new Error('Recovery must share request validation transaction');
+    this.database
+      .prepare('INSERT INTO artifact_review_returns(receipt_ref,state,created_at,body) VALUES(?,?,?,?)')
+      .run(intent.receiptRef, intent.state, intent.createdAt, JSON.stringify(intent));
+    this.publications.advance(intent, fingerprint);
+  }
+
+  publicationForRequest(requestId: string): MediaPublicationReturnIntent | null {
+    const current = this.publications.current(requestId);
+    const intent = current ? this.get(current.receipt_ref) : null;
+    return intent?.kind === 'resume_media_publication' ? intent : null;
+  }
+
   pending(limit = 100): ContentReturnIntent[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error('Invalid return batch limit');
     const rows = this.database
@@ -114,7 +200,7 @@ export class ArtifactReviewReturnStore {
   latest(reviewId: string): ReviewReturnIntent | null {
     const row = this.database
       .prepare(
-        "SELECT body FROM artifact_review_returns WHERE json_extract(body, '$.reviewId') = ? ORDER BY json_extract(body, '$.reviewRevision') DESC LIMIT 1",
+        "SELECT body FROM artifact_review_returns WHERE json_extract(body, '$.reviewId') = ? AND json_extract(body,'$.kind')!='resume_media_publication' ORDER BY json_extract(body, '$.reviewRevision') DESC LIMIT 1",
       )
       .get(reviewId) as { body: string } | undefined;
     return row ? (JSON.parse(row.body) as ReviewReturnIntent) : null;

@@ -1,13 +1,29 @@
 import { z } from 'zod';
 import { artifactReviewDrawingSchema, artifactReviewImageEditSchema } from './artifact-review-drawing.js';
+import {
+  artifactReviewAnchorSchema,
+  reviewedMediaAssetSchema,
+  reviewedMediaTypeSchema,
+} from './artifact-review-media.js';
+
+export type {
+  ArtifactReviewAnchor,
+  ImmutableMedia,
+  ReviewedMediaAsset,
+  ReviewedMediaType,
+} from './artifact-review-media.js';
+export {
+  artifactReviewAnchorSchema,
+  immutableMediaSchema,
+  reviewedMediaAssetSchema,
+  reviewedMediaTypeSchema,
+} from './artifact-review-media.js';
 
 const ref = z.string().trim().min(1).max(2048);
 const id = z.string().trim().min(1).max(128);
 const positive = z.number().int().positive().safe();
-const tick = z.number().int().safe();
 const text = z.string().trim().min(1).max(8000);
 const timestamp = z.string().datetime();
-const rational = z.object({ numerator: positive, denominator: positive }).strict();
 
 export const artifactReviewActorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('human'), actorId: id }).strict(),
@@ -15,86 +31,6 @@ export const artifactReviewActorSchema = z.discriminatedUnion('kind', [
 ]);
 export type ArtifactReviewActor = z.infer<typeof artifactReviewActorSchema>;
 export type ArtifactReviewAuditActor = ArtifactReviewActor | { kind: 'owner'; actorId: 'content-review' };
-
-export const immutableMediaSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('image'), width: positive.max(32768), height: positive.max(32768) }).strict(),
-  z
-    .object({
-      kind: z.literal('video'),
-      width: positive.max(32768),
-      height: positive.max(32768),
-      codedWidth: positive.max(32768),
-      codedHeight: positive.max(32768),
-      rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
-      pixelAspectRatio: rational,
-      streamId: id,
-      streamIndex: z.number().int().min(0).max(64),
-      timebase: rational,
-      startTick: tick,
-      durationTicks: positive,
-      containerStartSeconds: z.number().finite(),
-    })
-    .strict(),
-]);
-export type ImmutableMedia = z.infer<typeof immutableMediaSchema>;
-
-export const reviewedMediaAssetSchema = z
-  .object({
-    contentRef: ref,
-    ownerRevision: positive,
-    blobDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
-    mediaType: z.enum(['image/png', 'video/mp4']),
-    media: immutableMediaSchema,
-    sourcePublication: z.object({ artifactRef: ref, sourceRef: ref, revision: ref, threadId: ref.optional() }).strict(),
-    ownerReceiptRef: ref,
-  })
-  .strict();
-export type ReviewedMediaAsset = z.infer<typeof reviewedMediaAssetSchema>;
-
-const region = {
-  x: z.number().finite().min(0),
-  y: z.number().finite().min(0),
-  width: z.number().finite().positive(),
-  height: z.number().finite().positive(),
-};
-const point = { x: z.number().finite().min(0), y: z.number().finite().min(0) };
-export const artifactReviewAnchorSchema = z
-  .discriminatedUnion('kind', [
-    z.object({ kind: z.literal('image-region'), ...region }).strict(),
-    z.object({ kind: z.literal('image-point'), ...point }).strict(),
-    z
-      .object({
-        kind: z.literal('video-range'),
-        streamId: id,
-        startTick: tick,
-        endTick: tick,
-        frameRegion: z
-          .object({ tick, ...region })
-          .strict()
-          .optional(),
-        framePoint: z
-          .object({ tick, ...point })
-          .strict()
-          .optional(),
-      })
-      .strict(),
-  ])
-  .superRefine((anchor, context) => {
-    if (anchor.kind !== 'video-range') return;
-    if (anchor.endTick <= anchor.startTick)
-      context.addIssue({ code: 'custom', message: 'Video range must be nonempty and half-open' });
-    if (
-      anchor.frameRegion &&
-      (anchor.frameRegion.tick < anchor.startTick || anchor.frameRegion.tick >= anchor.endTick)
-    ) {
-      context.addIssue({ code: 'custom', message: 'Frame must be inside the selected time range' });
-    }
-    if (anchor.framePoint && (anchor.framePoint.tick < anchor.startTick || anchor.framePoint.tick >= anchor.endTick))
-      context.addIssue({ code: 'custom', message: 'Point frame must be inside the selected time range' });
-    if (anchor.framePoint && anchor.frameRegion)
-      context.addIssue({ code: 'custom', message: 'Choose one spatial target per video anchor' });
-  });
-export type ArtifactReviewAnchor = z.infer<typeof artifactReviewAnchorSchema>;
 
 export const artifactReviewReplySchema = z
   .object({
@@ -130,6 +66,22 @@ export const artifactReviewResponseSchema = z
   .strict();
 export type ArtifactReviewResponse = z.infer<typeof artifactReviewResponseSchema>;
 
+/** Stored verified mapping. Public legacy responses still use the smaller strict input schema above. */
+export const artifactReviewResponseRecordSchema = artifactReviewResponseSchema.extend({
+  resultAnchor: artifactReviewAnchorSchema.optional(),
+  /** Direct Human judgment of this exact result response; the original operation audit retains earlier choices. */
+  judgment: z
+    .object({
+      outcome: z.enum(['accepted', 'reopened']),
+      actor: z.object({ kind: z.literal('human'), actorId: id }).strict(),
+      decidedAt: timestamp,
+      receiptRef: ref,
+    })
+    .strict()
+    .optional(),
+});
+export type ArtifactReviewResponseRecord = z.infer<typeof artifactReviewResponseRecordSchema>;
+
 export const artifactReviewVisualMarkSchema = z
   .object({
     drawing: artifactReviewDrawingSchema,
@@ -153,7 +105,18 @@ export const artifactReviewRoundSchema = z
     state: z.enum(['draft', 'awaiting_human', 'approved', 'changes_requested', 'superseded']),
     annotations: z.array(artifactReviewAnnotationSchema).max(500),
     visualMarks: z.array(artifactReviewVisualMarkSchema).max(500).optional(),
-    responses: z.array(artifactReviewResponseSchema).max(500),
+    responses: z.array(artifactReviewResponseRecordSchema).max(500),
+    responseSource: z
+      .object({
+        round: positive,
+        ownerRevision: positive,
+        reviewRevision: positive,
+        requestId: id.optional(),
+        ledgerRef: id.optional(),
+        ledgerRevision: positive.optional(),
+      })
+      .strict()
+      .optional(),
     responseAuthor: artifactReviewActorSchema.optional(),
     judgmentRequest: z
       .object({ summary: text, judgmentNeeded: text, requestedBy: artifactReviewActorSchema, requestedAt: timestamp })
@@ -162,12 +125,16 @@ export const artifactReviewRoundSchema = z
     decision: z
       .object({
         outcome: z.enum(['approved', 'changes_requested']),
-        explanation: text,
+        explanation: z.string().trim().max(8000),
         actor: artifactReviewActorSchema,
         decidedAt: timestamp,
         receiptRef: ref,
       })
       .strict()
+      .refine((decision) => decision.outcome === 'approved' || decision.explanation.length > 0, {
+        message: 'Changes require human feedback',
+        path: ['explanation'],
+      })
       .optional(),
     attentionRetiredReason: z.enum(['task_changed', 'task_closed', 'asset_changed', 'access_revoked']).optional(),
   })
@@ -205,50 +172,104 @@ export const artifactReviewSchema = z
   .refine(
     (review) => review.version === 3 || review.rounds.every((round) => !round.ledgerRef),
     'Linked ledgers require record version 3',
+  )
+  .refine(
+    (review) =>
+      review.rounds.every((round) => {
+        const reference = round.responseSource;
+        if (!reference) return true;
+        const source = review.rounds.find((item) => item.number === reference.round);
+        return (
+          source !== undefined &&
+          source.number < round.number &&
+          source.asset.ownerRevision === reference.ownerRevision &&
+          source.ledgerRef === reference.ledgerRef &&
+          reference.reviewRevision < review.revision
+        );
+      }),
+    'Response source must name its retained original round',
   );
 export type ArtifactReview = z.infer<typeof artifactReviewSchema>;
 
-export const artifactReviewActionSchema = z.discriminatedUnion('kind', [
-  z
-    .object({
-      kind: z.literal('request_media_edit'),
-      mediaType: z.enum(['image/png', 'video/mp4']),
-      annotationId: id,
-      body: text,
-      anchor: artifactReviewAnchorSchema.optional(),
-    })
-    .strict(),
-  z
-    .object({ kind: z.literal('add_visual_marks'), marks: z.array(artifactReviewDrawingSchema).min(1).max(100) })
-    .strict(),
-  z.object({ kind: z.literal('delete_visual_mark'), markId: id }).strict(),
-  z
-    .object({
-      kind: z.literal('request_image_edit'),
-      annotationId: id,
-      edit: artifactReviewImageEditSchema,
-      note: z.string().trim().max(7600).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal('annotate'),
-      annotationId: id,
-      anchor: artifactReviewAnchorSchema,
-      body: text,
-      reanchoredFrom: z.object({ round: positive, annotationId: id }).strict().optional(),
-    })
-    .strict(),
-  z.object({ kind: z.literal('reply'), annotationId: id, replyId: id, body: text }).strict(),
-  z.object({ kind: z.literal('edit'), annotationId: id, replyId: id.optional(), body: text }).strict(),
-  z.object({ kind: z.literal('set_annotation_state'), annotationId: id, state: z.enum(['open', 'resolved']) }).strict(),
-  z.object({ kind: z.literal('request_judgment'), summary: text, judgmentNeeded: text }).strict(),
-  z.object({ kind: z.literal('submit_feedback'), explanation: text }).strict(),
-  z
-    .object({ kind: z.literal('decide'), outcome: z.enum(['approved', 'changes_requested']), explanation: text })
-    .strict(),
-  z.object({ kind: z.literal('reopen'), explanation: text }).strict(),
-]);
+export const artifactReviewActionSchema = z
+  .discriminatedUnion('kind', [
+    z
+      .object({
+        kind: z.literal('request_media_edit'),
+        mediaType: reviewedMediaTypeSchema,
+        annotationId: id,
+        body: text,
+        anchor: artifactReviewAnchorSchema.optional(),
+        /** Multiple ranges belong to this one request and immutable source round. */
+        selections: z
+          .array(
+            z
+              .object({
+                id,
+                selection: artifactReviewAnchorSchema,
+                instruction: text.optional(),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(12)
+          .optional(),
+      })
+      .strict(),
+    z
+      .object({ kind: z.literal('add_visual_marks'), marks: z.array(artifactReviewDrawingSchema).min(1).max(100) })
+      .strict(),
+    z.object({ kind: z.literal('delete_visual_mark'), markId: id }).strict(),
+    z
+      .object({
+        kind: z.literal('request_image_edit'),
+        annotationId: id,
+        edit: artifactReviewImageEditSchema,
+        note: z.string().trim().max(7600).optional(),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal('annotate'),
+        annotationId: id,
+        anchor: artifactReviewAnchorSchema,
+        body: text,
+        reanchoredFrom: z.object({ round: positive, annotationId: id }).strict().optional(),
+      })
+      .strict(),
+    z.object({ kind: z.literal('reply'), annotationId: id, replyId: id, body: text }).strict(),
+    z.object({ kind: z.literal('edit'), annotationId: id, replyId: id.optional(), body: text }).strict(),
+    z
+      .object({ kind: z.literal('set_annotation_state'), annotationId: id, state: z.enum(['open', 'resolved']) })
+      .strict(),
+    z
+      .object({
+        kind: z.literal('judge_response'),
+        sourceRound: positive,
+        annotationId: id,
+        resultOwnerRevision: positive,
+        outcome: z.enum(['accepted', 'reopened']),
+      })
+      .strict(),
+    z.object({ kind: z.literal('request_judgment'), summary: text, judgmentNeeded: text }).strict(),
+    z.object({ kind: z.literal('submit_feedback'), explanation: text }).strict(),
+    z
+      .object({
+        kind: z.literal('decide'),
+        outcome: z.enum(['approved', 'changes_requested']),
+        explanation: z.string().trim().max(8000),
+      })
+      .strict(),
+    z.object({ kind: z.literal('reopen'), explanation: text }).strict(),
+  ])
+  .superRefine((action, ctx) => {
+    if (action.kind === 'decide' && action.outcome === 'changes_requested' && !action.explanation)
+      ctx.addIssue({ code: 'custom', path: ['explanation'], message: 'Changes require human feedback' });
+    if (action.kind !== 'request_media_edit' || !action.selections) return;
+    if (action.anchor) ctx.addIssue({ code: 'custom', path: ['anchor'], message: 'Choose single or named selections' });
+    if (new Set(action.selections.map((item) => item.id)).size !== action.selections.length)
+      ctx.addIssue({ code: 'custom', path: ['selections'], message: 'Selection ids must be unique' });
+  });
 export type ArtifactReviewAction = z.infer<typeof artifactReviewActionSchema>;
 
 export const artifactReviewCommandSchema = z
@@ -307,6 +328,13 @@ export interface ArtifactReviewView {
   /** Exact current request, derived from the atomic journal binding and canonical review audit. */
   modificationRequest?: { requestId: string; receiptRef: string };
   pendingVersion: boolean;
+  /** Authorized, locator-free coordinates for the direct Human recovery action. */
+  pendingSubmission?: {
+    kind: 'work-submit-response';
+    operationId: string;
+    sourceRound: number;
+    expectedReviewRevision: number;
+  };
   authority: {
     state: 'current' | 'task_changed' | 'task_closed' | 'asset_changed';
     taskRevision: number;
@@ -329,6 +357,7 @@ export interface ArtifactReviewView {
         | 'reopen'
         | 'request_image_edit'
         | 'request_media_edit'
+        | 'judge_response'
         | 'supersede_request';
     };
   };

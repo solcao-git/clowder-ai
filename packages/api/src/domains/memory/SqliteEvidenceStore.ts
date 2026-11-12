@@ -29,19 +29,23 @@ import {
   rankLexicalBackfillRows,
   splitLexicalBackfillWords,
 } from './lexical-backfill.js';
-import { runMemoryRead } from './MemoryProcess.js';
-import type { EmbeddingSnapshot } from './memory-process-protocol.js';
+import { runMemoryRead, runMemoryVectorRepack } from './MemoryProcess.js';
+import type { EmbeddingSnapshot, MemoryProcessJob } from './memory-process-protocol.js';
 import { searchMessagePassages } from './message-passage-search.js';
 import type { MessagePassageSearchExecution, MessagePassageSearchOptions } from './message-passage-search-types.js';
 import { readMessagePassageState } from './message-passage-state.js';
 import { normalizeMessageSearchDates } from './message-search-dates.js';
 import { applyMMR } from './mmr.js';
 import { type PassageVectorStore, parsePassageVectorKey, passageVectorKey } from './PassageVectorStore.js';
+import { withProjectionCheckpoints } from './projection-checkpoints.js';
 import { publishEntityMentions, recoverEntityMentionProjections } from './publish-entity-mentions.js';
 import { applyPullOnlyDownrank } from './pull-only-ranking.js';
 import { computeRecencyDecay } from './recency-decay.js';
+import { repackPassageVectors, type VectorRepackResult } from './repack-passage-vectors.js';
 import { applyMigrations } from './schema.js';
+import { createSearchEmbeddingCapability, type SearchEmbeddingCapability } from './search-embedding-capability.js';
 import type { VectorStore } from './VectorStore.js';
+import { createVectorInvalidator } from './vector-invalidation.js';
 import { writeEvidenceItems } from './write-evidence-items.js';
 
 // DF-8: asymmetric RRF weight for CJK queries — BM25/FTS5 has poor recall
@@ -131,6 +135,8 @@ export interface SqliteEvidenceStoreOptions {
   sourceRef?: string;
   /** @internal A child opens an existing schema without migrating or recursively dispatching. */
   workerMode?: 'read';
+  /** Optional API-owned observation. Standalone and worker stores have no implicit logger dependency. */
+  readDiagnostics?: (db: Database.Database) => () => void;
 }
 
 interface SearchFilterContext {
@@ -147,26 +153,11 @@ type PassageVectorDeleteRow = {
   passageId: string;
 };
 
-function hasTable(db: Database.Database, tableName: string): boolean {
-  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName));
-}
-
-function hasSqliteModule(db: Database.Database, moduleName: string): boolean {
-  try {
-    return Boolean(db.prepare('SELECT 1 FROM pragma_module_list WHERE name = ?').get(moduleName));
-  } catch {
-    return false;
-  }
-}
-
 function deletePassageVectors(db: Database.Database, rows: PassageVectorDeleteRow[]): void {
   if (rows.length === 0) return;
-  if (!hasTable(db, 'passage_vectors')) return;
-  if (!hasSqliteModule(db, 'vec0')) return;
-
-  const deleteVector = db.prepare('DELETE FROM passage_vectors WHERE passage_key = ?');
+  const deleteVector = createVectorInvalidator(db, 'passage_vectors');
   for (const row of rows) {
-    deleteVector.run(passageVectorKey(row.docAnchor, row.passageId));
+    deleteVector(passageVectorKey(row.docAnchor, row.passageId));
   }
 }
 
@@ -174,7 +165,13 @@ export class SqliteEvidenceStore implements IEvidenceStore {
   private db: Database.Database | null = null;
   private readonly dbPath: string;
   private embedDeps?: EmbedDeps;
+  // Standalone stores may own an already prepared corpus. IndexBuilder claims
+  // responsibility by invalidating this process-local capability before use.
+  private vectorProjection = { ready: true };
   private readonly workerMode?: 'read';
+  private readonly readDiagnostics?: SqliteEvidenceStoreOptions['readDiagnostics'];
+  private detachReadDiagnostics?: () => void;
+  private initialization?: Promise<void>;
   private sourceRoot?: string;
   private sourceRef?: string;
   private entityRegistry?: EntityRegistryStore;
@@ -184,6 +181,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
   constructor(dbPath: string, embedDeps?: EmbedDeps, options?: SqliteEvidenceStoreOptions) {
     this.dbPath = dbPath === ':memory:' ? dbPath : resolve(dbPath);
     this.workerMode = options?.workerMode;
+    this.readDiagnostics = options?.readDiagnostics;
     this.embedDeps = embedDeps;
     this.sourceRoot = options?.sourceRoot ? resolve(options.sourceRoot) : undefined;
     this.sourceRef = options?.sourceRoot ? options.sourceRef : undefined;
@@ -194,13 +192,44 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     this.embedDeps = deps;
   }
 
+  /** @internal Only the successful preparation transaction may publish its generation. */
+  invalidateVectorProjection(): () => void {
+    const projection = { ready: false };
+    this.vectorProjection = projection;
+    return () => {
+      if (this.vectorProjection === projection) projection.ready = true;
+    };
+  }
+
+  private searchEmbedding(): SearchEmbeddingCapability | undefined {
+    const deps = this.embedDeps;
+    const projection = this.vectorProjection;
+    return deps
+      ? createSearchEmbeddingCapability(
+          deps.embedding,
+          () => this.embedDeps === deps && this.vectorProjection === projection && projection.ready,
+        )
+      : undefined;
+  }
+
   /** @internal Bind relative sourcePath values to the scanner/collection root that produced them. */
   setSourceRoot(sourceRoot?: string, sourceRef?: string): void {
     this.sourceRoot = sourceRoot ? resolve(sourceRoot) : undefined;
     this.sourceRef = sourceRoot ? sourceRef : undefined;
   }
 
-  async initialize(): Promise<void> {
+  initialize(): Promise<void> {
+    if (!this.initialization) {
+      const attempt = this.initializeDatabase().catch((error: unknown) => {
+        if (this.initialization === attempt) this.initialization = undefined;
+        throw error;
+      });
+      this.initialization = attempt;
+    }
+    return this.initialization;
+  }
+
+  private async initializeDatabase(): Promise<void> {
     this.db = new Database(this.dbPath, {
       readonly: this.workerMode === 'read',
       fileMustExist: Boolean(this.workerMode),
@@ -209,7 +238,14 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
 
-    if (!this.workerMode) applyMigrations(this.db);
+    if (!this.workerMode) {
+      applyMigrations(this.db);
+      try {
+        this.detachReadDiagnostics = this.readDiagnostics?.(this.db);
+      } catch {
+        /* An optional observer failure cannot prevent memory initialization. */
+      }
+    }
     this.entityRegistry = new EntityRegistryStore(this.db);
     if (!this.workerMode) {
       await recoverEntityMentionProjections(this.db);
@@ -233,6 +269,15 @@ export class SqliteEvidenceStore implements IEvidenceStore {
       });
       tx?.();
     });
+  }
+
+  async getEntityProposalEffectProof(
+    entityId: string,
+    proposalId: string,
+    ownerUserId: string,
+  ): Promise<string | null> {
+    this.ensureOpen();
+    return this.entityRegistry?.proposalEffectProof(entityId, proposalId, ownerUserId) ?? null;
   }
 
   async getEntity(entityId: string): Promise<EntityRecord | null> {
@@ -299,26 +344,59 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     this.ensureOpen();
     const normalized = normalizeMessageSearchDates(options);
     if (this.usesIsolatedProcesses()) {
-      const { signal, ...serialized } = normalized;
+      const { signal, onReadSnapshot, onCjkRead: _onCjkRead, ...serialized } = normalized;
       serialized.deadlineAt ??= Date.now() + 15_000;
-      return runMemoryRead<MessagePassageSearchExecution>(
+      return this.runProjectionRead<MessagePassageSearchExecution>(
         {
           kind: 'message-search',
           dbPath: this.dbPath,
           query,
           options: serialized,
-          embedding: this.processEmbeddingSnapshot(),
           flags: memorySearchFlags(),
         },
-        { signal, deadlineAt: serialized.deadlineAt, embedding: this.embedDeps?.embedding },
+        { signal, deadlineAt: serialized.deadlineAt, onReadSnapshot },
+        (value) => value,
       );
     }
     return searchMessagePassages(query, normalized, {
       db: this.getDb(),
       isEmbeddingAvailable: () => this.isPassageEmbeddingAvailable(normalized),
       semanticSearch: (limit) => this.semanticPassageNNSearch(query, limit, normalized),
-      hybridSearch: (lexical, limit, accept) => this.hybridPassageRRFSearch(query, lexical, limit, normalized, accept),
+      hybridSearch: (lexical, limit, accept, compare) =>
+        this.hybridPassageRRFSearch(query, lexical, limit, normalized, accept, compare),
     });
+  }
+
+  /** The parent owns projection lifetime through final worker publication, not just RPC. */
+  private async runProjectionRead<T>(
+    job: Extract<MemoryProcessJob, { kind: 'search' | 'message-search' }>,
+    options: Pick<SearchOptions, 'signal' | 'deadlineAt'> & Pick<MessagePassageSearchOptions, 'onReadSnapshot'>,
+    executionOf: (value: T) => { meta: SearchExecutionMeta },
+  ): Promise<T> {
+    const snapshot = this.processEmbeddingSnapshot();
+    const embedding = snapshot ? this.searchEmbedding() : undefined;
+    const value = await runMemoryRead<T>({ ...job, embedding: snapshot }, { ...options, embedding });
+    const mode = job.options?.mode ?? (job.kind === 'message-search' ? 'hybrid' : 'lexical');
+    if (mode === 'lexical' || !embedding || embedding.isCurrent()) return value;
+
+    // A retired worker result may contain old geometry with newly hydrated
+    // source bodies. Discard it and use the existing lexical consumer once,
+    // preserving the original absolute deadline, grants, filters and signal.
+    throwIfSearchCancelled(options);
+    const lexicalJob: typeof job =
+      job.kind === 'message-search'
+        ? { ...job, options: { ...job.options, mode: 'lexical' }, embedding: undefined }
+        : { ...job, options: { ...job.options, mode: 'lexical' }, embedding: undefined };
+    const fallback = await runMemoryRead<T>(lexicalJob, options);
+    throwIfSearchCancelled(options);
+    const execution = executionOf(fallback);
+    execution.meta = {
+      ...execution.meta,
+      degraded: true,
+      effectiveMode: 'lexical',
+      degradeReason: 'passage_embedding_unavailable',
+    };
+    return fallback;
   }
 
   private buildSearchFilters(options: SearchOptions | undefined, suppressBackstop = false): SearchFilterContext {
@@ -422,7 +500,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
       throwIfSearchCancelled(options);
       const { signal, ...serialized } = options ?? {};
       const flags = memorySearchFlags();
-      const execution = await runMemoryRead<{
+      const execution = await this.runProjectionRead<{
         result: EvidenceSearchExecution;
         shadow: Array<{ anchor: string; shadowRank: number }> | null;
       }>(
@@ -434,9 +512,9 @@ export class SqliteEvidenceStore implements IEvidenceStore {
           sourceRoot: this.sourceRoot,
           sourceRef: this.sourceRef,
           flags,
-          embedding: this.processEmbeddingSnapshot(),
         },
-        { signal, deadlineAt: options?.deadlineAt, embedding: this.embedDeps?.embedding },
+        { signal, deadlineAt: options?.deadlineAt },
+        (value) => value.result,
       );
       if (execution.shadow)
         storeShadowRanking(
@@ -765,7 +843,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
             options,
             trimmed,
           ),
-          meta: { degraded: false },
+          meta: { degraded: true, degradeReason: 'passage_embedding_unavailable', effectiveMode: 'lexical' },
         };
       }
       try {
@@ -791,7 +869,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
             options,
             trimmed,
           ),
-          meta: { degraded: false },
+          meta: { degraded: true, degradeReason: 'passage_vector_search_error', effectiveMode: 'lexical' },
         };
       }
     }
@@ -807,7 +885,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
             options,
             trimmed,
           ),
-          meta: { degraded: false },
+          meta: { degraded: true, degradeReason: 'passage_embedding_unavailable', effectiveMode: 'lexical' },
         };
       }
       try {
@@ -834,7 +912,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
             options,
             trimmed,
           ),
-          meta: { degraded: false },
+          meta: { degraded: true, degradeReason: 'passage_vector_search_error', effectiveMode: 'lexical' },
         };
       }
     }
@@ -1080,25 +1158,27 @@ export class SqliteEvidenceStore implements IEvidenceStore {
   private async isEmbeddingAvailable(options?: SearchOptions): Promise<boolean> {
     const deps = this.embedDeps;
     if (!deps || deps.mode !== 'on') return false;
+    const embedding = this.searchEmbedding()!;
     try {
-      await deps.embedding.reprobeIfNeeded(options?.signal);
+      await embedding.reprobeIfNeeded(options?.signal);
     } catch (error) {
       rethrowIfSearchCancelled(options, error);
       return false;
     }
-    return deps.embedding.isReady();
+    return embedding.isReady();
   }
 
   private async isPassageEmbeddingAvailable(options?: SearchOptions): Promise<boolean> {
     const deps = this.embedDeps;
     if (!deps?.passageVectorStore || deps.mode !== 'on') return false;
+    const embedding = this.searchEmbedding()!;
     try {
-      await deps.embedding.reprobeIfNeeded(options?.signal);
+      await embedding.reprobeIfNeeded(options?.signal);
     } catch (error) {
       rethrowIfSearchCancelled(options, error);
       return false;
     }
-    return deps.embedding.isReady();
+    return embedding.isReady();
   }
 
   private async semanticPassageNNSearch(
@@ -1106,11 +1186,15 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     limit: number,
     options?: SearchOptions,
   ): Promise<PassageResult[]> {
+    const deps = this.embedDeps!;
+    const embedding = this.searchEmbedding()!;
     await coverageSearchCheckpoint(options);
-    const queryVec = await this.embedDeps!.embedding.embed([query], options?.signal);
+    const queryVec = await embedding.embed([query], options?.signal);
     await coverageSearchCheckpoint(options);
-    const nnResults = this.embedDeps!.passageVectorStore!.search(queryVec[0], limit);
+    embedding.assertCurrent();
+    const nnResults = deps.passageVectorStore!.search(queryVec[0], limit);
     await coverageSearchCheckpoint(options);
+    embedding.assertCurrent();
     return this.hydratePassageVectorHits(nnResults, options);
   }
 
@@ -1120,6 +1204,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     limit: number,
     options?: SearchOptions,
     accept?: (passage: PassageResult) => boolean,
+    compare?: (a: PassageResult, b: PassageResult) => number,
   ): Promise<PassageResult[]> {
     const semanticPassages = (await this.semanticPassageNNSearch(query, limit, options)).filter(
       (passage) => !accept || accept(passage),
@@ -1150,10 +1235,9 @@ export class SqliteEvidenceStore implements IEvidenceStore {
       passageMap.set(key, passage);
     }
 
-    return [...scores.keys()]
-      .sort((a, b) => (scores.get(b) ?? 0) - (scores.get(a) ?? 0))
-      .map((key) => passageMap.get(key))
-      .filter((p): p is PassageResult => Boolean(p))
+    return [...passageMap]
+      .sort(([a, left], [b, right]) => (compare?.(left, right) ?? 0) || (scores.get(b) ?? 0) - (scores.get(a) ?? 0))
+      .map(([, passage]) => passage)
       .slice(0, limit);
   }
 
@@ -1176,22 +1260,29 @@ export class SqliteEvidenceStore implements IEvidenceStore {
       );
     if (parsed.length === 0) return [];
 
-    const clauses = parsed.map(() => '(doc_anchor = ? AND passage_id = ?)').join(' OR ');
+    // The message pool can contain 2000 hits, exceeding SQLite's OR depth.
+    // Bind exact pairs as rows so hydration still uses the composite index.
+    const coordinates = parsed.map(() => '(?, ?)').join(', ');
     const params: unknown[] = parsed.flatMap((p) => [p.docAnchor, p.passageId]);
-    let sql = `SELECT doc_anchor, passage_id, content, speaker, position, created_at FROM evidence_passages WHERE (${clauses})`;
+    let sql = `WITH passage_hits(doc_anchor, passage_id) AS (VALUES ${coordinates})
+      SELECT p.doc_anchor, p.passage_id, p.content, p.speaker, p.position, p.created_at
+      FROM passage_hits h JOIN evidence_passages p
+      ON p.doc_anchor = h.doc_anchor AND p.passage_id = h.passage_id`;
+    const filters: string[] = [];
 
     if (options?.threadId) {
-      sql += ' AND doc_anchor = ?';
+      filters.push('p.doc_anchor = ?');
       params.push(`thread-${options.threadId}`);
     }
     if (options?.dateFrom) {
-      sql += ' AND created_at >= ?';
+      filters.push('p.created_at >= ?');
       params.push(options.dateFrom);
     }
     if (options?.dateTo) {
-      sql += ' AND created_at <= ?';
+      filters.push('p.created_at <= ?');
       params.push(options.dateTo.length === 10 ? `${options.dateTo}T23:59:59` : options.dateTo);
     }
+    if (filters.length > 0) sql += ` WHERE ${filters.join(' AND ')}`;
 
     const rows = this.db.prepare(sql).all(...params) as Array<{
       doc_anchor: string;
@@ -1500,11 +1591,15 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     suppressBackstop?: boolean,
   ): Promise<EvidenceItem[]> {
     const pool = Math.min(Math.max(limit * 4, 20), 100); // 砚砚: generous pool, cap 100
+    const deps = this.embedDeps!;
+    const embedding = this.searchEmbedding()!;
     await coverageSearchCheckpoint(options);
-    const queryVec = await this.embedDeps!.embedding.embed([query], options?.signal);
+    const queryVec = await embedding.embed([query], options?.signal);
     await coverageSearchCheckpoint(options);
-    const nnResults = this.embedDeps!.vectorStore.search(queryVec[0], pool);
+    embedding.assertCurrent();
+    const nnResults = deps.vectorStore.search(queryVec[0], pool);
     await coverageSearchCheckpoint(options);
+    embedding.assertCurrent();
     if (nnResults.length === 0) return [];
 
     const anchors = nnResults.map((r) => r.anchor);
@@ -1538,11 +1633,15 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     suppressBackstop?: boolean,
   ): Promise<EvidenceItem[]> {
     const pool = Math.min(Math.max(limit * 4, 20), 100);
+    const deps = this.embedDeps!;
+    const embedding = this.searchEmbedding()!;
     await coverageSearchCheckpoint(options);
-    const queryVec = await this.embedDeps!.embedding.embed([query], options?.signal);
+    const queryVec = await embedding.embed([query], options?.signal);
     await coverageSearchCheckpoint(options);
-    const nnResults = this.embedDeps!.vectorStore.search(queryVec[0], pool);
+    embedding.assertCurrent();
+    const nnResults = deps.vectorStore.search(queryVec[0], pool);
     await coverageSearchCheckpoint(options);
+    embedding.assertCurrent();
 
     // RRF fusion: score = Σ 1/(k + rank_i), k=60
     const RRF_K = 60;
@@ -1662,17 +1761,21 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     return this.writeQueue.enqueue(() => {
       this.ensureOpen();
       const db = this.getDb();
-      if (!anchor.startsWith('thread-')) {
-        const passages = db
-          .prepare('SELECT passage_id AS passageId FROM evidence_passages WHERE doc_anchor = ?')
-          .all(anchor) as Array<{ passageId: string }>;
-        deletePassageVectors(
-          db,
-          passages.map((passage) => ({ docAnchor: anchor, passageId: passage.passageId })),
-        );
-        db.prepare('DELETE FROM evidence_passages WHERE doc_anchor = ?').run(anchor);
-      }
-      db.prepare('DELETE FROM evidence_docs WHERE anchor = ?').run(anchor);
+      const invalidateDocument = createVectorInvalidator(db, 'evidence_vectors');
+      db.transaction(() => {
+        if (!anchor.startsWith('thread-')) {
+          const passages = db
+            .prepare('SELECT passage_id AS passageId FROM evidence_passages WHERE doc_anchor = ?')
+            .all(anchor) as Array<{ passageId: string }>;
+          deletePassageVectors(
+            db,
+            passages.map((passage) => ({ docAnchor: anchor, passageId: passage.passageId })),
+          );
+          db.prepare('DELETE FROM evidence_passages WHERE doc_anchor = ?').run(anchor);
+        }
+        invalidateDocument(anchor);
+        db.prepare('DELETE FROM evidence_docs WHERE anchor = ?').run(anchor);
+      })();
     });
   }
 
@@ -1688,40 +1791,39 @@ export class SqliteEvidenceStore implements IEvidenceStore {
   removeBySourcePrefix(prefix: string): number {
     this.ensureOpen();
     const db = this.getDb();
-    const escaped = prefix.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const likePattern = escaped + '%';
-    const anchors = (
-      db.prepare("SELECT anchor FROM evidence_docs WHERE source_path LIKE ? ESCAPE '\\'").all(likePattern) as Array<{
-        anchor: string;
-      }>
-    ).map((r) => r.anchor);
-    const result = db.prepare("DELETE FROM evidence_docs WHERE source_path LIKE ? ESCAPE '\\'").run(likePattern);
-    if (anchors.length) {
-      const CHUNK = 400;
-      for (let i = 0; i < anchors.length; i += CHUNK) {
-        const batch = anchors.slice(i, i + CHUNK);
-        const ph = batch.map(() => '?').join(',');
-        db.prepare(`DELETE FROM edges WHERE from_anchor IN (${ph}) OR to_anchor IN (${ph})`).run(...batch, ...batch);
-        const passageRows = db
-          .prepare(
-            `SELECT doc_anchor AS docAnchor, passage_id AS passageId FROM evidence_passages WHERE doc_anchor IN (${ph})`,
-          )
-          .all(...batch) as Array<{ docAnchor: string; passageId: string }>;
-        deletePassageVectors(
-          db,
-          passageRows.filter((row) => !row.docAnchor.startsWith('thread-')),
-        );
-        db.prepare(`DELETE FROM evidence_passages WHERE doc_anchor IN (${ph}) AND doc_anchor NOT LIKE 'thread-%'`).run(
-          ...batch,
-        );
-        try {
-          this.db?.prepare(`DELETE FROM evidence_vectors WHERE anchor IN (${ph})`).run(...batch);
-        } catch {
-          // evidence_vectors (vec0) may not exist when embedding is disabled
+    return db.transaction(() => {
+      const escaped = prefix.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+      const likePattern = escaped + '%';
+      const anchors = (
+        db.prepare("SELECT anchor FROM evidence_docs WHERE source_path LIKE ? ESCAPE '\\'").all(likePattern) as Array<{
+          anchor: string;
+        }>
+      ).map((r) => r.anchor);
+      const result = db.prepare("DELETE FROM evidence_docs WHERE source_path LIKE ? ESCAPE '\\'").run(likePattern);
+      if (anchors.length) {
+        const invalidateDocument = createVectorInvalidator(db, 'evidence_vectors');
+        const CHUNK = 400;
+        for (let i = 0; i < anchors.length; i += CHUNK) {
+          const batch = anchors.slice(i, i + CHUNK);
+          const ph = batch.map(() => '?').join(',');
+          db.prepare(`DELETE FROM edges WHERE from_anchor IN (${ph}) OR to_anchor IN (${ph})`).run(...batch, ...batch);
+          const passageRows = db
+            .prepare(
+              `SELECT doc_anchor AS docAnchor, passage_id AS passageId FROM evidence_passages WHERE doc_anchor IN (${ph})`,
+            )
+            .all(...batch) as Array<{ docAnchor: string; passageId: string }>;
+          deletePassageVectors(
+            db,
+            passageRows.filter((row) => !row.docAnchor.startsWith('thread-')),
+          );
+          db.prepare(
+            `DELETE FROM evidence_passages WHERE doc_anchor IN (${ph}) AND doc_anchor NOT LIKE 'thread-%'`,
+          ).run(...batch);
+          for (const anchor of batch) invalidateDocument(anchor);
         }
       }
-    }
-    return result.changes;
+      return result.changes;
+    })();
   }
 
   async getByAnchor(anchor: string): Promise<EvidenceItem | null> {
@@ -1730,6 +1832,18 @@ export class SqliteEvidenceStore implements IEvidenceStore {
       | RowShape
       | undefined;
     return row ? rowToItem(row) : null;
+  }
+
+  async getIndexedSourceRevision(
+    anchor: string,
+  ): Promise<{ sourceHash: string; vectorSourceHash: string | null } | null> {
+    this.ensureOpen();
+    const row = this.db
+      ?.prepare(`SELECT d.source_hash AS sourceHash, v.source_hash AS vectorSourceHash
+      FROM evidence_docs d LEFT JOIN document_vector_sources v ON v.anchor=d.anchor
+      WHERE d.anchor=? COLLATE NOCASE`)
+      .get(anchor) as { sourceHash: string | null; vectorSourceHash: string | null } | undefined;
+    return row?.sourceHash ? { sourceHash: row.sourceHash, vectorSourceHash: row.vectorSourceHash } : null;
   }
 
   async health(): Promise<boolean> {
@@ -1744,7 +1858,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
 
   private processEmbeddingSnapshot(): EmbeddingSnapshot | undefined {
     const deps = this.embedDeps;
-    return deps
+    return deps && this.vectorProjection.ready
       ? {
           ready: deps.embedding.isReady(),
           model: deps.embedding.getModelInfo(),
@@ -1768,6 +1882,31 @@ export class SqliteEvidenceStore implements IEvidenceStore {
   /** Serialize an arbitrary write through the single-writer queue (F163 AC-A5). */
   runExclusive<T>(fn: () => T | Promise<T>): Promise<T> {
     return this.writeQueue.enqueue(fn);
+  }
+
+  /** A bounded indexing transaction must not run bulk WAL backfill on the API
+   * thread. Retain its queue slot until the existing maintenance process drains
+   * the batch, then restore the connection policy before the next writer. */
+  runCheckpointedBatch<T>(fn: () => T | Promise<T>): Promise<T> {
+    return this.runExclusive(async () => {
+      if (!this.usesIsolatedProcesses()) return fn();
+      let result!: T;
+      await withProjectionCheckpoints(this.getDb(), this.dbPath, async () => {
+        result = await fn();
+      });
+      return result;
+    });
+  }
+
+  /** Retain the canonical writer queue until maintenance commits or its child closes. */
+  repackPassageVectors(options?: { signal?: AbortSignal; deadlineAt?: number }): Promise<VectorRepackResult> {
+    return this.runExclusive(() => {
+      if (this.workerMode === 'read') throw new Error('Read-only memory worker cannot repack vectors');
+      options?.signal?.throwIfAborted();
+      return this.usesIsolatedProcesses()
+        ? runMemoryVectorRepack(this.dbPath, options)
+        : repackPassageVectors(this.getDb());
+    });
   }
 
   /**
@@ -2063,6 +2202,13 @@ export class SqliteEvidenceStore implements IEvidenceStore {
   }
 
   close(): void {
+    try {
+      this.detachReadDiagnostics?.();
+    } catch {
+      /* An optional observer cannot prevent closing the canonical connection. */
+    }
+    this.detachReadDiagnostics = undefined;
+    this.initialization = undefined;
     if (this.db?.open) {
       this.db.close();
     }

@@ -1,3 +1,4 @@
+import { RECALL_OPPORTUNITY_CATALOG_VERSION } from '@cat-cafe/shared';
 /**
  * F296 B2b: the presentation contract.
  *
@@ -25,10 +26,10 @@ export interface InvalidatorRef {
 export type SourceTier = 'T0' | 'T1' | 'T2' | 'invalid';
 
 /** Strongest → weakest. `omit` is a real outcome, not a failure. */
-export type PresentationKind = 'directive' | 'state' | 'pointer' | 'omit';
+export type PresentationKind = 'directive' | 'state' | 'clue' | 'pointer' | 'omit';
 
 /** What an upstream Opportunity owner already capped this envelope at. */
-export type OpportunityEpistemicCeiling = 'mechanical_observation' | 'state' | 'pointer';
+export type OpportunityEpistemicCeiling = 'mechanical_observation' | 'state' | 'historical_clue' | 'pointer';
 
 export type PresentationSurface = 'native_l0' | 'dynamic_context' | 'pointer' | 'deferred_queue';
 
@@ -78,20 +79,20 @@ export type ContextPresentation =
   | (PresentationIdentity & {
       readonly sourceTier: 'T0';
       readonly invalidator?: InvalidatorRef;
-      readonly presentation: 'directive' | 'state' | 'pointer' | 'omit';
+      readonly presentation: 'directive' | 'state' | 'clue' | 'pointer' | 'omit';
       readonly claimKind?: 'mechanical_observation';
     })
   | (PresentationIdentity & {
       readonly sourceTier: 'T1';
       /** Required: a state claim with no way to become false is not a state claim. */
       readonly invalidator: InvalidatorRef;
-      readonly presentation: 'state' | 'pointer' | 'omit';
+      readonly presentation: 'state' | 'clue' | 'pointer' | 'omit';
       readonly claimKind?: 'mechanical_observation';
     })
   | (PresentationIdentity & {
       readonly sourceTier: 'T2';
       readonly invalidator?: InvalidatorRef;
-      readonly presentation: 'pointer' | 'omit';
+      readonly presentation: 'clue' | 'pointer' | 'omit';
     })
   | (PresentationIdentity & {
       readonly sourceTier: 'invalid';
@@ -102,8 +103,9 @@ export type ContextPresentation =
 const RANK: Readonly<Record<PresentationKind, number>> = Object.freeze({
   omit: 0,
   pointer: 1,
-  state: 2,
-  directive: 3,
+  clue: 2,
+  state: 3,
+  directive: 4,
 });
 
 const TIER_CEILING: Readonly<Record<SourceTier, PresentationKind>> = Object.freeze({
@@ -118,6 +120,7 @@ const OPPORTUNITY_CEILING: Readonly<Record<OpportunityEpistemicCeiling, Presenta
   // and it must carry claimKind so it cannot be read as intent or importance.
   mechanical_observation: 'state',
   state: 'state',
+  historical_clue: 'clue',
   pointer: 'pointer',
 });
 
@@ -125,7 +128,15 @@ function weakest(...kinds: readonly PresentationKind[]): PresentationKind {
   return kinds.reduce((lowest, kind) => (RANK[kind] < RANK[lowest] ? kind : lowest));
 }
 
+export interface ThreadOpeningClueAdmission {
+  readonly entryVersion: string;
+  readonly policyRef: string;
+  readonly sourceAnchor: string;
+  readonly sourceRevision: string;
+}
+
 export interface PresentationCandidate {
+  readonly historicalClueAdmission?: ThreadOpeningClueAdmission;
   readonly subjectKey: string;
   readonly asOf: SourceRevision;
   readonly sourceTier: SourceTier;
@@ -142,6 +153,11 @@ export interface PresentationCandidate {
  * that candidate into a ContextPresentation, and only the ledger may admit it.
  */
 export interface ContextPresentationEnvelope<TReceipt> {
+  /** Producer-owned original-source fence. Metadata admission never substitutes for currentness. */
+  readonly validateCurrent?: () => Promise<boolean>;
+  readonly recordOmission?: (
+    reason: 'invocation_budget_exhausted' | 'duplicate' | 'source_unavailable' | 'superseded' | 'expired',
+  ) => void;
   readonly candidate: PresentationCandidate;
   /** Proof that the producer owner admitted this opportunity for presentation. */
   readonly admission: AdmittedOpportunityPresentationV1;
@@ -167,7 +183,10 @@ export function mapToPresentation(candidate: PresentationCandidate): ContextPres
   const effectiveTier: SourceTier =
     candidate.sourceTier === 'T1' && !candidate.invalidator ? 'invalid' : candidate.sourceTier;
 
-  const ceilings: PresentationKind[] = [TIER_CEILING[effectiveTier], candidate.requested];
+  const clueAdmitted = historicalCluePolicy(candidate) !== null;
+  const tierCeiling = effectiveTier === 'T2' && clueAdmitted ? 'clue' : TIER_CEILING[effectiveTier];
+  const requested = candidate.requested === 'clue' && !clueAdmitted ? 'pointer' : candidate.requested;
+  const ceilings: PresentationKind[] = [tierCeiling, requested];
   if (candidate.epistemicCeiling) ceilings.push(OPPORTUNITY_CEILING[candidate.epistemicCeiling]);
   const presentation = weakest(...ceilings);
 
@@ -196,7 +215,8 @@ export function mapToPresentation(candidate: PresentationCandidate): ContextPres
         ...identity,
         sourceTier: 'T2',
         ...(candidate.invalidator ? { invalidator: candidate.invalidator } : {}),
-        presentation: presentation === 'pointer' ? 'pointer' : 'omit',
+        presentation:
+          presentation === 'clue' && clueAdmitted ? 'clue' : presentation === 'pointer' ? 'pointer' : 'omit',
       };
     case 'invalid':
       return {
@@ -209,5 +229,50 @@ export function mapToPresentation(candidate: PresentationCandidate): ContextPres
       const exhaustive: never = effectiveTier;
       throw new Error(`unhandled source tier: ${String(exhaustive)}`);
     }
+  }
+}
+
+/** Closed historical-reference entries; neither is current state or authorization. */
+export function historicalCluePolicy(candidate: PresentationCandidate): {
+  producerOwner: 'owner_message' | 'context_epoch';
+  invalidatorOwner: 'thread_overview' | 'profile_repository';
+  consumerCatId?: string;
+} | null {
+  const admission = candidate.historicalClueAdmission;
+  if (
+    !admission ||
+    candidate.epistemicCeiling !== 'historical_clue' ||
+    candidate.asOf.kind !== 'version' ||
+    candidate.asOf.value !== admission.sourceRevision ||
+    candidate.invalidator?.ref !== `${admission.sourceAnchor}@${admission.sourceRevision}`
+  )
+    return null;
+  if (
+    admission.entryVersion === `recall-catalog:${RECALL_OPPORTUNITY_CATALOG_VERSION}:thread_opened:owner_message` &&
+    admission.policyRef === 'F321.ThreadOpeningClue' &&
+    admission.sourceAnchor.startsWith('thread-overview:') &&
+    candidate.subjectKey === `memory-cue:thread_overview:${admission.sourceAnchor}` &&
+    candidate.invalidator.owner === 'thread_overview'
+  )
+    return { producerOwner: 'owner_message', invalidatorOwner: 'thread_overview' };
+  if (
+    admission.entryVersion !==
+      `recall-catalog:${RECALL_OPPORTUNITY_CATALOG_VERSION}:fresh_context_sources:context_epoch` ||
+    admission.policyRef !== 'F332.ProfileOpeningReference' ||
+    candidate.invalidator.owner !== 'profile_repository'
+  )
+    return null;
+  const coordinate = /^profile:opening-primer:([^:]+):([^:]+)$/.exec(admission.sourceAnchor);
+  if (!coordinate) return null;
+  try {
+    const consumerCatId = decodeURIComponent(coordinate[2]!);
+    if (
+      !consumerCatId ||
+      candidate.subjectKey !== `memory-cue:profile:${admission.sourceAnchor}:consumer:${consumerCatId}`
+    )
+      return null;
+    return { producerOwner: 'context_epoch', invalidatorOwner: 'profile_repository', consumerCatId };
+  } catch {
+    return null;
   }
 }

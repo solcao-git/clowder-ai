@@ -1,4 +1,9 @@
-import type { ApprovalHubItem, UnifiedAttentionVisibleApproval } from '@cat-cafe/shared';
+import type {
+  ApprovalHubItem,
+  RichCardBlock,
+  UnifiedAttentionItemV1,
+  UnifiedAttentionVisibleApproval,
+} from '@cat-cafe/shared';
 import type { ApprovalRequestEvent, AuthorizeOptions } from '@/components/ApprovalHost';
 import type { DecisionAttempt } from '@/stores/approval-decision-attempts';
 import type { MailboxRead } from '../unified-mailbox-state';
@@ -9,6 +14,7 @@ import {
   type ReconcileEvent,
   type ReconcileModel,
   reduceReconcile,
+  type Terminal,
 } from './approval-reconcile';
 import {
   type ApprovalAddress,
@@ -16,22 +22,15 @@ import {
   buildReadEvidence,
   listedCopiesAligned,
 } from './read-evidence';
+import type { SettledLookupInput } from './settled-lookup';
+import { mailboxSourcesReadable } from './source-read-eligibility';
 
 /**
- * F322 S3-2b-1c: the driver that follows an approval hosted in the 待办 panel from the press of a button to a result it can
- * stand behind. The reconciler (pure) decides what may be said; this makes its inputs true:
- *
- *  - it follows only attempts made after the session opened, against this exact item (producer and version);
- *  - when a write has ended it starts one new unified read AND one Approval Hub store refresh, and judges only a read that
- *    began after the write ended (a generation of the panel's own reads, not a clock), and only after the store refresh
- *    has finished, because alignment compares the read with the store's copy;
- *  - it never declares "已处理" from the store's optimistic removal or from absence from a page: only a settled row for this
- *    owner, producer and proposal does that (see `buildReadEvidence`);
- *  - an answer that is no longer for the read now current is dropped, whichever finishes first;
- *  - it is asked synchronously, right before each producer write, whether the displayed read and the store still agree.
- *
- * A session lives here, not in a component: the row it belongs to leaves the list the moment the decision is made, and the
- * result must outlive that. Framework-free on purpose, so the dependencies are plain functions.
+ * Follows original producer attempts and judges only owner-matching reads started after each write ended.
+ * Canonical approval pending/history reads may prove a terminal before unrelated attention sources finish.
+ * The unified read and store refresh still judge nonterminal alignment and all subsequent write authority.
+ * Each press synchronously checks the displayed version, credentials and current availability.
+ * Sessions retain only presentation snapshots and request observations, outliving a disappearing row.
  */
 export interface SessionSeed {
   /** The verified owner the card was shown to (the read's identity). */
@@ -39,6 +38,8 @@ export interface SessionSeed {
   decisionRef: string;
   /** The approval as the read showed it; kept so a result can still say what it was about after the row is gone. */
   approval: UnifiedAttentionVisibleApproval;
+  /** Read-only original-card context, never decision or navigation authority. */
+  originalBlock?: RichCardBlock;
 }
 
 export interface ApprovalSession {
@@ -47,6 +48,7 @@ export interface ApprovalSession {
   address: ApprovalAddress;
   decisionRef: string;
   approval: UnifiedAttentionVisibleApproval;
+  originalBlock?: RichCardBlock;
   model: ReconcileModel;
   /** Why the last press was refused before anything was sent, or null. The host's own sentence, not a result. */
   notice: string | null;
@@ -60,14 +62,20 @@ export interface SessionsDeps {
   /** Refresh the Approval Hub store's pending list. May reject; the outcome is judged on what the store then holds. */
   refreshStore(): Promise<unknown>;
   storeItems(): readonly ApprovalHubItem[];
+  /** Optional for framework-free callers; the real host observes the original pending GET's own outcome. */
+  storeAvailable?(): boolean;
   attempts(): Readonly<Record<string, DecisionAttempt>>;
   /** The read now current and its generation (null while one is in flight). */
   latestRead(): { result: MailboxRead; generation: number | null };
   now(): number;
   lookupSettled?: BuildReadEvidenceInput['lookupSettled'];
+  /** Canonical approval-only confirmation, independent of the whole mailbox read. */
+  confirmTerminal?(input: SettledLookupInput): Promise<Terminal | null>;
 }
 
 export interface ApprovalSessions {
+  /** Current owner-matching row only; hosts without this additive reader stay read-only. */
+  currentItem?(ownerUserId: string, decisionRef: string): UnifiedAttentionItemV1 | null;
   /** Start (or find) the session for an approval. Idempotent: an existing session keeps its progress and its snapshot. */
   open(seed: SessionSeed): ApprovalSession;
   get(key: string): ApprovalSession | undefined;
@@ -98,8 +106,9 @@ export function sessionKey(ownerUserId: string, address: ApprovalAddress): strin
 
 const REFUSAL_NOTICE = '这件事刚刚有变化，这次没有提交。已重新读取，请确认后再处理。';
 
-/** The card that reports its own request for the kinds that leave no store attempt. */
-const SELF_REPORTED_KIND = 'meeting-intake';
+/** Original producer cards report their request when they do not create a Hub store attempt. */
+const isSelfReportedKind = (kind: ApprovalRequestEvent['kind']) =>
+  kind === 'producer-card' || kind === 'person-memory-undo';
 
 const isHttpStatus = (value: unknown): value is number =>
   Number.isInteger(value) && (value as number) >= 100 && (value as number) <= 599;
@@ -128,6 +137,7 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
   const sessions = new Map<string, ApprovalSession>();
   const refreshes = new Map<string, Promise<void>>();
   const evaluating = new Set<string>();
+  const confirmations = new Map<string, AbortController>();
   /** The read generation at which each write that is in flight was allowed to go out. */
   const allowedAt = new Map<string, number>();
   const listeners = new Set<() => void>();
@@ -146,6 +156,35 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
     // The read first, so its generation is already counted when the store answers; both begin after the write ended.
     deps.refetch();
     refreshStoreFor(key);
+    const session = sessions.get(key);
+    if (!session || session.model.state.kind !== 'confirming' || !deps.confirmTerminal) return;
+    confirmations.get(key)?.abort();
+    const controller = new AbortController();
+    confirmations.set(key, controller);
+    const state = session.model.state;
+    void Promise.resolve()
+      .then(() =>
+        deps.confirmTerminal?.({
+          ownerUserId: session.ownerUserId,
+          ...session.address,
+          ...(session.approval.navigation.state === 'anchored'
+            ? { approvalCardRef: session.approval.navigation.approvalCardRef }
+            : {}),
+          signal: controller.signal,
+        }),
+      )
+      .then((terminal) => {
+        if (!terminal || controller.signal.aborted || sessions.get(key)?.model.state !== state) return;
+        const currentRead = deps.latestRead().result;
+        if (currentRead.kind === 'ok' && currentRead.read.identity.ownerUserId !== session.ownerUserId) return;
+        apply(key, { type: 'terminal-read', attemptId: state.attemptId, terminal });
+      })
+      .catch(() => {
+        // The ordinary unified read remains responsible when this narrow read fails.
+      })
+      .finally(() => {
+        if (confirmations.get(key) === controller) confirmations.delete(key);
+      });
   }
 
   function refreshStoreFor(key: string) {
@@ -176,6 +215,10 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
     const was = before.state;
     const now = model.state;
     if (now.kind !== 'writing') allowedAt.delete(key);
+    if (now.kind !== 'confirming') {
+      confirmations.get(key)?.abort();
+      confirmations.delete(key);
+    }
     const newConfirmation =
       now.kind === 'confirming' &&
       (was.kind !== 'confirming' || was.attemptId !== now.attemptId || was.afterGeneration !== now.afterGeneration);
@@ -216,7 +259,10 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
     const { result, generation } = deps.latestRead();
     const current =
       result.kind === 'ok' &&
+      deps.storeAvailable?.() !== false &&
       generation !== null &&
+      generation === deps.readsStarted() &&
+      mailboxSourcesReadable(result.read, 'approvals') &&
       result.read.identity.ownerUserId === session.ownerUserId &&
       listedCopiesAligned(result.read, session.address, deps.storeItems(), deps.now());
     return current ? generation : null;
@@ -250,6 +296,7 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
       const existing = sessions.get(key);
       if (existing) return existing;
       const session: ApprovalSession = {
+        ...(seed.originalBlock ? { originalBlock: structuredClone(seed.originalBlock) } : {}),
         key,
         ownerUserId: seed.ownerUserId,
         address,
@@ -283,7 +330,7 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
     },
 
     hostReport(key, event) {
-      if (event.kind !== SELF_REPORTED_KIND) return;
+      if (!isSelfReportedKind(event.kind)) return;
       const session = sessions.get(key);
       if (!session) return;
       const readGeneration = deps.readsStarted();
@@ -295,15 +342,16 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
       // An end without its start is not a request this session knows.
       if (session.model.state.kind !== 'writing') return;
       const attemptId = session.model.state.attemptId;
-      // Only what the card itself saw is carried over. `settled` is a 2xx, or a deliberate stop between two requests with
-      // nothing answered; an http error without a readable status is an answer we cannot read. None of those is "no response",
-      // so none may be worded as one: the operation ended, and the re-read says the rest. Only a real network error is "none".
+      // Explicit successful HTTP evidence can permit a subsequent decision only after aligned canonical pending reads.
+      // A bare `settled` may be a deliberate stop without a response, so it stays held; neither case proves a terminal.
       const state: AttemptEvidence =
         event.outcome === 'network-error'
           ? { phase: 'transport_unknown' }
           : event.outcome === 'http-error' && isHttpStatus(event.status)
             ? { phase: 'response_received', status: event.status, ok: false }
-            : { phase: 'ended' };
+            : event.outcome === 'settled' && isHttpStatus(event.status) && event.status >= 200 && event.status < 300
+              ? { phase: 'response_received', status: event.status, ok: true }
+              : { phase: 'ended' };
       apply(key, { type: 'attempt', attempt: { attemptId, state }, readGeneration });
     },
 
@@ -321,7 +369,36 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
     },
 
     reread(key) {
+      const session = sessions.get(key);
+      if (session?.model.state.kind === 'idle' || session?.model.state.kind === 'refused_before_send') {
+        startConfirmation(key);
+        return;
+      }
       apply(key, { type: 'reread', readGeneration: deps.readsStarted() });
+    },
+
+    currentItem(ownerUserId, decisionRef) {
+      const { result, generation } = deps.latestRead();
+      if (
+        result.kind !== 'ok' ||
+        generation === null ||
+        generation !== deps.readsStarted() ||
+        result.read.identity.ownerUserId !== ownerUserId
+      )
+        return null;
+      const items = result.read.items.filter((item) => item.decisionRef === decisionRef);
+      if (items.length !== 1) return null;
+      const item = items[0];
+      if (
+        item.approval &&
+        result.read.items.some((other) => other !== item && other.approval?.proposalId === item.approval?.proposalId)
+      )
+        return null;
+
+      // Runtime projection is its own source even when the Host coalesced an exact approval alias.
+      const source =
+        item.runtimeInteraction || item.choiceRequest ? 'structuredChoices' : item.approval ? 'approvals' : 'needsMe';
+      return mailboxSourcesReadable(result.read, source) ? item : null;
     },
 
     authorize(key, options) {
@@ -343,6 +420,8 @@ export function createApprovalSessions(deps: SessionsDeps): ApprovalSessions {
 
     close(key) {
       if (!sessions.has(key)) return;
+      confirmations.get(key)?.abort();
+      confirmations.delete(key);
       refreshes.delete(key);
       allowedAt.delete(key);
       commit(key, null);

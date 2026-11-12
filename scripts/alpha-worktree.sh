@@ -38,7 +38,6 @@ NAMED_ALPHA_INSTANCE=""
 NAMED_ALPHA_PORTS=""
 NAMED_ALPHA_COORDINATES=""
 NAMED_ALPHA_DISALLOWED_OPTIONS=false
-ALPHA_COLLECTIVE_SERVICE_PORT=5211
 
 usage() {
   cat <<'EOF'
@@ -50,7 +49,7 @@ Usage:
   ./scripts/alpha-worktree.sh start  [--dir PATH] [--branch NAME] [--remote NAME] [--force] [--no-sync] [--no-install] [--no-quick] [--allow-empty-redis] [--] [start-dev args...]
   ./scripts/alpha-worktree.sh status [--dir PATH] [--branch NAME] [--remote NAME]
   ./scripts/alpha-worktree.sh stop   [--dir PATH]
-  ./scripts/alpha-worktree.sh init|start --instance NAME --ports WEB,API,PREVIEW,SERVICE,REDIS [--allow-empty-redis]
+  ./scripts/alpha-worktree.sh init|start --instance NAME --ports WEB,API,PREVIEW,REDIS [--allow-empty-redis]
 
 Defaults:
   --dir    ../cat-cafe-alpha
@@ -62,9 +61,10 @@ Ports:
   api:      3012
   preview:  4111
   redis:    6397 (dedicated Alpha instance and data directory)
-  collective Service: 5211 (loopback, provisioned on demand)
 
 Behavior:
+  Named init requires CAT_CAFE_CAT_ID and private worktree config, and declares
+  the new checkout's lifecycle before installing dependencies.
   start auto-syncs origin/main with ff-only, reuses the root .env for secrets,
   launches the isolated alpha stack with other sidecars disabled, and auto-migrates
   an existing ../cat-cafe-main-test worktree into ../cat-cafe-alpha.
@@ -108,12 +108,13 @@ require_git_repo() {
 }
 
 worktree_exists() {
-  git -C "$PROJECT_DIR" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}' | grep -Fxq "$ALPHA_DIR"
+  # Drain the registry: grep -q can SIGPIPE awk/git after a match under pipefail.
+  git -C "$PROJECT_DIR" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}' | grep -Fx "$ALPHA_DIR" >/dev/null
 }
 
 legacy_worktree_exists() {
   [ "$LEGACY_ALPHA_DIR" != "$ALPHA_DIR" ] || return 1
-  git -C "$PROJECT_DIR" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}' | grep -Fxq "$LEGACY_ALPHA_DIR"
+  git -C "$PROJECT_DIR" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}' | grep -Fx "$LEGACY_ALPHA_DIR" >/dev/null
 }
 
 ensure_remote_exists() {
@@ -197,8 +198,6 @@ export PREVIEW_GATEWAY_PORT=$ALPHA_PREVIEW_GATEWAY_PORT
 export NEXT_PUBLIC_API_URL=http://localhost:$ALPHA_API_PORT
 export WORKTREE_PORT_OFFSET=0
 export CAT_CAFE_DATA_DIR=$ALPHA_DIR/.cat-cafe
-export COLLECTIVE_SERVICE_PORT=$ALPHA_COLLECTIVE_SERVICE_PORT
-export COLLECTIVE_SERVICE_DATA_DIR=$ALPHA_DIR/.cat-cafe/collective-service
 export ANTHROPIC_PROXY_ENABLED=0
 export ASR_ENABLED=0
 export TTS_ENABLED=0
@@ -207,7 +206,6 @@ export EMBED_ENABLED=0
 export EMBED_MODE=off
 export AUDIO_SERVICE_ENABLED=0
 export AUDIO_SERVICE_PORT=$ALPHA_AUDIO_PORT
-export CONNECTOR_GATEWAY_AUTOSTART=0
 export CAT_CAFE_F247_CLOUD_AUTOSTART=0
 EOF
 }
@@ -284,12 +282,7 @@ apply_alpha_env() {
   export FRONTEND_PORT="$ALPHA_FRONTEND_PORT"
   export PREVIEW_GATEWAY_PORT="$ALPHA_PREVIEW_GATEWAY_PORT"
   export NEXT_PUBLIC_API_URL="http://localhost:$ALPHA_API_PORT"
-  # The independent Alpha Service has its own durable home and loopback port.
-  # The API manager pins the same coordinates and refuses arbitrary worktree overrides.
   export WORKTREE_PORT_OFFSET=0
-  export COLLECTIVE_SERVICE_PORT=5211
-  export COLLECTIVE_SERVICE_DATA_DIR="$ALPHA_DIR/.cat-cafe/collective-service"
-  unset COLLECTIVE_GITHUB_CLIENT_ID COLLECTIVE_GITHUB_CLIENT_SECRET
   export ANTHROPIC_PROXY_ENABLED=0
   export ASR_ENABLED=0
   export TTS_ENABLED=0
@@ -298,7 +291,6 @@ apply_alpha_env() {
   export EMBED_MODE=off
   export AUDIO_SERVICE_ENABLED=0
   export AUDIO_SERVICE_PORT="$ALPHA_AUDIO_PORT"
-  export CONNECTOR_GATEWAY_AUTOSTART=0
   export CAT_CAFE_F247_CLOUD_AUTOSTART=0
   # Alpha owns an isolated services.json beneath its checkout-local data root.
   # Keep the API guard too: persisted config must not re-enable sidecar
@@ -445,8 +437,6 @@ status_alpha_worktree() {
   echo "preview_gateway_port: $ALPHA_PREVIEW_GATEWAY_PORT"
   echo "redis_port: $ALPHA_REDIS_PORT"
   echo "redis_data_dir: $ALPHA_DIR/.cat-cafe/redis"
-  echo "collective_service_port: $ALPHA_COLLECTIVE_SERVICE_PORT"
-  echo "collective_service_data_dir: $ALPHA_DIR/.cat-cafe/collective-service"
   echo "env_source: $env_source_display"
 }
 
@@ -471,9 +461,6 @@ stop_alpha_daemon() {
     --port "$ALPHA_FRONTEND_PORT" --cwd "$PROJECT_DIR" --json
   if is_api_running; then
     die "Alpha API remains on $ALPHA_API_PORT without a proven managed owner"
-  fi
-  if lsof -nP -iTCP:"$ALPHA_COLLECTIVE_SERVICE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    die "Alpha Collective Service remains on $ALPHA_COLLECTIVE_SERVICE_PORT; refusing to claim it was stopped or kill an unverified process"
   fi
 }
 
@@ -538,6 +525,8 @@ start_alpha_worktree() {
   local selected_preview_port="$ALPHA_PREVIEW_GATEWAY_PORT" selected_redis_port="$ALPHA_REDIS_PORT"
   local selected_redis_profile="$ALPHA_REDIS_PROFILE" selected_audio_port="$ALPHA_AUDIO_PORT"
   local selected_allow_empty="$ALPHA_EMPTY_REDIS_ALLOWED"
+  local selected_preview_expiry="${CAT_CAFE_PREVIEW_EXPIRES_AT-}"
+  local selected_cleanup_result="${CAT_CAFE_PREVIEW_CLEANUP_RESULT-}"
   source_env_if_present
   PROJECT_DIR="$selected_project_dir"
   ALPHA_DIR="$selected_alpha_dir"
@@ -548,6 +537,8 @@ start_alpha_worktree() {
   ALPHA_REDIS_PROFILE="$selected_redis_profile"
   ALPHA_AUDIO_PORT="$selected_audio_port"
   ALPHA_EMPTY_REDIS_ALLOWED="$selected_allow_empty"
+  export CAT_CAFE_PREVIEW_EXPIRES_AT="$selected_preview_expiry"
+  export CAT_CAFE_PREVIEW_CLEANUP_RESULT="$selected_cleanup_result"
   apply_alpha_env
   assert_alpha_redis_isolated
   assert_alpha_redis_seeded
@@ -571,6 +562,12 @@ else
   ensure_supported_node_runtime "$SCRIPT_DIR/alpha-worktree.sh" "$@"
   COMMAND="${1:-status}"
   shift || true
+fi
+MANAGED_ALPHA_ARGS=("$@")
+if [ "$SOURCE_ONLY" != true ] && [ "$COMMAND" = start ] && [ -n "${CAT_CAFE_PREVIEW_EXPIRES_AT:-}" ]; then
+  node "$SCRIPT_DIR/lib/alpha-launch-contract.mjs" ${MANAGED_ALPHA_ARGS[@]+"${MANAGED_ALPHA_ARGS[@]}"} >/dev/null || die "invalid managed Alpha launch contract"
+  # pnpm may forward a separator. The bounded contract has already excluded child overrides.
+  if [ "${1:-}" = -- ]; then shift; fi
 fi
 
 while [ "$SOURCE_ONLY" != "true" ] && [ $# -gt 0 ]; do
@@ -652,6 +649,13 @@ fi
 if [ -n "$NAMED_ALPHA_INSTANCE" ] || [ -n "$NAMED_ALPHA_PORTS" ]; then
   source "$SCRIPT_DIR/lib/alpha-named-launch.sh"
   select_named_alpha
+elif [ "$COMMAND" = start ] && [ -n "${CAT_CAFE_PREVIEW_EXPIRES_AT:-}" ]; then
+  managed_alpha_ports="$(node "$SCRIPT_DIR/lib/alpha-launch-contract.mjs" --standard-ports)" || die "cannot resolve managed Alpha ports"
+  IFS=$'\t' read -r ALPHA_FRONTEND_PORT ALPHA_API_PORT ALPHA_PREVIEW_GATEWAY_PORT ALPHA_COLLECTIVE_SERVICE_PORT ALPHA_REDIS_PORT <<< "$managed_alpha_ports"
+  ALPHA_DIR="$DEFAULT_ALPHA_DIR"
+  ALPHA_BRANCH="$DEFAULT_ALPHA_BRANCH"
+  REMOTE_NAME=origin
+  ENV_SOURCE_FILE="$PROJECT_DIR/.env"
 fi
 
 case "$COMMAND" in

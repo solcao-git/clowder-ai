@@ -72,7 +72,7 @@ export async function discoverAdmissionSourcePaths(repoRoot: string): Promise<re
       const content = await readFile(path, 'utf8');
       const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content)?.[1];
       if (header && /^mcp_(admission|selector)_claims:/m.test(header)) {
-        paths.push(relative(resolve(repoRoot), path));
+        paths.push(relative(resolve(repoRoot), path).split(sep).join('/'));
       }
     }
   }
@@ -92,7 +92,7 @@ function parseSelectorClaims(content: string, sourcePath: string): readonly Reso
       throw new Error(`${sourcePath} selector claim must use its canonical source path`);
     }
     expectedRef = `architecture-cell:${metadata.cell_id}`;
-  } else if (metadata.doc_kind === 'feature') {
+  } else if (metadata.doc_kind === 'feature' || metadata.doc_kind === 'mcp-evidence') {
     expectedRef = `file:${sourcePath}`;
   } else if (metadata.doc_kind === 'decision' && metadata.status === 'accepted' && normalizedAdr(metadata.adr)) {
     const number = normalizedAdr(metadata.adr) as string;

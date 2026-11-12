@@ -285,8 +285,8 @@ export function fixedFixture(pathname) {
     ['/api/agent-hooks/status', { status: 'ready', targets: [] }],
     ['/api/approval-hub/pending', { items: [], count: 0 }],
     ['/api/approval-hub/settled', { items: [], count: 0 }],
-    ['/api/entrusted-work/owner-reads', { ownerReads: [] }],
-    ['/api/entrusted-work/needs-me', { ownerReads: [needsMeApprovalOwnerRead] }],
+    ['/api/entrusted-work/owner-reads', { ownerReads: [], coverage: { state: 'complete' } }],
+    ['/api/entrusted-work/needs-me', { ownerReads: [needsMeApprovalOwnerRead], coverage: { state: 'complete' } }],
     [
       '/api/cats',
       {
@@ -296,6 +296,7 @@ export function fixedFixture(pathname) {
             displayName: '小太阳·砚砚',
             color: { primary: 'var(--color-codex-primary)', secondary: 'var(--color-codex-bg)' },
             mentionPatterns: ['@codex-sol'],
+            carrier: 'cli',
             clientId: 'openai',
             defaultModel: 'gpt-5.6-sol',
             avatar: '',
@@ -308,6 +309,7 @@ export function fixedFixture(pathname) {
             displayName: '小团团·砚砚',
             color: { primary: 'var(--color-codex-primary)', secondary: 'var(--color-codex-bg)' },
             mentionPatterns: ['@codex-terra'],
+            carrier: 'cli',
             clientId: 'openai',
             defaultModel: 'gpt-5.6-terra',
             avatar: '',
@@ -320,6 +322,7 @@ export function fixedFixture(pathname) {
     ],
     ['/api/config/cat-order', { catOrder: ['codex-sol', 'codex-terra'] }],
     ['/api/messages', { messages: [], hasMore: false }],
+    ['/api/recall/events', { events: [], sourceViews: [], cueInvocationIds: [], replies: [], replyCursor: null }],
     ['/api/tasks', { tasks: [] }],
     ['/api/bootcamp/threads', { threads: [] }],
     ['/api/capability-evolution/programs', { programs: [evolutionProgramProjection] }],
@@ -350,6 +353,7 @@ export function fixedFixture(pathname) {
           threadTitle: 'Owner B',
         })),
         total: otherArtifacts.length,
+        workLineage: 'unavailable',
       },
     ],
     [

@@ -51,6 +51,7 @@ const CATS: CatData[] = [
     breedDisplayName: '布偶猫',
     nickname: '宪宪',
     clientId: 'anthropic',
+    carrier: 'cli',
     accountRef: 'claude',
     defaultModel: 'claude-opus-4-5',
     color: { primary: '#6366f1', secondary: '#818cf8' },
@@ -72,6 +73,7 @@ const CATS: CatData[] = [
     breedDisplayName: '缅因猫',
     nickname: '砚砚',
     clientId: 'openai',
+    carrier: 'cli',
     accountRef: 'sponsor1',
     defaultModel: 'codex',
     color: { primary: '#22c55e', secondary: '#4ade80' },
@@ -93,6 +95,7 @@ const CATS: CatData[] = [
     breedDisplayName: '孟加拉猫',
     nickname: '斑斑',
     clientId: 'antigravity',
+    carrier: 'cli',
     defaultModel: 'gemini-bridge',
     commandArgs: ['npx', 'antigravity', '--bridge'],
     color: { primary: '#f59e0b', secondary: '#fcd34d' },
@@ -125,15 +128,16 @@ describe('CatOverviewTab', () => {
     expect(html).toContain('Owner');
     expect(html).toContain('#E29578');
     expect(html).toContain('/avatars/owner-custom.png');
-    expect(html.indexOf('Co-worker')).toBeLessThan(html.indexOf('布偶猫 · 宪宪'));
-    expect(html).toContain('全部');
+    expect(html.indexOf('Co-worker')).toBeLessThan(html.indexOf('data-testid="cat-card-opus"'));
     expect(html).toContain('CLI（OAuth）');
     expect(html).toContain('CLI（配置）');
     expect(html).toContain('已停用');
-    expect(html.indexOf('+ 添加成员')).toBeLessThan(html.indexOf('布偶猫 · 宪宪'));
-    expect(html).toContain('布偶猫 · 宪宪');
-    expect(html).toContain('缅因猫 · 砚砚');
-    expect(html).toContain('孟加拉猫 · 斑斑');
+    expect(html.indexOf('+ 添加成员')).toBeLessThan(html.indexOf('data-testid="cat-card-opus"'));
+    expect(html).toContain('布偶猫 Opus');
+    expect(html).toContain('缅因猫 Codex');
+    expect(html).toContain('昵称：砚砚');
+    expect(html).toContain('孟加拉猫 Antigravity');
+    expect(html).toContain('昵称：斑斑');
     expect(html).toContain('CLI（OAuth）账号');
     expect(html).toContain('CLI（配置） · sponsor1');
     expect(html).toContain('已启用');
@@ -176,7 +180,7 @@ describe('CatOverviewTab', () => {
 
     expect(guideTarget).toBeTruthy();
     expect(guideTarget?.getAttribute('role')).toBe('button');
-    expect(guideTarget?.textContent).toContain('布偶猫 · 宪宪');
+    expect(guideTarget?.textContent).toContain('布偶猫 Opus');
   });
 
   it('does not offer deletion for a protected built-in cloud identity', () => {
@@ -188,6 +192,7 @@ describe('CatOverviewTab', () => {
       accountRef: 'codex',
       defaultModel: 'gpt-pro',
       provider: 'openai-chatgpt-pro',
+      carrier: 'cli',
       mcpSupport: true,
       color: { primary: '#2196F3', secondary: '#90CAF9' },
       mentionPatterns: ['@gpt-pro'],

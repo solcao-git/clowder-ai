@@ -11,6 +11,7 @@ import { parse, stringify } from 'yaml';
 import {
   bindManifestToSourceArtifact,
   fileSourceStore,
+  keepProofInsufficient,
   MICRODUCK_OWNER_FEATURE_ID,
   MICRODUCK_OWNER_STATE_REF,
   MICRODUCK_PROGRAM_ID,
@@ -18,9 +19,20 @@ import {
   program,
   SOURCE_REF,
   sha256,
-  validSourceManifest,
+  sourceManifestFromEvidence,
   writeYaml,
 } from './capability-evolution-measurement-fixtures.js';
+
+import {
+  createMeasurementCertificateFixture,
+  createMeasurementResultFixture,
+} from './helpers/measurement-certificate-fixture.js';
+
+// Issuer contracts run against explicit synthetic evidence, not private home archives.
+async function validSourceManifest(options = {}) {
+  const certificate = await createMeasurementCertificateFixture();
+  return sourceManifestFromEvidence(certificate, createMeasurementResultFixture(certificate), options);
+}
 
 const exec = promisify(execFile);
 
@@ -56,6 +68,34 @@ async function loadIssuer() {
 }
 
 describe('F267 capability-evolution measurement issuer', () => {
+  it('reports missing publication provider before reading program or source evidence', async () => {
+    const { createCapabilityEvolutionMeasurementIssuer } = await loadIssuer();
+    const calls = [];
+    const unreachable = (operation) => async () => {
+      calls.push(operation);
+      assert.fail(`${operation} must not run without a publication provider`);
+    };
+    const issuer = createCapabilityEvolutionMeasurementIssuer({
+      repoRoot: '/definitely/not/a/repository',
+      programReader: { get: unreachable('program read') },
+      sourceStore: {
+        readOnMain: unreachable('source read'),
+        verifySourceRevision: unreachable('source verification'),
+      },
+    });
+
+    const result = await issuer.issue({
+      programId: PROGRAM_ID,
+      ownerUserId: 'operator',
+      catId: 'codex-sol',
+      clientMessageId: 'missing-publication-provider',
+    });
+
+    assert.equal(result.status, 'insufficient');
+    assert.equal(result.reason, 'publication_provider_unavailable');
+    assert.deepEqual(calls, []);
+  });
+
   it('rejects a source-message trailer injection before reading or publishing', async () => {
     const { createCapabilityEvolutionMeasurementIssuer } = await loadIssuer();
     let programReads = 0;
@@ -360,6 +400,87 @@ describe('F267 capability-evolution measurement issuer', () => {
       });
       assert.equal(reopened.status, 'resolved', JSON.stringify(reopened));
       assert.equal(reopened.proof.status, 'verified');
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+      await rm(remoteRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves an atomic Program constitution binding from trusted-main publication artifacts', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'f267-capability-binding-'));
+    const remoteRoot = await mkdtemp(join(tmpdir(), 'f267-capability-binding-remote-'));
+    try {
+      const manifest = await validSourceManifest();
+      keepProofInsufficient(manifest);
+      const manifestRevision = await commitGitBackedSource(repoRoot, manifest, remoteRoot);
+      const { createCapabilityEvolutionMeasurementIssuer } = await loadIssuer();
+      const issued = await createCapabilityEvolutionMeasurementIssuer({
+        repoRoot,
+        sourceStore: fileSourceStore(repoRoot, { status: 'verified' }, manifestRevision),
+        programReader: { get: async () => program() },
+        gitPublisher: {
+          publishOnIsolatedWorktree: async (options) => {
+            const stage = await options.stage(repoRoot);
+            await git(repoRoot, 'add', '--', 'docs/harness-feedback');
+            await git(repoRoot, 'commit', '-m', stage.commitMessage);
+            await git(repoRoot, 'push', 'origin', 'main');
+            return { commitSha: await git(repoRoot, 'rev-parse', 'HEAD'), prUrl: 'https://github.test/pull/binding' };
+          },
+        },
+      }).issue({
+        programId: PROGRAM_ID,
+        ownerUserId: 'operator',
+        catId: 'codex-sol',
+        clientMessageId: 'owner-source-message-binding',
+      });
+      assert.equal(issued.status, 'published', JSON.stringify(issued));
+      assert.equal(issued.proofStatus, 'insufficient');
+      const committedManifest = parse(await git(repoRoot, 'show', `${manifestRevision}:${SOURCE_REF}`));
+      assert.equal(
+        committedManifest.decisionProof.subject.certificateSha256,
+        sha256(Buffer.from(stringify(committedManifest.certificate))),
+      );
+      assert.equal(
+        committedManifest.decisionProof.subject.resultSha256,
+        sha256(Buffer.from(stringify(committedManifest.result))),
+      );
+
+      const { createGitCapabilityEvolutionMeasurementBindingResolver } = await import(
+        '../../dist/infrastructure/harness-eval/measurement/capability-evolution/capability-evolution-measurement-binding-resolver.js'
+      );
+      const resolver = createGitCapabilityEvolutionMeasurementBindingResolver({ repoRoot });
+      const resolution = await resolver.resolveMeasurementConstitution({
+        ownerUserId: 'operator',
+        program: program(),
+        evidenceProofRef: issued.evidenceProofRef,
+      });
+      assert.deepEqual(resolution, {
+        status: 'ready',
+        binding: {
+          sourceRef: issued.sourceRef,
+          measurementCertificateRef: issued.certificateRef,
+          measurementRoleRefs: issued.measurementRoleRefs,
+        },
+      });
+
+      const consumerPath = join(
+        repoRoot,
+        `docs/harness-feedback/measurement-roles/${manifest.decisionProof.proofId}/consumer.yaml`,
+      );
+      const consumer = parse(await readFile(consumerPath, 'utf8'));
+      consumer.occupantRef = { ownerFeatureId: 'F311', ownerStateRef: 'user:someone-else' };
+      await writeFile(consumerPath, stringify(consumer));
+      await git(repoRoot, 'add', '--', consumerPath);
+      await git(repoRoot, 'commit', '-m', 'test: drift published consumer role');
+      await git(repoRoot, 'push', 'origin', 'main');
+      assert.deepEqual(
+        await resolver.resolveMeasurementConstitution({
+          ownerUserId: 'operator',
+          program: program(),
+          evidenceProofRef: issued.evidenceProofRef,
+        }),
+        { status: 'unavailable', reason: 'published role artifact mismatch: consumer' },
+      );
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
       await rm(remoteRoot, { recursive: true, force: true });

@@ -7,7 +7,9 @@ import { useChatStore } from '@/stores/chatStore';
 const mocks = vi.hoisted(() => ({
   ownerReads: [] as EntrustedWorkOwnerReadV1[],
   loading: false,
+  confirmed: false,
   error: false,
+  partial: false,
   refetch: vi.fn(),
 }));
 
@@ -16,6 +18,10 @@ const api = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock('@/utils/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/utils/api-client')>()),
   apiFetch: api.apiFetch,
+}));
+
+vi.mock('@/hooks/useThreadArtifacts', () => ({
+  useThreadArtifacts: () => ({ artifacts, loading: false, error: false, refetch: vi.fn() }),
 }));
 
 vi.mock('@/hooks/useEntrustedWorkProjection', () => ({
@@ -140,8 +146,10 @@ describe('F310 NeedsMePanel', () => {
 
   beforeEach(() => {
     mocks.ownerReads = [];
+    mocks.confirmed = false;
     mocks.loading = false;
     mocks.error = false;
+    mocks.partial = false;
     mocks.refetch.mockReset();
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -167,7 +175,7 @@ describe('F310 NeedsMePanel', () => {
 
   it('explains the quiet state in the user situation without internal design commentary', async () => {
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} />);
+      root.render(<NeedsMePanel />);
     });
 
     expect(container.textContent).toContain('猫会先把能做的做好；只有真的需要你决定时，才带着准备好的内容回来。');
@@ -185,7 +193,7 @@ describe('F310 NeedsMePanel', () => {
     const previousMode = useChatStore.getState().workspaceMode;
     try {
       await act(async () => {
-        root.render(<NeedsMePanel artifacts={artifacts} />);
+        root.render(<NeedsMePanel />);
       });
       expect(container.textContent).toContain('工作安排和进展都在工作日历。');
       const exit = container.querySelector('[data-testid="needs-me-goto-schedule"]');
@@ -201,10 +209,18 @@ describe('F310 NeedsMePanel', () => {
     }
   });
 
+  it('keeps the confirmed count during a background refresh of the same owner projection', async () => {
+    mocks.ownerReads = [ownerRead({ eligible: true })];
+    mocks.confirmed = true;
+    mocks.loading = true;
+    await act(async () => root.render(<NeedsMePanel />));
+    expect(container.querySelector('[data-testid="needs-me-count"]')?.textContent).toBe('1');
+  });
+
   it('withholds the count while the read is loading or failed instead of fabricating zero', async () => {
     mocks.loading = true;
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} />);
+      root.render(<NeedsMePanel />);
     });
     expect(container.textContent).toContain('Needs Me');
     expect(container.querySelector('[data-testid="needs-me-count"]')).toBeNull();
@@ -212,14 +228,14 @@ describe('F310 NeedsMePanel', () => {
     mocks.loading = false;
     mocks.error = true;
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} />);
+      root.render(<NeedsMePanel />);
     });
     expect(container.querySelector('[data-testid="needs-me-count"]')).toBeNull();
 
     mocks.error = false;
     mocks.ownerReads = [ownerRead({ eligible: true })];
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} />);
+      root.render(<NeedsMePanel />);
     });
     expect(container.querySelector('[data-testid="needs-me-count"]')?.textContent).toBe('1');
   });
@@ -228,7 +244,7 @@ describe('F310 NeedsMePanel', () => {
     mocks.error = true;
 
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} />);
+      root.render(<NeedsMePanel />);
     });
 
     expect(container.textContent).toContain('暂时无法读取需要你判断的事');
@@ -237,13 +253,28 @@ describe('F310 NeedsMePanel', () => {
     expect(container.textContent).not.toContain('owner truth');
   });
 
+  it('keeps healthy items usable while a partial source withholds the exact count and empty state', async () => {
+    mocks.partial = true;
+    mocks.ownerReads = [ownerRead({ eligible: true })];
+
+    await act(async () => {
+      root.render(<NeedsMePanel />);
+    });
+
+    expect(container.textContent).toContain('部分待办来源暂不可用');
+    expect(container.textContent).toContain('已读取的待办仍可处理');
+    expect(container.querySelector('[data-testid="needs-me-item"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="needs-me-count"]')).toBeNull();
+    expect(container.textContent).not.toContain('暂时没有要你判断的事');
+  });
+
   it('renders exactly the current producer judgment with prepared Artifact truth', async () => {
     mocks.ownerReads = [ownerRead({ eligible: false }), ownerRead({ eligible: true })];
     const onOpenArtifact = vi.fn();
     const onOpenAction = vi.fn();
 
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} onOpenArtifact={onOpenArtifact} onOpenAction={onOpenAction} />);
+      root.render(<NeedsMePanel onOpenArtifact={onOpenArtifact} onOpenAction={onOpenAction} />);
     });
 
     const items = container.querySelectorAll('[data-testid="needs-me-item"]');
@@ -296,6 +327,23 @@ describe('F310 NeedsMePanel', () => {
     );
   });
 
+  it('shows the F290 system result prompt in this Chinese-only surface instead of leaking producer English', async () => {
+    const read = ownerRead({ eligible: true });
+    const receipt = read.attentionReceipts[0];
+    if (!receipt?.eligible) throw new Error('fixture receipt missing');
+    receipt.producer.producerId = 'f290.collective_work_result';
+    receipt.reasonCode = 'collective_result_ready';
+    receipt.recommendation = 'Review the prepared result in its Collective Work';
+    mocks.ownerReads = [read];
+
+    await act(async () => {
+      root.render(<NeedsMePanel />);
+    });
+
+    expect(container.textContent).toContain('建议：查看共同体工作中准备好的成果');
+    expect(container.textContent).not.toContain('Review the prepared result in its Collective Work');
+  });
+
   it('keeps an unknown producer reason code verbatim behind the fold instead of translating it', async () => {
     const read = ownerRead({ eligible: true });
     const receipt = read.attentionReceipts[0];
@@ -304,7 +352,7 @@ describe('F310 NeedsMePanel', () => {
     mocks.ownerReads = [read];
 
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} />);
+      root.render(<NeedsMePanel />);
     });
 
     const item = container.querySelector('[data-testid="needs-me-item"]');
@@ -340,7 +388,7 @@ describe('F310 NeedsMePanel', () => {
     vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL }));
 
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} />);
+      root.render(<NeedsMePanel />);
     });
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -369,7 +417,7 @@ describe('F310 NeedsMePanel', () => {
     mocks.ownerReads = [read];
 
     await act(async () => {
-      root.render(<NeedsMePanel artifacts={artifacts} selectedItemRef={selectedItemRef} />);
+      root.render(<NeedsMePanel selectedItemRef={selectedItemRef} />);
     });
 
     const item = container.querySelector('[data-testid="needs-me-item"]');

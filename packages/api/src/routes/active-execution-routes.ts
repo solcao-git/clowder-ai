@@ -1,5 +1,9 @@
-import { performance } from 'node:perf_hooks';
-import type { ActiveExecutionListResponse, ActiveExecutionProjection } from '@cat-cafe/shared';
+import type {
+  ActiveExecutionListResponse,
+  ActiveExecutionProjection,
+  LifecycleActiveRun,
+  LifecycleInputCapabilities,
+} from '@cat-cafe/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
@@ -16,6 +20,7 @@ import { resolveUserId } from '../utils/request-identity.js';
 import { nativeControlReceiptHooks, nativeLiveControlCommand } from './native-control-receipts.js';
 
 export interface LiveExecutionCandidate {
+  readonly activeRun?: LifecycleActiveRun;
   readonly catId: string;
   readonly startedAt: number;
   readonly executionId?: string;
@@ -24,6 +29,8 @@ export interface LiveExecutionCandidate {
   /** Runtime principal. Visibility and control authority are separate decisions. */
   readonly ownerUserId?: string;
   readonly controlSource?: 'tracker' | 'process_owner' | 'unavailable';
+  /** Exact request-owned input capability, projected from the live dispatcher. */
+  readonly inputCapabilities?: LifecycleInputCapabilities;
 }
 
 interface ActiveExecutionTracker {
@@ -54,7 +61,7 @@ export interface ActiveExecutionRouteDeps {
     userId: string,
     request: FastifyRequest,
   ) => Promise<LiveExecutionCandidate[]>;
-  /** False means a durable process-owner source could not be read on this request. */
+  /** Absence is authoritative only when the process-owner snapshot is complete. */
   readonly isLiveExecutionControlPlaneComplete?: (request: FastifyRequest) => Promise<boolean>;
   readonly cancelExactLiveInvocation: (input: {
     threadId: string;
@@ -64,14 +71,43 @@ export interface ActiveExecutionRouteDeps {
     candidate: LiveExecutionCandidate;
     request: FastifyRequest;
   }) =>
-    | { cancelled: boolean; controlPlaneUnavailable?: boolean }
-    | Promise<{ cancelled: boolean; controlPlaneUnavailable?: boolean }>;
+    | { cancelled: boolean; reconciled?: boolean; controlPlaneUnavailable?: boolean }
+    | Promise<{ cancelled: boolean; reconciled?: boolean; controlPlaneUnavailable?: boolean }>;
+  /**
+   * Reconcile an exact execution that disappeared between projection and Stop.
+   * This runs only after the process-owner snapshot is complete and no newer
+   * controllable execution for the same cat exists.
+   */
+  readonly reconcileInactiveLiveInvocation?: (input: {
+    threadId: string;
+    userId: string;
+    catId: string;
+    executionId: string;
+    request: FastifyRequest;
+  }) =>
+    | {
+        reconciled: boolean;
+        replacement?: boolean;
+        controlPlaneUnavailable?: boolean;
+        error?: string;
+        code?: string;
+      }
+    | Promise<{
+        reconciled: boolean;
+        replacement?: boolean;
+        controlPlaneUnavailable?: boolean;
+        error?: string;
+        code?: string;
+      }>;
 }
 
 const cancelLiveBodySchema = z
   .object({ catId: z.string().min(1).max(100), expectedInvocationId: z.string().min(1).max(256).optional() })
   .strict();
-const activeProjectQuerySchema = z.object({ projectPath: z.string().min(1).max(4096) }).strict();
+const activeExecutionQuerySchema = z.union([
+  z.object({ projectPath: z.string().min(1).max(4096) }).strict(),
+  z.object({ scope: z.literal('all') }).strict(),
+]);
 
 type ActiveProjectionStage = 'candidate_enumeration' | 'owner_truth' | 'classification_assembly' | 'total';
 
@@ -89,7 +125,7 @@ function traceActiveProjectionStage(
     {
       feature: 'F295',
       measurement: 'active_execution_projection',
-      resourceScope: 'user_project',
+      resourceScope: (request.query as { scope?: string } | undefined)?.scope === 'all' ? 'user' : 'user_project',
       stage,
       durationMs,
       ...counts,
@@ -130,21 +166,12 @@ function projectLiveExecution(
   thread: Thread,
   userId: string,
   candidate: LiveExecutionCandidate,
-  tracker: ActiveExecutionTracker,
 ): ActiveExecutionProjection {
   const canControl = canControlLiveExecution(thread, userId, candidate);
-  const trackerExecutionId =
-    tracker.getUserId(thread.id, candidate.catId) === userId
-      ? tracker.getExecutionId?.(thread.id, candidate.catId)
-      : undefined;
   const realExecutionId = candidate.executionId ?? unresolvedExecutionId(thread.id, candidate);
   const executionId = canControl
     ? realExecutionId
     : foreignOccupancyExecutionId(thread.id, candidate.catId, candidate.startedAt);
-  const controlAvailable =
-    candidate.controlSource === 'process_owner' ||
-    candidate.controlSource === 'tracker' ||
-    trackerExecutionId === realExecutionId;
   return {
     executionId,
     ...(canControl && candidate.invocationId ? { turnInvocationId: candidate.invocationId } : {}),
@@ -153,21 +180,21 @@ function projectLiveExecution(
     catId: candidate.catId,
     kind: 'live_invocation',
     startedAt: candidate.startedAt,
-    cancelability:
-      canControl && controlAvailable && candidate.executionId
-        ? {
-            state: 'cancelable',
-            target: {
-              kind: 'live_invocation',
-              threadId: thread.id,
-              catId: candidate.catId,
-              executionId: realExecutionId,
-            },
-          }
-        : {
-            state: 'not_cancelable',
-            reason: canControl ? 'control_plane_unavailable' : 'foreign_principal',
+    cancelability: canControl
+      ? {
+          state: 'cancelable',
+          target: {
+            kind: 'live_invocation',
+            threadId: thread.id,
+            catId: candidate.catId,
+            executionId: realExecutionId,
           },
+        }
+      : {
+          state: 'not_cancelable',
+          reason: 'foreign_principal',
+        },
+    ...(canControl && candidate.inputCapabilities ? { inputCapabilities: candidate.inputCapabilities } : {}),
   };
 }
 
@@ -257,7 +284,7 @@ async function requireAccessibleThread(
  * 因此只有快照**完整**时才收窄；未接线、读失败、`complete=false` 一律走全量。
  */
 async function buildActiveExecutionList(
-  projectPath: string,
+  projectPath: string | null,
   userId: string,
   request: FastifyRequest,
   deps: ActiveExecutionRouteDeps,
@@ -275,22 +302,35 @@ async function buildActiveExecutionList(
   }
   const sparse =
     snapshot?.complete === true &&
-    deps.threadStore.hasByProject !== undefined &&
-    deps.threadStore.listProjectCandidates !== undefined;
+    (projectPath === null
+      ? deps.threadStore.listCandidates !== undefined
+      : deps.threadStore.hasByProject !== undefined && deps.threadStore.listProjectCandidates !== undefined);
   const candidateIds = new Set([...(snapshot?.threadIds ?? []), ...managed.map((item) => item.threadId)]);
   const visibleThreads: Thread[] = [];
   if (sparse) {
-    visibleThreads.push(...(await deps.threadStore.listProjectCandidates!(userId, projectPath, [...candidateIds])));
+    visibleThreads.push(
+      ...(await (projectPath === null
+        ? deps.threadStore.listCandidates!(userId, [...candidateIds])
+        : deps.threadStore.listProjectCandidates!(userId, projectPath, [...candidateIds]))),
+    );
   } else {
-    visibleThreads.push(...(await deps.threadStore.listByProject(userId, projectPath)));
+    visibleThreads.push(
+      ...(await (projectPath === null
+        ? deps.threadStore.list(userId)
+        : deps.threadStore.listByProject(userId, projectPath))),
+    );
   }
   const threads = visibleThreads.filter(
-    (thread) => thread.projectPath === projectPath && canProjectThread(thread, userId),
+    (thread) => (projectPath === null || thread.projectPath === projectPath) && canProjectThread(thread, userId),
   );
   traceActiveProjectionStage(request, 'candidate_enumeration', elapsedMs(candidateStartedAt), {
     threadCount: threads.length,
   });
-  if (threads.length === 0 && (!sparse || !(await deps.threadStore.hasByProject?.(userId, projectPath)))) {
+  if (
+    projectPath !== null &&
+    threads.length === 0 &&
+    (!sparse || !(await deps.threadStore.hasByProject?.(userId, projectPath)))
+  ) {
     throw new ActiveProjectionProjectNotFoundError();
   }
   const threadById = new Map(threads.map((thread) => [thread.id, thread]));
@@ -303,20 +343,47 @@ async function buildActiveExecutionList(
   });
   const classificationStartedAt = performance.now();
   const liveGroups = await Promise.all(
-    scanTargets.map(async (thread) => ({
-      thread,
-      candidates: await deps.resolveLiveExecutions(thread.id, userId, request),
-    })),
+    scanTargets.map(async (thread) => {
+      try {
+        return { thread, candidates: await deps.resolveLiveExecutions(thread.id, userId, request), unavailable: false };
+      } catch (error) {
+        if (projectPath !== null) throw error;
+        request.log.warn({ err: error, threadId: thread.id }, 'Global execution project read unavailable');
+        return { thread, candidates: [], unavailable: true };
+      }
+    }),
   );
   const executions = liveGroups.flatMap(({ thread, candidates }) =>
-    candidates.map((candidate) => projectLiveExecution(thread, userId, candidate, deps.invocationTracker)),
+    candidates
+      // A tracker reservation has no admitted response yet. Its exact control
+      // handle remains available to the cancel route, but is not a running reply.
+      // Durable child/process-owner candidates retain their existing read/control contract.
+      .filter((candidate) => candidate.controlSource !== 'tracker' || candidate.activeRun || candidate.invocationId)
+      .map((candidate) => ({
+        ...projectLiveExecution(thread, userId, candidate),
+        ...(projectPath === null ? { projectPath: thread.projectPath } : {}),
+      })),
   );
 
   for (const execution of managed) {
     const managedExecution = projectManagedCommandExecution(execution, userId, threadById);
-    if (managedExecution) executions.push(managedExecution);
+    if (managedExecution)
+      executions.push({
+        ...managedExecution,
+        ...(projectPath === null ? { projectPath: threadById.get(execution.threadId)!.projectPath } : {}),
+      });
   }
-  const response = { projectPath, executions: sortExecutions(executions) };
+  const unavailableProjectPaths = [
+    ...new Set(liveGroups.filter((group) => group.unavailable).map((group) => group.thread.projectPath)),
+  ];
+  const response: ActiveExecutionListResponse =
+    projectPath === null
+      ? {
+          scope: 'all',
+          executions: sortExecutions(executions),
+          ...(unavailableProjectPaths.length ? { unavailableProjectPaths } : {}),
+        }
+      : { projectPath, executions: sortExecutions(executions) };
   traceActiveProjectionStage(request, 'classification_assembly', elapsedMs(classificationStartedAt), {
     threadCount: threads.length,
     scanTargetCount: scanTargets.length,
@@ -332,57 +399,67 @@ async function buildActiveExecutionList(
 
 class ActiveProjectionProjectNotFoundError extends Error {}
 
-function activeProjectionKey(userId: string, projectPath: string): string {
+function activeProjectionKey(userId: string, projectPath: string | null): string {
   return JSON.stringify([userId, projectPath]);
 }
 
 export function registerActiveExecutionRoutes(app: FastifyInstance, deps: ActiveExecutionRouteDeps): void {
   const activeBuilds = new Map<string, Promise<ActiveExecutionListResponse>>();
 
-  app.get<{ Querystring: { projectPath?: string } }>('/api/executions/active', async (request, reply) => {
-    const userId = resolveUserId(request);
-    if (!userId) {
-      reply.status(401);
-      return { error: 'Identity required', code: 'AUTH_REQUIRED' };
-    }
-    const parsed = activeProjectQuerySchema.safeParse(request.query);
-    if (!parsed.success) {
-      reply.status(400);
-      return { error: 'Invalid project selector', code: 'INVALID_REQUEST' };
-    }
-    const projectPath = await migrateStoredProjectPath(parsed.data.projectPath);
-    if (!projectPath) {
-      reply.status(404);
-      return { error: 'Project not found', code: 'PROJECT_NOT_FOUND' };
-    }
+  app.get<{ Params: { threadId: string } }>('/api/threads/:threadId/executions/active', async (request, reply) => {
+    const access = await requireAccessibleThread(request, reply, deps.threadStore, 'read');
+    if (!access) return;
+    return buildActiveExecutionList(access.thread.projectPath, access.userId, request, deps);
+  });
 
-    const key = activeProjectionKey(userId, projectPath);
-    const existing = activeBuilds.get(key);
-    const joinedAt = performance.now();
-    let build = existing;
-    if (!build) {
-      build = buildActiveExecutionList(projectPath, userId, request, deps).finally(() => {
-        if (activeBuilds.get(key) === build) activeBuilds.delete(key);
-      });
-      activeBuilds.set(key, build);
-    }
-
-    try {
-      const response = await build;
-      if (existing) {
-        traceActiveProjectionStage(request, 'single_flight_join', elapsedMs(joinedAt), {
-          executionCount: response.executions.length,
-        });
+  app.get<{ Querystring: { projectPath?: string; scope?: 'all' } }>(
+    '/api/executions/active',
+    async (request, reply) => {
+      const userId = resolveUserId(request);
+      if (!userId) {
+        reply.status(401);
+        return { error: 'Identity required', code: 'AUTH_REQUIRED' };
       }
-      return response;
-    } catch (error) {
-      if (error instanceof ActiveProjectionProjectNotFoundError) {
+      const parsed = activeExecutionQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        reply.status(400);
+        return { error: 'Invalid project selector', code: 'INVALID_REQUEST' };
+      }
+      const allProjects = 'scope' in parsed.data;
+      const projectPath = 'projectPath' in parsed.data ? await migrateStoredProjectPath(parsed.data.projectPath) : null;
+      if (!allProjects && !projectPath) {
         reply.status(404);
         return { error: 'Project not found', code: 'PROJECT_NOT_FOUND' };
       }
-      throw error;
-    }
-  });
+
+      const key = activeProjectionKey(userId, projectPath);
+      const existing = activeBuilds.get(key);
+      const joinedAt = performance.now();
+      let build = existing;
+      if (!build) {
+        build = buildActiveExecutionList(projectPath, userId, request, deps).finally(() => {
+          if (activeBuilds.get(key) === build) activeBuilds.delete(key);
+        });
+        activeBuilds.set(key, build);
+      }
+
+      try {
+        const response = await build;
+        if (existing) {
+          traceActiveProjectionStage(request, 'single_flight_join', elapsedMs(joinedAt), {
+            executionCount: response.executions.length,
+          });
+        }
+        return response;
+      } catch (error) {
+        if (error instanceof ActiveProjectionProjectNotFoundError) {
+          reply.status(404);
+          return { error: 'Project not found', code: 'PROJECT_NOT_FOUND' };
+        }
+        throw error;
+      }
+    },
+  );
 
   app.post<{
     Params: { threadId: string; executionId: string };
@@ -402,28 +479,63 @@ export function registerActiveExecutionRoutes(app: FastifyInstance, deps: Active
       const { threadId, executionId } = request.params;
       const { catId, expectedInvocationId } = parsed.data;
       const liveCandidates = await deps.resolveLiveExecutions(threadId, access.userId, request);
-      const candidate = liveCandidates.find(
+      let candidate = liveCandidates.find(
         (item) =>
           item.catId === catId &&
           item.executionId === executionId &&
           canControlLiveExecution(access.thread, access.userId, item),
       );
       if (!candidate) {
-        if (deps.isLiveExecutionControlPlaneComplete && !(await deps.isLiveExecutionControlPlaneComplete(request))) {
-          reply.status(503);
-          return {
-            error: '执行控制面暂时不可用，请重试',
-            code: 'EXECUTION_CONTROL_UNAVAILABLE',
-          };
+        // A foreign principal's execution is occupancy, not a capability. Keep
+        // its identity masked and never run viewer-scoped cleanup against the
+        // occupied cat merely because the supplied id is not controllable.
+        if (
+          liveCandidates.some(
+            (item) => item.catId === catId && !canControlLiveExecution(access.thread, access.userId, item),
+          )
+        ) {
+          reply.status(409);
+          return { error: '该执行已结束或无法取消', code: 'EXECUTION_NOT_ACTIVE' };
         }
         const replacement = liveCandidates.find(
           (item) => item.catId === catId && canControlLiveExecution(access.thread, access.userId, item),
         );
-        reply.status(409);
-        return {
-          error: replacement ? '该执行已被更新的回合替代' : '该执行已结束或无法取消',
-          code: replacement ? 'EXECUTION_REPLACED' : 'EXECUTION_NOT_ACTIVE',
-        };
+        if (expectedInvocationId) {
+          if (deps.isLiveExecutionControlPlaneComplete && !(await deps.isLiveExecutionControlPlaneComplete(request)))
+            return reply
+              .code(503)
+              .send({ error: '执行控制面暂时不可用，请重试', code: 'EXECUTION_CONTROL_UNAVAILABLE' });
+          return reply.code(409).send({
+            error: replacement ? '该执行已被更新的回合替代' : '该执行已结束或无法取消',
+            code: replacement ? 'EXECUTION_REPLACED' : 'EXECUTION_NOT_ACTIVE',
+          });
+        }
+        if (replacement?.executionId) {
+          candidate = replacement;
+        } else if (deps.reconcileInactiveLiveInvocation) {
+          const result = await deps.reconcileInactiveLiveInvocation({
+            threadId,
+            userId: access.userId,
+            catId,
+            executionId,
+            request,
+          });
+          if (result.controlPlaneUnavailable) {
+            reply.status(503);
+            return {
+              error: result.error ?? '执行控制面暂时不可用，请重试',
+              code: result.code ?? 'EXECUTION_CONTROL_UNAVAILABLE',
+            };
+          }
+          return {
+            ok: true,
+            cancelled: false,
+            reconciled: result.reconciled,
+            ...(result.replacement ? { replaced: true } : {}),
+          };
+        } else {
+          return { ok: true, cancelled: false, reconciled: false };
+        }
       }
 
       if (expectedInvocationId && candidate.invocationId !== expectedInvocationId)
@@ -449,14 +561,15 @@ export function registerActiveExecutionRoutes(app: FastifyInstance, deps: Active
       // child read above may have yielded while this slot moved to a newer parent.
       if (
         candidate.controlSource === 'tracker' &&
-        deps.invocationTracker.getExecutionId?.(threadId, catId) !== executionId
+        deps.invocationTracker.getExecutionId?.(threadId, catId) !== candidate.executionId
       )
         return reply.code(409).send({ error: '运行槽已被新的执行替代', code: 'EXECUTION_REPLACED' });
+
       const result = await deps.cancelExactLiveInvocation({
         threadId,
         userId: access.userId,
         catId,
-        executionId,
+        executionId: candidate.executionId ?? executionId,
         candidate,
         request,
       });
@@ -467,7 +580,12 @@ export function registerActiveExecutionRoutes(app: FastifyInstance, deps: Active
           code: 'EXECUTION_CONTROL_UNAVAILABLE',
         };
       }
-      return { ok: true, cancelled: result.cancelled };
+      return {
+        ok: true,
+        cancelled: result.cancelled,
+        ...(result.reconciled ? { reconciled: true } : {}),
+        ...(candidate.executionId !== executionId ? { replaced: true } : {}),
+      };
     },
   );
 }

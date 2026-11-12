@@ -55,6 +55,7 @@ export {
   ACTION_SUBJECT_REF_MAX_LENGTH,
   ACTION_SUBJECT_REF_PATTERN,
   actionSubjectRefSchema,
+  TASK_ACTION_SUBJECT_REF_DESCRIPTION,
 } from './action-subject-ref.js';
 export {
   ACTION_SUCCESSOR_ACTION_FAMILIES,
@@ -87,13 +88,15 @@ export type {
   ManagedCommandCancelTarget,
 } from './active-execution.js';
 // F178 Phase B: agent-key record + verify result
-export type { AgentKeyRecord, AgentKeyVerifyResult } from './agent-key.js';
+export type { AgentKeyRecord, AgentKeyScope, AgentKeyVerifyResult } from './agent-key.js';
 // F178 Phase B: agent-key reason taxonomy
 export {
   AGENT_KEY_FAILURE_REASONS,
   type AgentKeyFailureReason,
   isAgentKeyFailureReason,
 } from './agent-key-reasons.js';
+export type { ApprovalHistoryPage, ApprovalHistoryPageRequest } from './approval-history-page.js';
+export { compareApprovalHistoryId, compareApprovalHistoryItems } from './approval-history-page.js';
 export {
   type ApprovalCardRef,
   type ApprovalDecisionMode,
@@ -250,6 +253,7 @@ export * from './capability-evolution.js';
 export * from './capability-evolution-asset-review.js';
 export * from './capability-evolution-exploration.js';
 export * from './capability-evolution-exploration-record.js';
+export * from './capability-evolution-message-source.js';
 export * from './capability-evolution-name.js';
 export * from './capability-evolution-observation.js';
 export * from './capability-evolution-preparation.js';
@@ -257,7 +261,6 @@ export * from './capability-evolution-preparation-review.js';
 export * from './capability-evolution-refs.js';
 // Cat types
 export type {
-  AgyNativeCodingGrantConfig,
   AgyProfileConfig,
   CatColor,
   CatConfig,
@@ -288,10 +291,19 @@ export type {
   Roster,
   RosterEntry,
 } from './cat-breed.js';
+export {
+  CAT_CARRIERS,
+  type CatCarrier,
+  catClientSupportsCarrier,
+  catClientSupportsNativeTool,
+  getCatCarrierOptions,
+  NATIVE_TOOL_CLIENTS,
+} from './cat-carrier.js';
 // F182: Cat routing error types
 export type { CatAlternative, CatRoutingError } from './cat-routing.js';
+export { CatAlternativeSchema, CatRoutingErrorSchema } from './cat-routing.js';
 // F212: CLI error diagnostics (cross-package data contract; classifier/sanitizer impl stays in api)
-export type { CliActiveWriterRecoveryState, CliDiagnostics, CliErrorReasonCode } from './cli-diagnostics.js';
+export type { CliDiagnostics, CliErrorReasonCode, CodexStartupRecovery } from './cli-diagnostics.js';
 export type { BuiltinAccountClient } from './client-routing.js';
 export {
   BUILTIN_ACCOUNT_CLIENT_FOR_ID,
@@ -301,6 +313,12 @@ export {
   legacyAccountFamilyForRef,
   protocolForClient,
 } from './client-routing.js';
+// F202 h3c-1: refusals of a thread cloud-binding write that prove nothing was written
+export {
+  CLOUD_BINDING_REFUSALS,
+  type CloudBindingRefusal,
+  isCloudBindingRefusal,
+} from './cloud-binding-refusals.js';
 export type {
   CloudBridgeDomFingerprintV1,
   CloudBridgeFailureDiagnosticV1,
@@ -309,13 +327,17 @@ export type {
   CloudBridgeOutboundStatus,
   CloudBridgeOutboundTransport,
   CloudBridgeRecoveryV1,
+  CloudBridgeRetryV1,
 } from './cloud-bridge-outbound-receipt.js';
 export {
   isCloudBridgeFailureDiagnosticV1,
   isCloudBridgeOutboundReceiptV1,
   isCloudBridgeRecoveryV1,
+  isCloudBridgeRetryV1,
 } from './cloud-bridge-outbound-receipt.js';
+export { type CloudBridgeReturnV1, isCloudBridgeReturnV1 } from './cloud-bridge-return.js';
 export * from './collective.js';
+export * from './collective-channel.js';
 export * from './collective-collaboration.js';
 export * from './collective-decision-vote.js';
 export * from './collective-reaction.js';
@@ -461,6 +483,7 @@ export type {
 export {
   getAllConnectorDefinitions,
   getConnectorDefinition,
+  isManagedHoldConnectorSource,
   isSelectableManagedHoldConnectorSource,
   isStaticConnectorId,
   registerConnectorDefinition,
@@ -468,6 +491,7 @@ export {
   unregisterConnectorDefinition,
 } from './connector.js';
 export {
+  type AssetContextAttachment,
   type CliOutputQuoteSource,
   CONTEXT_ATTACHMENT_COMMENT_MAX_LENGTH,
   CONTEXT_ATTACHMENT_MAX_COUNT,
@@ -476,12 +500,15 @@ export {
   CONTEXT_ATTACHMENT_VERSION,
   type ContextAttachment,
   type ContextAttachmentContent,
+  type MediaContextAttachment,
   type MessageQuoteSource,
   type QuoteContextAttachment,
   type QuoteContextSource,
   serializeContextAttachmentsPrompt,
   type ThreadContextAttachment,
   type WorkspaceFileContextAttachment,
+  type WorkspaceFileQuotePage,
+  type WorkspaceFileQuoteReference,
   type WorkspaceFileQuoteSource,
 } from './context-attachment.js';
 export type {
@@ -517,8 +544,6 @@ export {
   DISTILLATION_SOURCE_EVENTS,
   isDistillationSourceEvent,
 } from './dossier-distillation.js';
-// F233 Phase A: 值班简报 DTO (pure-projection aggregator output; impl stays in api)
-export type { BallEntry, BallEntryKind, DutyBriefing, DutyBriefingCounts } from './duty-briefing.js';
 // Entity proposal types (F260 Phase A 实体治理)
 export type {
   EntityConflictContext,
@@ -559,11 +584,24 @@ export {
   registeredCustodyGrantV1Schema,
 } from './entrusted-work-actions.js';
 export {
+  type EntrustedWorkHumanDecisionV1,
+  type EntrustedWorkHumanTerminalReceiptV1,
+  type EntrustedWorkTaskExecutionStopV1,
+  type EntrustedWorkTaskExecutionV1,
+  type EntrustedWorkTerminalV1,
+  entrustedWorkHumanDecisionV1Schema,
+  entrustedWorkHumanTerminalReceiptV1Schema,
+  entrustedWorkTaskExecutionStopV1Schema,
+  entrustedWorkTaskExecutionV1Schema,
+  entrustedWorkTerminalV1Schema,
+} from './entrusted-work-human-terminal.js';
+export {
   type EntrustedWorkBriefV1,
   type EntrustedWorkOwnerReadV1,
   entrustedWorkBriefV1Schema,
   entrustedWorkOwnerReadV1Schema,
 } from './entrusted-work-owner-read.js';
+export * from './eval-repair-decision-explanation.js';
 // F227: Event Memory types (cognitive-transition event index)
 export {
   COGNITIVE_TRANSITIONS,
@@ -601,23 +639,8 @@ export type {
   TrajectoryProvenance,
 } from './feat-trajectory.js';
 export { makeGitRefEntryId } from './feat-trajectory.js';
-// F254 Phase E: persistent catch-closure responsibility and output-commit decisions
-export type {
-  ClosureDraftBody,
-  FreshnessClosureAggregate,
-  FreshnessClosureAttempt,
-  FreshnessClosureBlockedReason,
-  FreshnessClosureDisposition,
-  FreshnessClosureProjection,
-  FreshnessClosureStatus,
-  FreshnessSupplementAggregate,
-  FreshnessSupplementFailureReason,
-  FreshnessSupplementProjection,
-  FreshnessSupplementStatus,
-  LegacyClosureMigrationOutcomeCounts,
-  OutputCommitDecision,
-  PublishedFreshnessAnnotation,
-} from './freshness-closure.js';
+// Output-commit truth for an answer turn
+export type { OutputCommitDecision, PublishedFreshnessAnnotation } from './freshness-closure.js';
 // F245: Friction Signal Eval types
 export type {
   ActionableFrictionCandidate,
@@ -649,35 +672,6 @@ export type {
   FrustrationSignalType,
 } from './frustration-issue.js';
 export { createFrustrationIssue, generateFrustrationIssueId } from './frustration-issue.js';
-// Game engine types (F101)
-export type {
-  ActionDefinition,
-  ActionStatus,
-  ActorType,
-  Ballot,
-  EventScope,
-  GameAction,
-  GameConfig,
-  GameDefinition,
-  GameEvent,
-  GameResultStats,
-  GameRuntime,
-  GameView,
-  PendingAction,
-  PhaseDefinition,
-  Resolution,
-  RoleDefinition,
-  Seat,
-  SeatId,
-  SeatView,
-  WinCondition,
-} from './game.js';
-export {
-  isGameEvent,
-  isSeatId,
-  isValidActionStatus,
-  isValidScope,
-} from './game.js';
 export {
   type AwaitStateV1,
   commentAudienceForPerspective,
@@ -744,8 +738,10 @@ export {
   type NeedsMeProducerId,
   PHASE_B_NEEDS_ME_PRODUCER_IDS,
   type PhaseBNeedsMeProducerId,
+  type ProducerAttentionCoverageV1,
   type ProducerAttentionReceiptV1,
   type ProducerAttentionReevaluationLinkV1,
+  producerAttentionCoverageV1Schema,
   producerAttentionReceiptV1Schema,
   producerAttentionReevaluationLinkV1Schema,
 } from './growing.js';
@@ -762,6 +758,9 @@ export {
   custodyOpportunityEpisodeInputV1Schema,
   custodyOpportunityEpisodeV1Schema,
 } from './growing-opportunity.js';
+export * from './harness-history-publication.js';
+export type { HoldCancelEntry, HoldCardCancelability, HoldCardRef } from './hold-card-cancelability.js';
+export { decideHoldCancelEntry, readHoldCardCancelability } from './hold-card-cancelability.js';
 // F281 Phase A: server-bound human disposition feedback and exact-subject eligibility contract
 export {
   buildHumanDispositionEnvelope,
@@ -934,6 +933,7 @@ export {
   MARKETPLACE_ECOSYSTEMS,
   TRUST_LEVELS,
 } from './marketplace.js';
+export { type MediaGalleryOrigin, mediaGalleryOriginSchema } from './media-context-attachment.js';
 // Meeting types (F195 Phase C — Meeting Copilot)
 export type {
   MeetingParticipant,
@@ -986,6 +986,8 @@ export {
 } from './memory-architecture-closure.js';
 // F287 Phase C: bounded Memory Cue Plane shared contract.
 export {
+  type AuthorizedTaskSourcesOpportunityV1,
+  authorizedTaskSourcesOpportunityV1Schema,
   type CatOwnedSeedCueCarrierV1,
   type CueEnvelopeV1,
   catOwnedSeedCueCarrierV1Schema,
@@ -994,6 +996,8 @@ export {
   type DeliveryDecisionOpportunityV1,
   deliveryDecisionCueCarrierV1Schema,
   deliveryDecisionOpportunityV1Schema,
+  type FreshContextSourcesOpportunityV1,
+  freshContextSourcesOpportunityV1Schema,
   isCueEnvelopeV1,
   isRecallOpportunityV1,
   type JudgmentSurfaceEnteredOpportunityV1,
@@ -1017,7 +1021,12 @@ export {
   recentEventAvailableOpportunityV1Schema,
   type SubjectSeenOpportunityV1,
   subjectSeenOpportunityV1Schema,
+  type ThreadOpenedOpportunityV1,
+  threadOpenedOpportunityV1Schema,
 } from './memory-cue.js';
+export { type ContextSourceEvidenceV1, contextSourceEvidenceV1Schema } from './memory-cue-context.js';
+export * from './memory-owner-lifecycle.js';
+export * from './memory-owner-views.js';
 export {
   ASR_PERSON_MEMORY_REFLEX_ENTRY_V1,
   type AsrPersonMemoryDynamicSceneEntryV1,
@@ -1058,6 +1067,40 @@ export {
   createCatMessage,
   createUserMessage,
 } from './message.js';
+// #1354 / RFC #1356: canonical Queue → History → Active Run lifecycle contract.
+export type {
+  LifecycleActiveRun,
+  LifecycleAppendAction,
+  LifecycleAppendCapability,
+  LifecycleAppendExpectedRun,
+  LifecycleAppendFailure,
+  LifecycleDeliveryFailureReason,
+  LifecycleDeliveryFailureResult,
+  LifecycleDispatchRef,
+  LifecycleInlinePayload,
+  LifecycleInputCapabilities,
+  LifecycleInputReadReceipt,
+  LifecycleMessageFrom,
+  LifecycleMessageMetadata,
+  LifecycleMessageRefPayload,
+  LifecycleQueueEntry,
+  LifecycleQueuePriority,
+  LifecycleQueueSnapshot,
+  LifecycleResponseBubble,
+  LifecycleStoredMessageMetadata,
+  MessageFrom,
+  ReorderVisibleLifecycleEntriesCommand,
+  StructuredOwnerAdmissionBinding,
+  TimelineMessageKind,
+} from './message-lifecycle.js';
+export {
+  hasExactLifecycleProcessingDispatch,
+  isLifecycleAppendFailure,
+  isLifecycleInputReadReceipt,
+  isLifecycleStoredMessageMetadata,
+  isMessageFrom,
+  timelineMessageKind,
+} from './message-lifecycle.js';
 // Mount Rules types (F228 Skill 挂载规则解耦)
 export type {
   CustomMountPointRule,
@@ -1164,6 +1207,14 @@ export {
   type PawFeelDutyConfig,
   type PawFeelReconciliationCoverage,
 } from './paw-feel-duty.js';
+export type { PawFeelRepairBinding, PawFeelRepairRequest } from './paw-feel-repair-binding.js';
+export {
+  pawFeelRepairBinding,
+  pawFeelRepairBindingSchema,
+  pawFeelRepairRequest,
+  pawFeelRepairRequestSchema,
+  repairRequestForBinding,
+} from './paw-feel-repair-binding.js';
 // F276 owner-private people and relationship memory contracts
 export {
   type CandidateClaimDraft,
@@ -1193,9 +1244,12 @@ export {
   type MaterializationAuthority,
   materializableClaimPayloadSchema,
   materializationAuthoritySchema,
+  type OwnerMemoryActionEvidence,
+  ownerMemoryActionEvidenceSchema,
   PERSON_MEMORY_CANDIDATE_STATES,
   PERSON_MEMORY_INTERACTION_EVIDENCE_FIELDS,
   PERSON_MEMORY_LIMITS,
+  PERSON_MEMORY_OWNER_ACTION_KINDS,
   type PersonClaimId,
   type PersonClaimVersion,
   type PersonId,
@@ -1207,6 +1261,7 @@ export {
   type PersonMemoryAssertionRole,
   type PersonMemoryDeletionReceipt,
   type PersonMemoryInteractionApprovalDetail,
+  type PersonMemoryOwnerActionKind,
   type PersonMemoryResolvedSourceBundle,
   type PersonMemorySourceBundleInput,
   type PersonMemorySourceInput,
@@ -1274,6 +1329,7 @@ export type {
   PluginManagerConfigFieldKind,
   PluginManagerConfigOption,
   PluginManagerConfigState,
+  PluginManagerConfigurationVariants,
   PluginManagerConfigureRequest,
   PluginManagerContribution,
   PluginManagerContributionTool,
@@ -1292,6 +1348,10 @@ export type {
   PluginManagerSetEnabledRequest,
   PluginManagerUninstallRequest,
   PluginManifest,
+  PluginMarketplaceSelection,
+  PluginOperationRow,
+  PluginOperationRowAction,
+  PluginOperationRows,
   PluginResourceDef,
   PluginResourceStatus,
   PluginStatus,
@@ -1302,6 +1362,7 @@ export {
   pluginDescriptionVariants,
   resolvePluginDescription,
 } from './plugin.js';
+export type { PluginWaitState, PluginWaitUpdate } from './plugin-wait.js';
 export {
   DEFERRED_PERSON_MEMORY_CLERK_DISPOSITIONS,
   DEFERRED_PERSON_MEMORY_RECEIPT_STATES,
@@ -1350,6 +1411,7 @@ export {
   isAllowedCollectionSignal,
   PROFILE_UPDATE_TARGET_LAYERS,
 } from './profile-update.js';
+export * from './profile-usage.js';
 export type {
   ActiveParticipantInput,
   AssemblerInput,
@@ -1388,6 +1450,7 @@ export type {
   ThreadProposal,
 } from './proposal.js';
 export { suggestedReportingModeForWorkMode } from './proposal.js';
+export type { ApprovedTaskContractV1, TaskContractContinuationV1 } from './proposal-task-contract.js';
 export {
   isProviderSemanticEvent,
   normalizeThreadGoalObjective,
@@ -1408,6 +1471,7 @@ export {
   type ProviderWarningSemanticEvent,
 } from './provider-semantic-event.js';
 export type {
+  ActiveInvocationGuidanceCapability,
   FreshnessCarrier,
   FreshnessCarrierCapability,
   FreshnessCarrierDeliverySemantics,
@@ -1416,20 +1480,14 @@ export type {
   QueueAuthorIntent,
   QueueAuthorIntentFallbackReason,
   QueueAuthorIntentReceipt,
+  QueueCollectivePublicReplyWitness,
   QueueDispatchDispositionEvidenceRef,
   QueueHandledDisposition,
   QueueInvocationSettlement,
   QueueLineageEvidenceRef,
   QueueManagedHoldContinuationWitness,
-  QueueMessageReceipt,
-  QueueMessageReceiptProjection,
-  QueueReceiptTarget,
-  QueueReceiptTargetState,
   QueueRecoveryAction,
   QueueRecoveryRequest,
-  QueueReminderAttempt,
-  QueueReminderAttemptState,
-  QueueReminderMissedReason,
   QueueSourceResponseConsumptionWitness,
   QueueTargetAttempt,
   QueueTargetAttemptState,
@@ -1440,12 +1498,15 @@ export type {
   QueueTerminalSilentConsumptionWitness,
   QueueTurnExecutionEvidenceRef,
 } from './queue-receipt.js';
-// F264: durable per-target queued-message receipt and manual reminder truth
+// F264: delivery capability and durable per-target receipt projections
 export {
+  ACTIVE_INVOCATION_GUIDANCE_CAPABILITIES,
   FRESHNESS_CARRIER_DELIVERY_SEMANTICS,
   FRESHNESS_CARRIER_PROVIDERS,
   FRESHNESS_CARRIERS,
   isQueueDispatchDispositionEvidence,
+  parseFreshnessCarrierCapability,
+  supportsActiveInvocationGuidance,
 } from './queue-receipt.js';
 // Reflux types (F076 Phase 2 — 回流)
 export type {
@@ -1482,6 +1543,7 @@ export type {
 export { isPersonMemoryProposalCardBlock, isValidRichBlock, normalizeRichBlock } from './rich.js';
 // F293 Phase A: durable routing truth and pure advisory projection contracts.
 export * from './routing-context.js';
+export * from './runtime-conversation-decision.js';
 // F306 Phase B: provider-neutral mid-run request ↔ human response contract.
 export * from './runtime-interaction.js';
 // F246 Phase I Wave 1: F139 schedule mutation proposal + audit contract
@@ -1510,6 +1572,7 @@ export type {
   ContextHealthConfig,
   ContextManagementHint,
   HybridProgress,
+  NativeSessionBinding,
   SealReason,
   SealResult,
   SessionCapacityPin,
@@ -1643,6 +1706,7 @@ export type {
   ReviewAutomationState,
   SuggestedCrossPostAction,
   SuggestedCrossPostActionSource,
+  TaskExecutionRef,
   TaskItem,
   TaskKind,
   TaskProbeSpec,
@@ -1650,6 +1714,14 @@ export type {
   UpdateTaskInput,
 } from './task.js';
 export { extractFeatureIds, isTrackingKind, TASK_FEATURE_ID_MAX_LENGTH, taskFeatureIdSchema } from './task.js';
+export {
+  type EntrustedTaskDataControllerCoordinatesV1,
+  type EntrustedTaskDataControllerReceiptV1,
+  type EntrustedTaskDataControllerV1,
+  entrustedTaskDataControllerCoordinatesV1Schema,
+  entrustedTaskDataControllerReceiptV1Schema,
+  entrustedTaskDataControllerV1Schema,
+} from './task-data-controller.js';
 // F193 Phase E: SuggestedCrossPostAction + DispatchGateState re-exported via task.ts
 // (canonical source: cross-thread-affordance.ts; E2/E4 consumers can also import directly)
 // Taste Proposal types (F221 品味信号捕获)
@@ -1662,6 +1734,8 @@ export type {
 export type {
   GlobalArtifactDTO,
   GlobalArtifactsResponse,
+  GlobalArtifactWork,
+  GlobalWorksPageResponse,
   ThreadArtifactDTO,
   ThreadArtifactsResponse,
   ThreadArtifactType,
@@ -1708,8 +1782,11 @@ export type {
   TurnExecutionStatus,
   TurnExecutionTerminalInput,
   TurnExecutionTerminalStatus,
+  TurnOutputFence,
+  TurnOutputFenceVerdict,
 } from './turn-execution.js';
 export * from './unified-attention.js';
+export * from './unified-attention-decision.js';
 // User preferences types (F166 猫猫排序自定义)
 export type {
   MessageDispositionPreferenceSnapshot,
@@ -1720,6 +1797,11 @@ export type {
   ThreadAttentionPreferences,
   UserPreferences,
 } from './user-preferences.js';
+export * from './video-project.js';
+// Workflow SOP types (F073 告示牌)
+export * from './video-project-command.js';
+export * from './video-project-message.js';
+export * from './video-project-review.js';
 // F280: canonical wait termination event consumed by F281 feedback adapters.
 export {
   type UserCancelWaitTerminationEventV1,
@@ -1731,7 +1813,6 @@ export {
   waitTerminationEventSchema,
   waitTerminationReasonSchema,
 } from './wait-termination.js';
-// Workflow SOP types (F073 告示牌)
 export type {
   CheckStatus,
   ResumeCapsule,

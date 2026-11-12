@@ -1,6 +1,6 @@
 ---
 name: browser-preview
-tips_exempt: Managed preview expiry is an internal lifecycle safety boundary; the existing browser-preview skill and status output already expose the operator-visible behavior.
+tips_exempt: "2026-10-28: clarifies the existing Hub preview and delivery-state workflow so agent automation does not activate the desktop; no new end-user action."
 description: >
   Hub 内嵌浏览器预览 localhost 应用。
   Use when: 写前端代码、跑 dev server、需要看页面效果、调 UI、operator说"看看效果"。
@@ -33,16 +33,17 @@ Hub 内置了嵌入式浏览器面板（F120），可以直接预览运行中的
    outer `--dir` 与 inner `--cwd` 必须解析为同一个物理 worktree。不要用 tool 的 per-call workdir 隐式代替这个坐标：provider hook 可能只看到 turn cwd。outer form 只识别这条受约束的 `dev:direct` child；它不是任意 `COMMAND` 的通行证。
    自定义 child 或外部项目的 **start** 仍用 ordinary form：从实际包含 `preview:process` package script 的 Clowder AI checkout 作为 tool cwd，执行 `pnpm preview:process start --port PORT --cwd /absolute/project/path -- COMMAND [ARGS...]`，不加 outer `--dir`。这条启动命令走 ordinary policy，不获得 typed worktree authority。后续 status/stop 按目标 `--cwd` 的身份选 grammar，而不是照抄 start：目标是 `cat-cafe-*` worktree 时必须用 bounded outer `--dir`；其他项目目标才继续用 ordinary form。
    macOS 上它会把目标直接注册为一次性 user LaunchAgent；普通 detached child、`nohup`、`setsid` 或 PTY 都不算独立托管。托管预览默认 8 小时自动到期（可用 `--lifetime-seconds N` 缩短，最长 24 小时），避免遗留 watcher 持续制造文件事件。
+   已合入代码的标准 Alpha 可从实际 main checkout 托管：`pnpm --dir /absolute/cat-cafe preview:process start --cwd /absolute/cat-cafe --port 3011 -- pnpm alpha:start -- --no-quick`。`--no-quick` 可省略；start/status/stop 共用相同 package/target cwd 和 3011。允许选项与隔离端口只由 `scripts/lib/alpha-launch-contract.mjs` 决定；named Alpha 的 instance/ports 继续由 `alpha-coordinates.mjs` 验证，不传任意 child/env/path。Alpha 启动合同和 browser VerificationPlan 分别负责启动与验证。
 2. **Hub 自动检测端口** → 弹出 toast 提示"检测到 localhost:xxxx 启动"
 3. **点击 Open Preview** → 自动打开 browser panel 并加载页面
 4. **也可以手动**：切到 workspace 的 Browser tab，输入 `localhost:port` 按 Go
 
 改代码 → HMR 热更新 → browser panel 内页面自动刷新，无需手动操作。
 
-### 猫主动打开浏览器（Phase C — 必须掌握）
+### 猫主动展示 Hub 内嵌预览（Phase C）
 operator说过："别手动让我输入，你最好打开浏览器，把页面放出来。"
 
-**猫应该主动替operator打开浏览器**，不要等operator点 toast 或手动输 URL。
+**猫应该主动在 Hub 内嵌面板展示页面**，不要等operator点 toast 或手动输 URL。这里的“打开”始终是 Hub 内嵌预览，不启动或激活系统浏览器；自动测试另走 `webapp-testing` 的无头实例。
 
 #### 调用步骤（按顺序执行，不要跳步）
 
@@ -76,6 +77,7 @@ Step 3: 读返回的 deliveryStatus，再决定怎么报告
   → queued      = 目标 thread 不在前台，已写入其 ThreadState；切到该 thread 自动揭示
   → blocked     = presentation lock 等阻止了展示（看 deliveryReason）
   → unconfirmed = 没有任何 Hub 客户端确认送达（没连接 / 无匹配 client）——必须如实说"未能确认打开"
+  → queued / blocked / unconfirmed 都保留原送达状态，不改用 open、可见浏览器或应用 activate 补展示
 ```
 
 > **admission ≠ visible**：`allowed: true` 只证明服务端受理了请求。报告"已打开"之前必须看到 `deliveryStatus: "applied"`。
@@ -111,10 +113,12 @@ Step 3: 读返回的 deliveryStatus，再决定怎么报告
 ### 两层可视化策略
 operator拍板："简单的用富文本，复杂的用猫主动打开浏览器。"
 
+这里的复杂应用展示指 Hub 内嵌预览。
+
 | 场景 | 方式 | 怎么做 |
 |------|------|--------|
 | 简单可视化（图表、动画、计算器） | `html_widget` rich block 内联渲染 | 用 `rich-messaging` skill 发 `html_widget` block |
-| 复杂应用（完整页面、多组件交互） | 猫主动打开浏览器 | 调用 `auto-open` API |
+| 复杂应用（完整页面、多组件交互） | 猫主动展示 Hub 内嵌预览 | 调用 `cat_cafe_preview_open` |
 
 ## 技术要点（猫猫需要知道的）
 
@@ -135,10 +139,10 @@ operator拍板："简单的用富文本，复杂的用猫主动打开浏览器�
 
 ## 什么时候主动用
 
-- 写完前端组件/页面 → **主动调 auto-open 打开浏览器展示**（不要等operator点）
+- 写完前端组件/页面 → **主动调 `cat_cafe_preview_open` 展示 Hub 内嵌预览**（不要等operator点）
 - 调样式/布局 → 改代码后在 browser panel 里实时查看
 - operator说"看看效果"/"给我看看" → 主动打开 browser panel 展示
-- dev server 已在 Terminal 跑着 → 主动打开浏览器，不要只提示
+- dev server 已在 Terminal 跑着且需要展示成品 → 主动展示 Hub 内嵌预览，不要只提示
 - invocation/`-p` 中启动的 dev server → 必须走 `preview:process`，并在报告中同时给出 status 与 origin；不能把 `running/detached` 写成跨回合已存活
 - 跨回合展示 → 同时检查 `expiresAt`；status/stop 按目标 cwd 身份选择，不按启动命令族选择：`cat-cafe-*` worktree 一律使用相同 bounded outer `--dir` + inner `--cwd` + port，非 worktree 项目才使用 ordinary form
 - 简单可视化（图表/动画） → 用 `html_widget` rich block 内联渲染

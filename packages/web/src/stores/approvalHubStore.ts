@@ -1,5 +1,6 @@
 'use client';
 
+import { createApprovalPendingRead } from './approval-pending-read';
 /**
  * F246: Approval Hub Zustand store.
  *
@@ -20,6 +21,7 @@ import type {
 import { create } from 'zustand';
 import { isApprovalItemBatchDecidable } from '@/lib/approval-features';
 import { apiFetch } from '@/utils/api-client';
+import { apiSessionIdentity } from '@/utils/api-session-identity';
 import { createApprovalDecisionActions } from './approval-decision-actions';
 import { consumeDecisionAttempt, type DecisionAttempts } from './approval-decision-attempts';
 import {
@@ -41,6 +43,9 @@ interface ApprovalHubState {
   items: ApprovalHubItem[];
   count: number;
   isLoading: boolean;
+  /** Last pending GET observation; a POST error does not change read availability or approval truth. */
+  pendingReadAvailable: boolean;
+  pendingOwnerUserId: string | null;
   isOpen: boolean;
   error: string | null;
   /** Map of proposalId → 'approving' | 'rejecting' for optimistic UI feedback */
@@ -60,7 +65,13 @@ interface ApprovalHubState {
   settledItems: SettledApprovalHubItem[];
   settledIsLoading: boolean;
   settledError: string | null;
+  /** Local request ordering, never an approval lifecycle or owner. */
+  pendingRequestVersion: number;
+  settledRequestVersion: number;
   fetchPending: () => Promise<void>;
+  /** A presentation consumer joins the owner's completed/in-flight read; explicit confirmations keep fetchPending. */
+  ensurePending: (ownerUserId: string) => Promise<void>;
+  invalidatePending: () => void;
   /** F246 Phase F: fetch normalized settled lifecycle history. */
   fetchSettled: (limit?: number) => Promise<void>;
   open: () => void;
@@ -71,7 +82,7 @@ interface ApprovalHubState {
   /** F246 Phase B: reject an inlineApprovable dispatch proposal */
   rejectProposal: (proposalId: string, feedback?: HumanDispositionFeedbackInput) => Promise<boolean>;
   /** F276: approve an exact subset of the proposal's remaining drafts. */
-  approvePersonMemory: (proposalId: string, selectedDraftIds: string[]) => Promise<void>;
+  approvePersonMemory: (proposalId: string, selectedDraftIds: string[], undoReceiptRequestId?: string) => Promise<void>;
   /** F276: keep a proposal owner-visible without authorizing recall or materialization. */
   notNowPersonMemory: (proposalId: string) => Promise<void>;
   /** F276: cancel an unmaterialized proposal without creating rejection suppression. */
@@ -94,6 +105,8 @@ export const useApprovalHubStore = create<ApprovalHubState>((set, get) => ({
   items: [],
   count: 0,
   isLoading: false,
+  pendingReadAvailable: false,
+  pendingOwnerUserId: null,
   isOpen: false,
   error: null,
   deciding: {},
@@ -103,27 +116,22 @@ export const useApprovalHubStore = create<ApprovalHubState>((set, get) => ({
   settledItems: [],
   settledIsLoading: false,
   settledError: null,
+  pendingRequestVersion: 0,
+  settledRequestVersion: 0,
 
-  fetchPending: async () => {
-    set({ isLoading: true, error: null });
-    try {
-      const res = await apiFetch('/api/approval-hub/pending');
-      if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
-      const data = (await res.json()) as { items: ApprovalHubItem[]; count: number };
-      set({ items: data.items, count: data.count, isLoading: false });
-    } catch (err) {
-      set({ error: err instanceof Error ? err.message : 'Unknown error', isLoading: false });
-    }
-  },
+  ...createApprovalPendingRead(set, get),
 
   fetchSettled: async (limit = 200) => {
-    set({ settledIsLoading: true, settledError: null });
+    const requestVersion = get().settledRequestVersion + 1;
+    set({ settledRequestVersion: requestVersion, settledIsLoading: true, settledError: null });
     try {
-      const res = await apiFetch(`/api/approval-hub/settled?limit=${limit}`);
+      const res = await apiFetch(`/api/approval-hub/settled?limit=${limit}`, undefined, { afterCurrentGet: true });
       if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
       const data = (await res.json()) as { items: SettledApprovalHubItem[]; count: number };
+      if (get().settledRequestVersion !== requestVersion) return;
       set({ settledItems: data.items, settledIsLoading: false });
     } catch (err) {
+      if (get().settledRequestVersion !== requestVersion) return;
       set({ settledError: err instanceof Error ? err.message : 'Unknown error', settledIsLoading: false });
     }
   },
@@ -284,3 +292,26 @@ export const useApprovalHubStore = create<ApprovalHubState>((set, get) => ({
     return results;
   },
 }));
+
+let observedApprovalOwner = apiSessionIdentity.getSnapshot().ownerUserId;
+apiSessionIdentity.subscribe(() => {
+  const owner = apiSessionIdentity.getSnapshot().ownerUserId;
+  if (observedApprovalOwner && owner !== observedApprovalOwner) {
+    useApprovalHubStore.getState().invalidatePending();
+    useApprovalHubStore.setState((state) => ({
+      items: [],
+      count: 0,
+      pendingReadAvailable: false,
+      pendingOwnerUserId: owner,
+      isLoading: false,
+      settledItems: [],
+      settledIsLoading: false,
+      settledError: null,
+      settledRequestVersion: state.settledRequestVersion + 1,
+      selectedIds: new Set(),
+      decisionAttempts: {},
+      deciding: {},
+    }));
+  }
+  observedApprovalOwner = owner;
+});

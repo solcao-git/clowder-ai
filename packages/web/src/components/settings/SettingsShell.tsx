@@ -2,8 +2,8 @@
 
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback } from 'react';
+import { canonicalSettingsSectionId } from '@/lib/settings-section-id';
 import { useShellPresentation } from '../shell/shell-presentation';
-import { usesFixedPluginManagerLayout } from './plugin-manager/plugin-manager-design-gate';
 import { SettingsContent } from './SettingsContent';
 import { SettingsNav } from './SettingsNav';
 import { SettingsShellV2 } from './SettingsShellV2';
@@ -13,11 +13,11 @@ function SettingsShellInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const isV2 = useShellPresentation() === 'v2';
-  const activeSection = searchParams.get('s') ?? (searchParams.get('ops') ? 'ops' : DEFAULT_SECTION);
+  const requestedSection = searchParams.get('s') ?? (searchParams.get('ops') ? 'ops' : DEFAULT_SECTION);
+  const activeSection = canonicalSettingsSectionId(requestedSection);
   const initialEditCatId = searchParams.get('cat') ?? undefined;
   const standalone = searchParams.get('standalone') === '1';
-  const fixedPluginManagerLayout =
-    activeSection === 'plugins' && usesFixedPluginManagerLayout(`?${searchParams.toString()}`);
+  const fixedPluginManagerLayout = activeSection === 'plugins';
 
   const handleSelect = useCallback(
     (sectionId: string) => {
@@ -30,7 +30,7 @@ function SettingsShellInner() {
 
   if (standalone) {
     return (
-      <div className="flex h-full flex-col bg-[var(--console-panel-bg)]">
+      <div data-settings-section={activeSection} className="flex h-full flex-col bg-[var(--console-panel-bg)]">
         <div
           className={`m-3 flex min-h-0 flex-1 flex-col rounded-[18px] bg-[var(--console-shell-bg)] px-5 py-6 shadow-[var(--console-shadow-soft)] md:px-9 md:py-8 ${fixedPluginManagerLayout ? 'overflow-hidden' : 'overflow-y-auto'}`}
           data-trajectory-origin-scroll
@@ -55,7 +55,10 @@ function SettingsShellInner() {
   }
 
   return (
-    <div className="console-shell flex h-full min-h-0 flex-col overflow-hidden bg-[var(--console-panel-bg)] md:flex-row">
+    <div
+      data-settings-section={activeSection}
+      className="console-shell flex h-full min-h-0 flex-col overflow-hidden bg-[var(--console-panel-bg)] md:flex-row"
+    >
       <aside
         className="flex max-h-[42vh] w-full flex-shrink-0 flex-col overflow-hidden bg-[var(--console-panel-bg)] md:max-h-none md:w-[220px]"
         data-console-panel="settings-nav"

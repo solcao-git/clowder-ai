@@ -1,16 +1,16 @@
 ---
 feature_ids: [F309]
-related_features: [F063, F138, F202, F290, F307, F310, F322]
-topics: [collaborative-content, co-editing, change-awareness, selection-anchors, annotations, agent-patch, office, media]
+related_features: [F063, F138, F202, F232, F290, F307, F310, F322]
+topics: [artifacts, collaborative-content, co-editing, change-awareness, selection-anchors, annotations, agent-patch, office, media, html-widget]
 doc_kind: spec
-tips_exempt: "2026-09-26 Phase U artwork focus teaches each action in its mounted canvas (放大标注/圈选, 适合窗口, 完成文字, 完成并保存); a background capability tip would appear away from the artwork and cannot perform the contextual action. The parent Alpha still owns product acceptance."
+tips_exempt: "Renewed 2026-10-02 for Studio K1/K2 backend: the new takeover MCP is an authenticated Cat-internal bridge from the Human's already-sent, revision-bound message; the Human action remains the mounted Chat/candidate/receipt journey and teaches itself in context. A generic tip would expose internal sourceMessageId/operationId mechanics before the Sonnet consumer and parent Alpha are accepted. The 2026-09-26 artwork-focus in-canvas rationale remains unchanged."
 design_gate_claim_contracts:
   - docs/design-gate-claims/f309-artwork-review-real-shell.json
 created: 2026-08-27
-description: "让人和猫在异质内容上共同编辑、感知有版本的变化、精确批注并安全审阅 Agent patch，同时让 canonical 内容和版本留在各自 owner。"
+description: "产物协作：让人和猫围绕文档、图片、视频、网页与交互作品共同查看、编辑、批注、迭代版本并审阅修改，感知彼此有版本的变化；内容和版本由各自 owner 管理，Office 插件是其中一种内容能力。"
 description_source: human
-description_author: codex-sol
-description_updated_at: 2026-09-13T20:42:00Z
+description_author: codex61-sol
+description_updated_at: 2026-10-20T11:14:40Z
 mcp_admission_status: accepted
 mcp_admission_ref: "file:docs/features/F309-collaborative-content-plane.md"
 mcp_admission_claims:
@@ -46,16 +46,31 @@ mcp_admission_claims:
     decision: accepted
 ---
 
-# F309: Collaborative Content Plane — 跨媒介内容协作平面
+# F309: 产物协作 — Artifact Collaboration / Collaborative Content Plane
 
-> **Status**: in-progress / Phase R 历史有界交付保留；Phase U 部分实现已合入、父线程验收未通过。CVO517授权作品体验收口批次由新thread的Sol6实现、Sol5.6独立审查，合入后父Astra实看；Office/video Admission Gate仍开放
-> **Owner**: 小太阳·Maine Coon (@codex-sol, GPT-5.6 Sol)
+**F309 面向人和猫共同创作的产物：文档、图片、视频、网页、可运行原型及其他交互作品。**
+它要让同一件作品可以被找回、精确指出位置、讨论、修改、比较版本并由有权的人决定采用，
+最终支持人猫共同编辑和变化感知。Office 文档是其中一类产物，Office provider plugin 是接入
+这类内容的一条实现支线；不能用“Office/PPT 插件”概括整个 F309。
+
+这里的交互作品指网页、小工具、可运行原型等内容；审批、投票、选择卡仍是交互记录，
+不会因为出现在聊天中就自动成为可版本化作品。
+
+产品定位澄清来源：You `[thread-id]#private-source-id`
+（2026-10-20：“应该是产物……视频 图片 文档”）。本次修正描述与检索入口；具体能力仍按下列
+阶段和原验收证据交付，不把网页作品版本化或 Office 完整共编记成已经完成。
+
+> **Status**: in-progress / Phase R、Studio 297 历史有界交付保留；Phase U 归一四项补漏、#6264 prepared、#6275 卡片与 #6277 raw缩略/目录阅读器均已过父 Alpha；Human829工具栏修复#6292已过父Alpha与正式boot59五宽度；原讨论稿Chat/Works/Home全部路径正式往返通过，共同Markdown卡片YAML问题已由#6296审合并过父Alpha及正式boot60三入口，原Task414/g22这处正式验收闭合；菜单叠留#6314已过父Alpha与正式boot64原消息六阶段，完整正式体验、Phase U、Office/video Admission Gate与未勾AC仍开放
+> **Owner**: 小星星·Maine Coon (@codex-astra, GPT-6 Astra)，F309 统筹与最终交付
 > **Priority**: P1
-> **Source thread**: `[thread-id]`
+> **Source thread**: `[thread-id]` — F309「指挥」
+> **Original source thread**: `[thread-id]`（保留初始设计与授权来源）
 > **operator origin**: 从 F290 完整剥离 Office、富文本、图片、视频、画布的编辑、选区、批注与 Agent patch；“能用开源就用开源集成”；最终要支持人猫共同编辑，猫能感知人的编辑。来源：`private-source-id`。
 > **operator final-state correction**: DOCX + video 必须优先直接集成成熟开源能力；禁止用 fake owner、最小编辑器或独立脚手架证明“可行”，开发从真实候选的最终宿主/内容边界起步。来源：`private-source-id`。
 > **operator Workspace correction**: Office 不是孤立工具或多内核拼盘；家里只维护一条 Office 主线，把它嵌入现有浏览器 Workspace。人和具名猫都是同一实时内容模型里的第一等 writer，不能让猫离线改旧文件或借用人的光标、身份冒充共同编辑。来源：`private-source-id`、`private-source-id`。
 > **operator plugin choice**: Office 是用户可选择安装/启用的 provider plugin，不是 core 默认重依赖；GenOffice 是第一个真实 admission candidate。第一轮只开 DOCX vertical slice，验证通过后 XLSX/PPTX/PDF 才在同一插件内逐项开放。来源：`private-source-id`。
+
+> **F309 统筹归属（2026-10-27）**：You 将 `[thread-id]` 改名为 F309「指挥」，明确托付 Astra 今后统筹整个 F309。直接来源：`[thread-id]#private-source-id`；持久托付：`task:work:private-source-id`。本线程负责已接受范围、路线顺序、执行分工、跨线程依赖、状态同步与最终用户交付。具体实现、独立审查和内容写入仍沿各原 Task、执行线程与内容 owner；新 Phase、愿景变更及 Feature 结项继续由 You 决定。原 Task909/414、GenOffice 任务和历史证据不迁移、不重建。
 
 Architecture cell: `collaborative-content-plane`
 
@@ -92,7 +107,7 @@ F309 把这条协作关系做成公共 plane，同时守住两条边界：不自
 ## Vision / 终态远景
 
 F309 的终态不是“聊天旁边多几个可看的附件”，也不是把所有媒介塞进一个新的万能编辑器。它要让
-文档、表格、图片、视频、画布等内容都成为人和猫可以**共同看见、共同指向、共同修改、共同裁决**
+文档、表格、图片、视频、画布、网页与交互作品等产物都成为人和猫可以**共同看见、共同指向、共同修改、共同裁决**
 的活内容：
 
 1. **原生地编辑**：用户在内容 owner 提供的真实编辑器里直接编辑，不需要把正文复制回聊天框。
@@ -123,6 +138,10 @@ CAS、可见 attribution、owner receipt 与 undo，且用户可随时收回权�
 
 ## Current State / 现状基线
 
+下列5603/5628及5667/5669段保留各自验收/接收时状态；其中正式runtime待加载的描述不覆盖上述当前g12加载事实。
+
+以下5603前序过程快照按发生时状态保留；其中OPEN/待review/待Alpha不覆盖上述当前结论。
+
 | 证据 | 已成立 | 尚未成立 |
 |---|---|---|
 | [F307](F307-composable-workbench.md) | application-level working set、typed surface、tab/split/restore owner 已冻结 | 不解释内容选区、批注、patch 或版本重定位 |
@@ -137,6 +156,16 @@ anchor。结论：F309 不是 F307/F290/F063/F138 的 Phase 或 adapter 子任�
 独立 contract plane。
 
 ## Product and Architecture Boundary
+
+### 产物、目录、宿主与内容实现
+
+| 关注点 | 负责方与本 Feature 的关系 |
+|---|---|
+| 找到产物、列出当前对话或全部作品 | F232 负责目录、筛选与打开投影；内容的稳定身份和版本仍由内容 owner 提供。 |
+| 围绕产物讨论、批注、提修改、审阅和处理版本变化 | F309 提供跨内容类型的协作契约与体验，既包括现有图片/视频审阅、文本修改回流，也包括仍开放的共同编辑目标。 |
+| 正文、媒体字节、真实编辑器与版本写入 | 各内容 owner 与成熟引擎负责。Office 插件只是文档接入支线，视频引擎是视频接入支线，不替代 F309 的产品总定位。 |
+| 页面和作品显示在哪里、怎样返回、操作是否易懂 | F307 承载工作面与恢复，F322 统筹 v2 UI/UX；不另造内容或版本真相。 |
+| 网页与可运行作品持续迭代 | 已有 `html_widget` 展示与产物目录基础；社区 [#1621](https://github.com/zts212653/clowder-ai/issues/1621) 提出的稳定句柄、显式新版、重启读回与旧版回看仍待内容 owner 接入收敛。参见 [F232 OQ-B4](F232-thread-artifacts-panel.md#open-questions)，不因改描述接纳独立 `artifact:` 身份/版本库或扩大分享权限。 |
 
 ### F309 拥有
 
@@ -452,13 +481,13 @@ Phase R 的具名猫入口按上述授权登记为 `cat_cafe_prepare_artifact_re
 `private-source-id`（布局及全部入口）、`private-source-id`（Phase、计划、Fable、自治与父线程验收）；
 沿用 CVO243/096 的修改回传与普通入口目标。本阶段由 Astra 在上述主线程负责产品结果，不新立平行内容平台。
 
-**2026-09-30 图片默认更正（父线程规范同步；UTC 10-01）。** 撤回此前把“和 ChatGPT 一个体验”解释为默认隐藏聊天的裁决。父 Astra 已读 operator `[thread-id]#private-source-id`：发送后仍应看见 Chat 和进度；`#private-source-id` 肯定“聊天留在旁边”修正稿外观后继续开放讨论过程展示，不是逐条批准。当前图片目标统一为下述聊天在左、作品在右，依据 [DESIGN 作品模式](../../DESIGN.md#作品模式)（PR4965，merge `fffefd7b058e7415cb009cdaac0a44614d5cc813`）及 F307 owner 合同 `[thread-id]#private-source-id`。本次由原 CVO894/904/517 所托付的父产品 owner 同步正文、计划和 AC-U2/U10/U13；docs review 不新增实施授权，不补签产品验收。历史 source863 的解读见 Timeline，不再作为隐藏 Chat 的现行依据。
+**2026-09-30 图片默认更正（历史同步；默认入口已由10-15 CVO539取代）。** 撤回此前把“和 ChatGPT 一个体验”解释为默认隐藏聊天的裁决。父 Astra 已读 operator `[thread-id]#private-source-id`：发送后仍应看见 Chat 和进度；`#private-source-id` 肯定“聊天留在旁边”修正稿外观后继续开放讨论过程展示，不是逐条批准。当时将图片目标统一为聊天在左、作品在右，依据 [DESIGN 作品模式](../../DESIGN.md#作品模式)（PR4965，merge `fffefd7b058e7415cb009cdaac0a44614d5cc813`）及 F307 owner 合同 `[thread-id]#private-source-id`。本次由原 CVO894/904/517 所托付的父产品 owner 同步正文、计划和 AC-U2/U10/U13；docs review 不新增实施授权，不补签产品验收。历史 source863 的解读见 Timeline，不再作为隐藏 Chat 的现行依据。
 
-**终态。** 用户从文件树、Home 搜索、产物列表/详情、Schedule、Needs Me、已发布聊天附件/媒体卡，以及普查发现的同类入口打开内容，进入现有 F307 中的同一内容协作面。新版桌面图片由用户主动打开进入作品模式：同一 Chat 在左、同一作品在右，默认约 30/70、可拖动并尊重用户调整的宽度。Host 展示开关不因开启就自动进场；关闭或退出恢复原 scene 与经典比例。新消息、猫交回新版和后台恢复不自动抢布局。返回保留同一作品、草稿、选中点、讨论和原入口位置；其他媒介不据此自动重定打开规则。390px 沿原单栏可用性合同，不强塞桌面三栏，也不将桌面稿冒充新的手机设计。
+**终态（默认媒体入口按2026-10-15 CVO539）。** 用户从文件树、Home、产物、Schedule、Needs Me及聊天附件打开内容，复用原内容owner、授权、版本与协作会话。聊天、作品列表及首页的图片/视频主动打开为Chat上方正中悬浮大窗：原聊天仍挂载，下面承接同一ChatInput和草稿，直接圈选/画笔或选段/圈帧并发到这条对话，✕/Esc回原聊天位置。只有显式「在 Workspace 打开」才进入原F307并排工作区，原30/70可调、宽度偏好和精确返回合同继续用于该显式模式。文件树/代码/文档原入口不据此重定；新消息、新版和后台恢复不抢布局。390px沿原单栏可用性与同草稿合同，独立实看。539是入口及可看稿确认，不是实现或整Phase验收。
 
 **共同体验与真实归属。** 同类媒体共享完整查看/标注/评论/保存/讨论/修改交互及状态转换，入口不再选择第二个编辑器。F307 继续只管布局、打开和返回；F309 只管协作会话、锚点、讨论及修改意图；原内容 owner 继续管字节、版本、授权与 mutation receipt；F232/F310 只提供发布、任务或提醒上下文。旧 Task/round 与普通文件不强行合成一个数据库对象，也不把 Task 字段改成到处可选的通用协议。
 
-**作品查看与专注编辑（CVO446/517，2026-09-26确认；图片路径按上述更正更新）。** 图片主路径是“主动点图→聊天与作品并排→圈选/表达或精细操作→在旁边看到回复与真实进度→审阅新版→回到原聊天位置”，不再先经过小右栏并多按一次放大。其他媒介沿原查看与放大路径。这是Phase U内AC-U2/U4的体验收口，AC-U10–U14继续逐项验收，不另立Phase。原依据：同thread operator `private-source-id` 两图，Opus55独立意见453、Astra收敛458/459、Opus55确认460，以及operator `private-source-id` 的落盘、实施、审查、合入及父线程验收授权。
+**作品查看与专注编辑（CVO446/517历史工作单元，默认入口由539更正）。** 当前图片/视频主路径为“主动点作品→Chat上方悬浮大窗→就地批注并通过原ChatInput表达→原聊天中具名回复与真实进度→原候选决定→精确返回”；显式选Workspace才并排，文档等原入口保留。原CVO446/517的权限、保存、可读性和父侧验收责任继续，AC-U10–U14逐项验收，不因新确认关闭。
 
 - **并排时聊天持续可见。** 同一 `ThreadChatRuntimeProvider`、`ChatContainer`、`F307ExperienceWorkbench` 和 owner surface DOM 重排，不新增 provider/socket/history，不用会隐藏 Chat 的 `mainAreaAttention` 实现作品模式。F307/F322 持有展示与返回接缝，F309 不接管 Host 布局；通用返回不能借用 Task 专属 `returnTargetRef`，Client 状态沿 owner-scoped 引用恢复。文字选择继续原 quote→聊天链；新消息、恢复、版本变化不改变当前姿态。
 - **图片获得充足空间。** 顶部保留返回、作品/版本、缩放和下载；图片默认整张看全且不超过原尺寸，提供100%、缩放、平移及长图滚动。不能因并排把字缩得不可读；北极星稿的50%切换阈值仍待实测，不作验收依据。返回保留精确版本、视图、选区、未提交编辑及原聊天位置；未保存只提示、不自动发布或丢弃。其他媒介保留原显式放大入口，390px沿原单栏宿主。
@@ -466,8 +495,6 @@ Phase R 的具名猫入口按上述授权登记为 `cat_cafe_prepare_artifact_re
 - **操作与结果对应。** 作品模式复用同一 Chat 输入框和一个发送，作品工具就近、范围为当前选区或整图，目标猫/执行位置可见且沿原任务关系。猫结合原话、圈选和上下文理解意图：修改语境下指出问题或期望结果即可承接，不要求补“请开工”或再按修改按钮；纯讨论就回答，确有歧义才澄清，不按问句形式分类。发送后原话与可核对的范围引用在同一聊天中可见，具名猫回复、真实进度和取消可达；引用/截图展示不是另一套媒体 ledger。能取消不代替开工依据；保存编辑草稿仍消费原 operation receipt，不把保存本身推断为托付。
 - **两组结尾不混用。** Task作品的“通过此版本 / 要求修改”只归还该轮审阅结论，不等于整个Task完成，不写文件；workspace文件的“采用并写回 / 不采用”沿原显式接受与SHA-CAS，只有 `applied` 才显示已写回，`conflict` / `unknown` 分别照实呈现并保留结果。发送修改要求不等于采用新版。
 - **成功才结束这次编辑。** 只清理回执确认的本次提交；失败/unknown保留并核同一operation，迟到成功不覆盖后来输入或独立评论草稿。退出大画布不等于保存或取消。移除整块画布的原生长悬停提示，说明放在不遮挡操作的状态提示/帮助中，保留无障碍命名。
-
-**仍未冻结。** 过程展示三层、“召回 N”、收起聊天整窗看作品仍为讨论，不因1331或PR4965批准而生效；K1渐变名牌无气泡已选，但暗色稿未完成。聊天并排时的新版对比/决定画面仍待补；50%不是验收阈值，视频素材库也不借图片规范同步宣称交付。删除“只保存、不叫猫”入口是设计推论，不是operator逐字授权删除已有草稿/保存能力；需以真实发送与保存合同验证，不扩大执行权限。
 
 **身份。** 经 owner 证明为同一内容、精确版本和协作上下文的多个入口必须解析到同一协作会话与账本；来源页面只影响返回。不同发布副本、权限域或独立审阅轮次即使 bytes 相同，也不能按 URL、名称或 hash 猜合并。既有对象通过显式、可验证映射复用；一对多时说明上下文选择，不能静默取首项。旧链接、历史版本、刷新与重新打开都必须经过同一解析规则。
 
@@ -523,6 +550,176 @@ merge-base 为 `40fa28ab2f609e4f36dc654817c5c5e9938a6337`）。当前 `Workspace
 `NamedCatContentService` 都是 DOCX + 单一 `ownerUserId` 边界；F063 的本地 worktree Markdown SHA CAS、
 F232 read projection 与 F290 dev localStorage fixture 均不满足跨 Human authority/revocation。因此 W4
 依赖被记录为 Phase B 的真实缺口，而不是把现有局部 primitive 包装成“已可用”。
+
+#### AC-B6 bounded delivery packet（2026-10-12 owner-ready；2026-10-16 已有界准入）
+
+**当前事实与责任。** 2026-10-12 在 `main@7479f66f46` 重核时，F309 没有 AC-B6 实施 Task；唯一
+`doing` Task `private-source-id` 仍是 GenOffice AC-A4 闭环，PR #5456 的个人
+Studio/同一 Chat 作品路径也不构成双 Human Markdown backend contract。2026-10-16，operator 在 F290
+指挥线程明确要求可以新建 thread 开工该线，随后批准的执行现场 `[thread-id]` / source
+`private-source-id` 将必要 AC-B6 增量纳入一个 bounded 共同作品包，允许先于完整
+AC-A4 推进，但不开放 Phase B 其余范围。实施作者为 `@codex61-sol`，分支
+`feat/f290-shared-artifacts`；Feature accountable owner 仍为 `@codex-sol`。F290 Task038 的 consumer
+集成仍归其现 owner，不得把 consumer 责任倒灌为 F290 自建 canonical bytes/ACL。
+
+**复用的现有端口。** 本切片不是新建共享文档平台：
+
+- `packages/api/src/domains/video-studio/content-owner/service.ts#ProjectContentOwnerService` 已有 generic bytes、
+  opaque owner revision、`importContent/load/settle`、`expectedOwnerRevision` CAS 与 immutable settlement
+  receipt；它已经接受 `text/markdown`，无需新 bytes engine。新增的是不可变 Collective Artifact scope、
+  action authority context 与对外 adapter；原始 `load/settle` 继续是内部 port，不能直接成为浏览器 API。
+- `WorkspaceContentReviewService` 已有精确 text-range annotation；`modification/text` 与
+  `WorkspaceWritebackService` 已有 version-bound proposal/candidate/disposition/writeback 模式。复用其 CAS、
+  operation replay 与 exact-text edit 算法，不整条搬用绑定私有 Task/F063/worktree token、并持久化完整文本
+  snapshot 的现有路径。Collective 仍只使用一个 F309 annotation/proposal ledger。
+- `EditorSessionService` 已有 actor-bound bearer rotation/restart 模式；但其 record、authority 与 routes 都绑定
+  Office provider binding 和本机 `ownerUserId`。Markdown 必须使用同一生命周期原则的 owner session，不能
+  伪造 Office binding。F307 只消费 typed `{contentRef, sessionRef}` surface/return descriptor。
+- F290 现有 authenticated Human session、`requireMembership`、membership lifecycle/revocation 与 Artifact
+  lineage 是 domain constraint/source；它不成为内容 owner，也不保存正文、preview 或 change payload。
+
+**唯一必要 delta。** 首个可消费版本必须同时交付：
+
+1. F290 → content owner 的 action-specific、可验证 domain constraint port，至少绑定
+   `{serviceInstanceId, collectiveId, artifactRef/contentRef, humanId, action, membershipRevision,
+   revocationEpoch, expiresAt, decisionRef}`；每次 read/projection/mutation 都 fresh revalidate，domain deny、
+   expiry 或 epoch drift 必须 fail closed，最终 allow 仍由 content owner 签发 `AuthorizationDecisionRefV1`。
+2. owner manifest 把 stable Collective Artifact scope 与 `contentRef` 绑定，并把 authority decision ref、
+   disposition id 与 request digest 纳入 operation context/fingerprint/receipt；scope 在后续 `settle` 不可更换。
+3. shared review identity 的单一接缝是 `prepareCanonicalWorkspaceReview`、`workspaceReviewIdentity`、
+   `WorkspaceContentReviewStore#getByContent/create` 与 `WorkspaceContentReviewService#requireOwnerReview`。
+   新 Collective row 使用 stable collaboration scope key，同一 scope 的两位 Human 进入同一 ledger；legacy
+   private-owner adapter 保持原语义。禁止用 synthetic `ownerUserId` 假装 collaboration scope，或只在 route
+   放宽检查而让 retained/replay/receipt 绕过 fresh auth。
+4. proposal 只持 base owner revision/digest、exact edits、actor、state 与 receipt refs；preview 从 fresh-authorized
+   owner revision 临时 materialize，不在 F290 或 F309 ledger 保留 canonical Markdown/preview bytes。apply 同时
+   经过 proposal-state/revision CAS 和 owner-version CAS。
+5. owner-issued `sessionRef` 由 F307 mount；F290 只持 `contentRef`、当前 owner revision、Artifact lineage 与
+   result target。撤权必须让既有 session 立即失效，并把 revocation/authority checkpoint 持久化到重启后重判。
+
+**F309 owner veto。** 每个 read/history/replay/preview 必须先取得该 Human、该 Artifact、该 action 的 fresh
+domain allow，再由 content owner 对 immutable scope/content state 作最终 allow；任一 deny 优先。annotation/propose
+在 ledger CAS 前重判，apply 则固定为：fresh apply allow → proposal disposition CAS 选出唯一 winner → effect
+边界再次核 authority → `owner.settle(expectedOwnerRevision)` → exact receipt 后才记 accepted。授权失败、scope
+drift 或 owner CAS conflict 都不能产生 accepted truth；同 disposition 重放只返回同一 receipt，不同 payload
+复用 id 必须拒绝。事件驱动 invalidation 可加速撤权，但安全性必须来自每次操作的 owner-authority recheck，
+不能依赖旧 allow cache 或“已通知 session”。
+
+**跨 Café transport 与 custody 裁决（2026-10-16）。** 本 bounded slice 采用现有 Connector 同步连接上的
+专用 owner request/response relay，保持 canonical bytes/ledger 在现有 content owner；本轮不把
+`ProjectContentOwnerService` + F309 kernel 抽入 Collective Service 部署。后者会迁移 authority/data owner、
+引入 store/package extraction 与恢复迁移，超出“补必要接线”的准入范围；只有真实 relay 证据证明无法满足
+可达性、恢复或成本时，才以新的 owner-migration 决策重新评估。
+
+relay 必须是 bounded、ephemeral owner RPC，不得复用会持久化正文的 Channel/event outbox：Service 只保存
+Artifact directory、domain policy、owner revision/digest/receipt lineage 与 content-free request state；Markdown、
+annotation body、proposal edits、preview/candidate bytes 只在受限内存流中经过，TTL/size 有界，重启或结果丢失
+返回 unavailable，由 caller 以同 operation/disposition id 重试。Human Client 不能自报 actor、scope 或 owner
+endpoint；Service 由已认证 session 签 domain constraint 并按 artifact 内部路由到 custodian Connector，owner
+Connector 在 effect 前用 endpoint credential fresh validate，F309 adapter 再核 manifest scope 并签最终 allow。
+原始 `owner.load/settle` 无 HTTP final-authority surface；新 route 只暴露上述 adapter。原生 Markdown surface
+使用自己的 owner session，不套 `OfficeProviderBinding` 或 GenOffice renderer。
+
+access 与 custody 是两套状态：撤销/退出某一普通成员只推进该成员的 access revision，不改变其他有权成员、
+Artifact identity 或 lineage。`publishedByHumanId` 是 provenance；当前 bytes custodian 另由 connection/endpoint +
+custody revision 表示，Artifact id 不得从 `ownerConnectionId` 派生，owner endpoint 坐标也不投影给 Human Client。
+custodian connection 暂时不可达时，Artifact 仍在目录中且其他成员权限仍成立，但内容操作显式
+`owner_unavailable`；不能包装成全员 `access_denied` 或删除作品。当前 custodian Human 主动退出前必须先完成
+可验证 custody handoff，否则返回 `artifact_custody_handoff_required`；意外 revoke 则冻结新 effect、使旧
+constraint/session 失效，并等待同 owner continuity rebind 或 steward 发起的显式 handoff。handoff CAS 推进
+custody/access epoch，旧 endpoint、旧 domain decision 与旧 owner session 永远不能恢复写权限。
+
+**可验证 per-Artifact custody transfer（2026-10-16 追加裁决）。** 这仍属于 AC-B6 已准入的必要
+handoff 接线，不是新的 Café 迁移产品或 kernel extraction。当前候选实现
+`packages/collective-service/src/artifact-custody.ts#accept` 只核 destination credential、handoffRef 与调用方提交的
+最新 revision/digest/receipt/ownerScopeRef 后就做 custody CAS；空目标 Café 也能照抄这些坐标，因此不能把该
+attestation 称为“可验证完整交接”。只要产品暴露成功的 `accept`，就必须先完成下面的 owner-to-owner transfer；
+若本切片不实现 transfer，则应禁用成功 accept，并继续用 `artifact_custody_handoff_required` 阻止原 custodian
+退出，不能保留一个会制造空 owner 的半成品接口。
+
+唯一 Connector→owner seam 收敛在现有 `CollectiveMarkdownOwner` composition root，新增一个 typed
+`CollectiveArtifactCustodyTransferPort`（可由同一 owner port 组合暴露）；Connector 不分别调用 content-owner
+文件 store、Workspace review SQLite 与 modification SQLite。该 port 在一个 stable Collective scope 上串行化
+`prepareSource/readPage/stageTarget/attestReady/finalize`，内部才协调以下三块现有真相：
+
+- `ProjectContentOwnerService` 的完整 owner manifest、全部 revision blobs、operations 与 settlement receipts；
+- `WorkspaceContentReviewStore` 中该 collaboration scope 的 review aggregate、operation receipts 与 retained
+  snapshots；
+- `ArtifactReviewStore` 中仅属于该 scope 的 Collective request、proposal 与 accepted disposition rows。
+
+这是 typed scoped snapshot，不是 raw DB dump，也不是重放普通 `importContent/settle/annotate` 来“重建”历史；
+后者会改时间、authority context 或 receipt 语义。bundle 绝不包含 F063 私有 text snapshot、worktree/token、
+Task、私人 review 或其他 scope。`reviewId/requestId/proposalRef/dispositionId/operationId/receiptRef` 与全部历史
+Human/Cat actor 保持原值；`publishedByHumanId` 永远不变。唯一允许重绑的是 owner-local tenancy 字段：目标端用
+自己真实 `ownerUserId` 承载，并在 import 时同步改写相应本地索引/intent 字段；不得造 synthetic user，也不得
+据此重算 stable Collective identities。任何 identity 实际依赖旧 local owner、目标已有不等价 row/contentRef，
+或 schema/引用链无法完整验证，都必须在 ready 前拒绝。
+
+Service 持久化的 content-free 状态机为
+`offered → source_prepared → target_ready → committed`，pre-commit 可显式 `cancelled`；至少绑定
+`transferId/handoffRef`、source/target connection、expected custody revision、完整 manifest digest、page count/
+total bytes、source prepared ref、target ready ref、目标 ownerScopeRef 与最新 owner tuple。source owner 先在
+per-scope mutex 下等现有操作退出，持久化 transfer fence 并冻结所有新 effect，再产出 manifest。普通 fresh
+read 可继续到 CAS；任何会写 owner/ledger 的路径都必须被 fence 拒绝——包括当前借 `read` action 进入
+`prepareDelegatedRequest` 的 agent 路径。这里的 quiescence 是 **owner-effect quiescence**：`source_prepared`
+只等待已经进入该 scope queue/mutex 的 owner/ledger 调用退出，不要求所有 Café 的 `InvocationQueue`、
+`InvocationRegistry` 或仍在推理的 Cat 全部静默。后者是分布式 compute plane，source owner 没有封闭世界可以
+完整枚举；“probe 后再禁止新启动”还需要新的全网 admission barrier，既不能加强 canonical effect 的线性化
+证明，也会让离线 Café 阻塞 handoff，因此不纳入本 AC-B6。
+
+freeze 前已经 commit 的 `proposal_ready` 连同原 proposal/receipt 正常转移；同 operation id 的迟到重放只可
+返回这份既有结果，不算新 effect。尚无 durable proposal 的 `requested/running` request 不证明远端 execution
+仍活着，也不阻塞 transfer；source transfer preparation 在 snapshot 前把它以同 `transferId`、原 custody epoch
+终态化为可追溯 `unavailable/stale`，让原请求处诚实显示需要在新 owner 下重试。远端旧 invocation 即使继续
+计算或排队启动，任何迟到的新 proposal/ledger write 都必须被 source fence 或新 custody epoch 拒绝。best-effort
+queue cancellation 只能用于节省算力/降低迟到噪音，不能成为安全前提。只有 pending acceptance、已经进入
+owner effect 但尚未退出的调用，或 accepted disposition 与 owner receipt 未精确对齐时，才按原 operation id
+恢复/结算；仍不一致就拒绝 transfer，不导出模棱两可状态。
+
+payload 通过同一 Connector 连接上的专用 custody relay 分页短命传输；单页沿现有 64 KiB owner relay 上限，
+总页数/总字节另设显式 admitted cap。超限、丢页或 digest mismatch 必须整项失败且 source 仍持 custody，不得
+截断历史。Service 可持 manifest/page digests 等 content-free coordinates，但不得落任何 page bytes；source 与
+target owner 各自持 TTL=0 transfer journal 和可恢复 staging。目标 owner 逐项核 schema、完整 revision chain、
+blob digest、receipt/operation fingerprint 与 ledger referential integrity，全部通过后才签
+`target_ready(manifestDigest, ownerScopeRef)`。现有 `accept` 不再信调用方自报 owner tuple/ownerScopeRef，而只能
+消费同一 transfer 的 source-prepared + target-ready receipts。
+
+Service 对上述 exact receipts 做 custody/access epoch CAS 是唯一线性化点。CAS 前目标 staging 不可读写，取消
+后 source 读到 canonical cancelled receipt 才能解冻；同 `transferId` 重试缺页、重启和丢响应。CAS 后目标按
+transfer journal 幂等导入 canonical stores、最后发布 activation sentinel；任何中间崩溃只表现为
+`owner_unavailable`，不得暴露半份 ledger。source 观察到 committed 后永久 retire 该 generation，旧数据可保留
+只读待显式 GC，但旧 endpoint 永不再产生 effect。CAS 响应丢失也不得回滚给 source；双方从 Service 的
+committed truth 收敛，保证不会双写。
+
+最小 contract evidence 必须包含：空目标仅抄坐标无法 accept；真实目标转入全部 versions/receipts、批注、
+proposal 与 disposition identities 后可继续产生唯一下一 revision；source/target/Service 在每个 phase 重启或
+丢页均以同 transferId 恢复；pre-commit cancel 保留原 custodian，post-commit 旧 constraint/session 永久拒绝；
+stale tuple、pending-effect mismatch、目标碰撞与 bundle 超限全部 fail closed；Service 持久态无 content bytes，
+bundle 无 private snapshot/worktree/token；另需证明 source freeze 时远端 invocation/queued start 无论是否仍在
+运行，都不能新增 owner effect，未成 proposal 的原 request 投影为 `unavailable/stale`，而 pre-freeze 已 commit
+proposal 的 exact replay 仍返回同一既有 receipt。该证据不得用伪造 journal `execution` 字段或单次 registry
+probe 代替。
+
+**完整验收切片。** 导入一份真实 sealed Markdown 为 v1；Human A 与 B 以两个独立认证 session 读取同一
+digest/revision。A 建 exact-quote annotation 与 version-bound proposal，B 在 fresh allow 下接受；系统以
+同一 disposition id 完成两级 CAS，只生成一个 v2 与一份可重放 receipt。duplicate/stale accept 不得二次
+写入，过期 proposal 必须 conflict/rebase。随后 revoke A 的 membership/content access：A 的既有 session、
+replayed read、preview 与任意 mutation 当场及进程重启后均拒绝，B 仍可按当前权限读取；证据同时证明
+F307 只 mount、F290 持久态无 canonical bytes/preview、F309 ledger 无 Markdown bytes。owner unavailable、
+expired constraint、stale owner revision 也必须有确定性负例。
+
+**准入处置。** 10-12 的“尚无合法 start source”已被 10-16 的人类来源与批准子现场取代；现行
+Review Gate 对 Phase B 其余 AC 仍不变。本次 authority scope 仅为
+`feature:F309 / Phase B / AC-B6 bounded consumer slice`，不签 AC-B6 完成、不启用 production、也不迁移
+F309 owner。原 F290 Task038 `private-source-id` rev18 已把批准 source、执行子现场与
+`@codex61-sol` 单 writer 写进 canonical progress；子现场不另造镜像 Task。首个 Service domain checkpoint
+`aebb3dd407e8ac6dc75a3997cdb897e89b171e8b` 只交 Artifact directory/constraint/revoke+restart，尚不代表
+API owner、F309 ledger、surface 或完整旅程交付。后续 committed checkpoint
+`3e979b2feb` 已接通双人读取、选区批注、具名 Cat proposal 与 Human adoption，但当前 branch head
+`c72679d496` 的 custody `accept` 仍缺上述 owner transfer/ready proof，因此不可声称主动退出闭环已交付。当前
+open PR census 未发现 content-owner/workspace-review/
+editor-session/modification 后端路径的在飞 writer；#5628 只改 MessageAnnotation marker 与 browser policy，
+不与本包后端写入面重叠。
 
 ### Phase C: Two-media Collaboration Lifecycle Completion
 
@@ -581,9 +778,9 @@ remap/rebase/conflict/orphan 旅程后再 KEEP。
 ### Phase U 文本旅程：选区批注进入同一聊天引用链
 
 - **Scope unit:** 一个普通Markdown/代码文件的真实选区与同一quote attachment；来源为child CVO095/098四图，父Astra按CVO904确认。
-- **Flow:** 从tree/Home/聊天文件链接进入共同landing → 选文并在原就地卡填写评论 → Enter/加入当前聊天 → 输入框出现可展开、移除的annotation卡片 → 人明确发送 → 猫收到同一选文/评论/workspace_file来源。加入阶段不发送、不建Task、不在F309另写新文本批注；原文件编辑和明确请猫修改→diff→接受写回继续可用。
+- **Flow:** 从文件树、Home搜索、作品或聊天文件链接进入同一文件的可读显示 → 在该页选文并在原就地卡填写评论 → Enter/加入当前聊天 → 输入框出现可展开、移除的annotation卡片，文件旁出现可操作的编号 → 点击编号重开原批注卡、修改说明或移除，并同步同一输入框草稿 → 人明确发送 → 猫收到最终选文/评论/workspace_file来源。同一个md不再另开“批注页”；“请猫修改”“返回来源”并进同页顶栏，原文件编辑、听读和明确请猫修改→diff→接受写回继续可用。加入与改批注阶段不发送、不建Task、不在F309另写新文本批注。
 - **Compatibility:** 旧F309文本讨论继续读/回复；旧草稿与未知提交先恢复/核receipt，不静默迁移。图片/视频与DOCX不因此裁掉既有能力。
-- **Evidence required:** 真实宿主入口、陌生输入与IME/换行、390px、发送前后结构化载荷/来源回跳及旧草稿兼容；共享组件单测不证明已交付。当前为确认合同，非PASS。
+- **Evidence required:** 真实宿主入口、陌生输入与IME/换行、390px、文件侧编号重开编辑/移除与同一聊天草稿同步、发送前后结构化载荷/来源回跳及旧草稿兼容；共享组件单测不证明已交付。当前为确认合同，非PASS。
 
 ### Phase U 作品体验旅程：聊天与图片并排、发送可见与原位返回
 
@@ -636,16 +833,22 @@ remap/rebase/conflict/orphan 旅程后再 KEEP。
 | R22 | 完整不可变图片/mp4 审阅先行交付，review round 与原 Task/Artifact 同源回流，保留共同编辑原 Gate | AC-R1, AC-R2, AC-R3, AC-R4, AC-R5, AC-R6 | 两媒介真实完整旅程 + 并发/恢复/权限反例 + Alpha | [x] |
 | R23 | 作品优先、标注与评论各自清晰、图上直接接续讨论，并用可信内容和真实壳验证体验 | AC-R7, AC-R8, AC-R9, AC-R10, AC-R11, AC-R12 | operator 四图/243 → #4489 → Sonnet335/594真实Alpha原生输入、原Task版本回流及历史只读 | [x] |
 | R24 | F290 W4 复用 F309/content-owner 边界：两个认证 Human 共享 canonical Markdown，F290 不保存 bytes，撤权立即失效 | AC-B6 | two-principal read/annotate/propose/apply/version/revoke + restart evidence | [ ] |
-| R25 | 所有日常内容入口进入共同协作现场，桌面图片主动打开时聊天与作品并排，真实身份/状态/修改回传不分叉 | AC-U1–U8 | 同作品跨入口真实读写/改图回传、原坏页复验、主线程合入后实看 | [ ] |
+| R25 | 所有日常内容入口复用共同内容authority；图片/视频默认悬浮于原Chat上方，Workspace仅显式进入，真实身份/状态/修改回传不分叉 | AC-U1–U8 | 同作品跨入口真实读写/改图回传、原坏页复验、主线程合入后实看 | [ ] |
 | R26 | 独立执行线程技术自治，用户结果变更讨论，合入后回流由父线程审视 | AC-U9 | Fable 校准、获准 child、实质产品取舍及真实合入回流/父线程判断 | [ ] |
-| R27 | 聊天与图片并排看与改；字可读、T结束明确，一个发送按意图承接且过程可见，编辑/讨论/修改各有真实结果 | AC-U10–U14 | CVO446原坏页及949修正后默认重放、同Chat/surface往返、保存并发/权限反例、独立审查+父Astra合入后Alpha | [ ] |
+| R27 | CVO539确认的Chat上方图片/视频悬浮查看与批注，Workspace仅显式进入；字可读、T结束明确，同一输入与真实结果 | AC-U10–U14 | 539确认稿、原坏页与同Chat往返、保存并发/权限反例、独立审查及原父侧合后Alpha；不以历史双列样张代签默认入口 | [ ] |
 | R28 | Studio K1：具名猫的聊天消息可携带真实文件选区引用；文档记号只投影可访问的原消息，不重开普通文本批注账 | AC-U6, AC-U8 | 猫身份发送/持久化/模型消费/回原消息全链；撤权不泄漏；无新增文本 annotation 写入 | [ ] |
 | R29 | Studio K2：从真实人的已发送消息承接修改，沿原话、引用、目标与现有责任；同一发送至多一个请求，撤回挡住迟到接手 | AC-U6, AC-U8 | 同消息重复/双猫竞争只建一次；撤回先赢则无开工；接手绑定真实执行，接受前原文件不变 | [ ] |
 | R30 | 文件引用绑定 F063 提供的确切源版本；旧引用缺版本或源漂移时诚实显示，不按旧行号/DOM 偏移猜新位置 | AC-U6, AC-U8 | F063 ContextAttachment schema、消息/草稿/模型消费兼容；同路径改内容、重复选文、旧无版本引用反例 | [ ] |
 | R31 | 同一文件同一源版本的一次发送可携带多处独立选区，合为一个修改请求，原话一份、各处稳定编号 | AC-U6, AC-U8 | 两处选区一次承接/一次候选返回/逐处核对；不合大框、不拆成多次提交；旧单选区可读 | [ ] |
 | R32 | 采用、不采用、写回冲突或结果未知的真实记录投影进原聊天，并可由原负责猫消费；候选可从聊天回到对应 diff | AC-U6, AC-U8 | 真实 accept/reject/CAS conflict/unknown → 同 request/candidate/receipt 回执；恢复不重复、不冒充人、不自动重写 | [ ] |
+| R33 | 文档旁待发送批注编号与聊天红点一样可重开编辑、移除，并同步原聊天草稿 | AC-U15 | CVO444实拍；编号点击/键盘、单条及同段多条、原附件身份、修改/移除后发送载荷与恢复 | [ ] |
+| R34 | 同一 Markdown 跨文件树/搜索/作品为同一可读页面并能就地批注；Workspace 图片卡先看大图，唯一批注进入原作品模式 | AC-U16, AC-U15 | CVO903定稿；三入口同源显示/编号编辑/一次发送/持久恢复，图片预览→精确版本→原Chat→原处返回 | [ ] |
 
 ### Studio K1/K2 后端补齐登记（2026-10-02）
+
+Architecture cell: `collaborative-content-plane` + `hub-action-surface`
+Map delta: updated — `collaborative-content-plane` records message takeover and immutable chat-receipt owners; `hub-action-surface` keeps the existing revision-bound ContextAttachment transport.
+Why: F309 derives request identity, Task continuation and result projection without taking F063 bytes/writeback, MessageStore source identity, F310 Task truth or Queue delivery ownership; the Hub transport gains no second attachment store or write grant.
 
 | 跟踪项 | 已核实的代码基线（main `36bc7f022d`） | 归属与兼容边界 |
 |---|---|---|
@@ -655,9 +858,11 @@ remap/rebase/conflict/orphan 旅程后再 KEEP。
 | R31 | `shared/src/types/content-modification.ts` 的 `intent.selection` 是单个 union；候选 edits 数组不等于请求已支持多选区 | 延续 Studio §0.4 已记录的“一次发送、多处独立、原话一份”；本项限同一文件同一 base，跨文件事务未由此开放 |
 | R32 | `modification/result-service.ts` accept/reject 与 F063 writeback 只返回/持久化结果，未接聊天投递；`text/text-service.ts` 与 `inspection.ts` 已允许猫主动读到 rejection | 缺的是聊天投影与主动送达，不是没有后台回执或猫完全不可读。仅 applied 说已写回，conflict/unknown 保留候选；回执用真实系统来源，不伪造人/猫发言，不把收到结果等同再次修改授权 |
 
-**已沿用的产品边界。** K1 接受“聊天引用 + 文档旁投影”，普通文本遵守 CVO095/098，不重新开放文本 ledger 的新批注。K2 普通工作区文档走修改请求、隔离候选、diff、显式采用后 F063 CAS；`artifact-review.ts` 的 PNG/MP4 round 不扩成文档轮。DOCX 继续 Office provider。接口具体形状、通知策略与任务发布文档边界见下方 OQ-4–6，不能把设计画面当已有能力。
+**已沿用的产品边界。** K1 接受“聊天引用 + 文档旁投影”，普通文本遵守 CVO095/098，不重新开放文本 ledger 的新批注。K2 普通工作区文档走修改请求、隔离候选、diff、显式采用后 F063 CAS；`artifact-review.ts` 的 PNG/MP4 round 不扩成文档轮。DOCX 继续 Office provider。PR #5019 已交付 authenticated takeover、同文件同 base 多选、唯一 request/原 Task、撤回 fencing、Host 回执与有界异常续办，并保留部署前 public carrier 的精确恢复；新 public/whisper carrier 均保持来源 audience 与 Host 身份。该文本路径继续消费 `quote.source=workspace_file`，文本选区仍使用 `workspaceTextAnchorSchema`；#5085 增加独立的 canonical `MediaContextAttachment` 路径，PNG/MP4 选区使用已有媒体 anchor，不能以文本 quote 或展示截图替代媒体身份。
 
-**一并保留的兼容检查。** `.mdx` 可按 Markdown 呈现，但 `workspace-text-policy.ts` 的可修改白名单没有它。后端补齐 R29 时须给出一致、可见的支持范围或不支持结果；本次没有擅自扩大 F063 写入白名单。
+**媒体消息后端的有界交付（Task412）。** 同一次真实 Human 发送保留原话、canonical source/version、0–12 处稳定选区与各处说明，认证猫沿 OQ4 只凭 `sourceMessageId + operationId` 接手。媒体归属由原 owner/Task/round 与 canonical directory 精确确认，重复、双猫和撤回竞争仍只形成一个原子请求；`selectionAnnotations` 返回本请求稳定选区到 opaque annotation 的映射，不按整个 round 的顺序猜 join。真实新版、本轮通过/要求修改和 F063 采用/不采用/conflict/unknown 沿持久 Host system receipt 回原 Human 消息，恢复去重、历史与 whisper/revoke 边界保留。接受前不写原文件，Task 决定不冒充 workspace 写回或整个 Task 完成。完整产品输入、Host 渲染与父线程 Alpha 由 Task414/909 继续验收；K3 Task288 保持完成，未重跑其已结且未变的17项。
+
+**一并保留的兼容检查。** `.mdx` 可按 Markdown 呈现，但 `workspace-text-policy.ts` 的可修改白名单没有它。已合入后端会返回一致、可见的 unsupported 结果，而不是把它误报成 source drift；没有擅自扩大 F063 写入白名单。
 
 ### 覆盖检查
 
@@ -728,7 +933,7 @@ remap/rebase/conflict/orphan 旅程后再 KEEP。
 ### Phase U — Unified Content Experience
 
 - [ ] **AC-U1**：文件树/Home、F232 产物、Schedule、Needs Me、已发布聊天媒体与普查找到的同类入口都走共同打开路径；入口清单每项有真实处理结果，未覆盖项不能被三条样例掩盖。外仓文件树/Home未连接根经一次明确连接后完整继续，已有连接免确认且撤销有效；F232文件/代码不留独立文本页，缺原目录的旧相对路径一次明确选位并持久恢复，唯一同名候选不冒充历史原件。装饰/上传草稿/外部媒体的排除有对象理由。
-- [ ] **AC-U2**：新版桌面图片由用户主动打开进入同一Chat在左/同一作品在右的作品模式，默认约30/70可调，宽度偏好与经典比例分离，退出恢复原scene与经典比例。验证同一Chat runtime/provider/DOM、同一F307/owner surface挂载，不用隐藏Chat的mainAreaAttention，不复制socket/history/草稿；版本、选区、缩放、焦点与滚动连续。后台消息/新版/恢复及仅开启新版开关均不抢布局，返回引用失效诚实回安全位置而非猜投。390px沿原入口/返回合同，其他媒介不因本次同步改默认。
+- [ ] **AC-U2**：新版桌面从聊天、作品列表及首页主动打开图片/视频时，在原Chat上方出现正中悬浮大窗，默认不导航右侧Workspace；✕/Esc按局部编辑优先级回原聊天位置。显式「在 Workspace 打开」才走原F307并排模式，30/70可调、宽度偏好及退出恢复沿其原合同。同一Chat runtime/provider/DOM/草稿持续，不复制socket/history或另建输入owner；媒体沿同一来源/版本/权限，视图、选区、焦点与滚动连续。后台消息/新版/恢复不抢布局，返回引用失效诚实回安全位置。390px独立验证，文件树/文档原默认不因本项改写。依据CVO539，未验收。
 - [ ] **AC-U3**：同一publication/context从产物/聊天/Needs Me/Schedule/深链看到逐字一致的账本，未托付消息媒体无假Task；同F063文件在tree/Home/文件链接间一致。同源但独立发布的自有Task审阅可从消息现场具名选择，选择后与Needs Me进入同一审阅；直接讨论保持独立，不合并对象或扩大权限。文件→快照为可见lineage，原标记只读引用不复制合并；新版不搬旧坐标。多context明确选择，旧ID和独立浏览器恢复保持，不能按同bytes制造同源PASS。
 - [ ] **AC-U4**：PNG 的画笔/形状/文字与点/区域评论在统一画布内自然完成；放置文字、结束编辑、保存、保存中/失败/成功的反馈明确；既有讨论按需打开并回原位置。原875坏页及真实新输入重放通过。
 - [ ] **AC-U5**：普通PNG经显式F138快照/lineage，与原Task产物都能圈选请猫移除、发比例请求、收到真实新版；接受前原文件SHA不变，接受通过binary SHA-CAS回执写回，漂移冲突保留结果。请求前评论/标记的来源历史可回，跨入口结果一致；F063无第二版本库。无法完成即Phase U未完成。
@@ -737,11 +942,13 @@ remap/rebase/conflict/orphan 旅程后再 KEEP。
 - [ ] **AC-U8**：旧链接/草稿/已存评论与标记/版本历史有兼容映射和回归证据；旧/新账本均允许在原授权下追加历史回复，重开仍归原版本，历史编辑/裁决与新版内容不变，撤权后不能回复。单项取消不牵连合流/共享工作，停止整轮须显式动作，旧对象重试不命中新执行；取消及已发生写回分别按真实回执呈现。权限/版本漂移、并发保存与未知提交保留原 owner 约束，新增保存与回流默认 TTL=0。被替代入口不再维护平行完整 UI。
 - [ ] **AC-U9**：Fable方案findings已解决并经非作者核对；child Step1的对象/结果/写回决策包由父Astra确认，再技术自治执行。合入后父Astra亲自完成同publication跨入口和文件→快照→接受写回两条真实旅程并作整体判断；未修问题保持开放，局部PASS/合入不代替完成。
 
-- [ ] **AC-U10**：图片在真实双列宿主可读且Chat持续可见，无需藏起Chat才通过；默认整张看全且不超过原尺寸，100%、缩放和平移可达，真实长截图可滚动读清且末行不被工具/输入区遮挡，50%切换阈值不作PASS依据。拖动比例、原位返回及重开保留同一mounted surface、作品/版本、视图、选区、编辑/评论草稿和原聊天位置；新消息/新版不改变姿态。图上表达及整图修改可用；390px原单栏回归保留。
+- [ ] **AC-U10**：图片在真实悬浮宿主整张看全且字可读，Chat保留在背景、关闭恢复原位置；显式Workspace并排同样可读。100%、缩放/平移及长图滚动可达，末行不被工具/输入区遮挡，50%切换阈值不作PASS依据。原位返回及重开保留作品/版本、视图、选区、编辑/评论草稿和原聊天位置，新消息/新版不改变姿态。圈选/画笔可直接使用，表达复用原ChatInput，390px原单栏回归保留。
 - [ ] **AC-U11**：大画布支持适合窗口/100%/缩放/平移，媒体及所有锚点使用同一变换，缩放后点击/圈选仍落在正确原图或视频呈现帧坐标；新文字与线条按创建时屏幕尺寸保持可读，旧标记不被改写。横图/竖图/高分辨率及长中英文有实际显示证据，不只断言DOM在视口内。
 - [ ] **AC-U12**：T点位后就地输入，完成当前文字后回选择；下一段不带旧文，不连点复制旧字。中文IME确认不误提交，Enter/Esc按局部编辑层处理；未提交文字可改/移，已保存与历史标记不能借此获得新写权。原446及875问题须先失败再通过。
-- [ ] **AC-U13**：图片作品模式只有同一Chat输入框和一个发送，作品工具就近；猫按原话、圈选和上下文判断批注意图，修改语境下指出问题或期望结果即可承接，不要求追加“请开工”或再次按修改按钮，不按问句形式分类。纯讨论不建修改Task，真歧义才澄清；无选区仍可改整图，真实人来源/版本/范围/具名目标/执行位置可核对。发送后原话与范围、具名回复、真实执行进度/取消在同一聊天中可见，不新建媒体讨论账本。Task“通过此版本/要求修改”只归还审阅；workspace“采用并写回/不采用”依applied/conflict/unknown分别显示，发送不隐含写回。保存/草稿/历史权限仍按原receipt，工具与提示不遮挡操作。
+- [ ] **AC-U13**：图片/视频悬浮窗承接原同一ChatInput、同一草稿和一个发送，作品工具就近；猫按原话、圈选和上下文判断批注意图，修改语境下指出问题或期望结果即可承接，不要求追加“请开工”或再次按修改按钮，不按问句形式分类。纯讨论不建修改Task，真歧义才澄清；无选区仍可改整图，真实人来源/版本/范围/具名目标/执行位置可核对。发送后原话与范围、具名回复、真实执行进度/取消在同一聊天中可见，不新建媒体讨论账本。Task“通过此版本/要求修改”只归还审阅；workspace“采用并写回/不采用”依applied/conflict/unknown分别显示，发送不隐含写回。保存/草稿/历史权限仍按原receipt，工具与提示不遮挡操作。
 - [ ] **AC-U14**：保存成功只结束该次确认的编辑；失败/unknown、保存中继续输入、迟到回执、带草稿退出/恢复均保留正确内容，重试不重复提交，不误清独立评论草稿。Sol6完成本工作单元、Sol5.6独立审查及门禁合入后一次final-only回流；父Astra在实际包含merge的Alpha亲自验U10–U14并记录结果，不能以该批PASS关闭整个Phase U。
+- [ ] **AC-U15**：普通Markdown/代码文件旁的待发送批注编号可点击或键盘打开已有批注卡，回填原选文与说明；修改或移除只作用于同一聊天草稿中的对应附件，不新增副本、不清其他输入、不自动发送。同段多条能明确选中目标，编辑期间滚动及桌面/390px均可用；中文IME与换行沿用聊天既有行为。往返/刷新保留确认后的草稿，明确发送后结构化载荷包含最终说明与准确来源，移除项不被发送；已发送引用和历史只读仍按原授权处理。保留原失败复现、非作者审查及合入后的真实Alpha操作证据，不能以显示编号或组件单测当作完成。
+- [ ] **AC-U16**：按CVO903及Workspace v3定稿，同一真实Markdown从文件树、Home搜索、作品打开为同一好读的显示，页内选文/编号/原Chat引用、文件编辑与听读可用，不再切到独立批注页；“请猫修改/返回来源”位于同页顶栏，跨入口保持canonical file/source/revision、原附件id、草稿与来源返回。Workspace首页/作品列表的图片或视频卡按CVO539直接打开正中悬浮窗，就地可批注，复用同一Chat输入与真实版本；仅显式「在 Workspace 打开」再进入原并排模式；关闭/返回回原入口，聊天图片和候选回执的已有打开语义不退化。真实宿主覆盖288/480侧栏、390视口及浅暗，立即刷新、发送ACK后冷开按真实durable owner复验；B/C/F309不得各造reader、review或草稿store。可操作版本交Studio对稿，F309父Alpha与F322整屏组合分别验，不以定稿、DOM复用或局部单测代替完整旅程。
 
 ### Phase B — Real Open-source Owner Foundations and Contract Kernel
 
@@ -823,9 +1030,9 @@ remap/rebase/conflict/orphan 旅程后再 KEEP。
 | OQ-1 | 第一切片是否用 DOCX + video | 是；两个媒介均直接走成熟开源终态集成 | ✅ operator `private-source-id` |
 | OQ-2 | 哪个 Office/video 开源组合能通过最终 host、license、部署、数据与维护 Gate | Office 顺序已裁决：GenOffice `v0.8.1039@e833fff` 是首个 plugin pre-admission，SuperDoc v2 是 DOCX 退出路径，ONLYOFFICE/Collabora 是服务型 suite 退出路径；一个 contentRef 只绑定一个 production provider。Video：Elah 是 leading pre-admission | 🟨 GenOffice alpha.1 已发布、Host #4394 已合入；合入后 Alpha 与完整两媒介 AC-A4 仍待闭合 |
 | OQ-3 | TabTin root AGPL 与 package MIT 的实际发布/复用边界 | 必须上游/法务澄清 | ⬜ 外部证据 |
-| OQ-4 | K2 从已发送消息接手的 wire contract | 归 F309 modification。建议 callback 接手操作以 `sourceMessageId`、`operationId` 定位；thread/actor/invocation 由认证上下文确定。服务端读取并核验真实人原话、引用/版本、接收目标、既有 Task 与撤回状态，原子绑定唯一 request，再绑定真实执行；重试返回同一请求，不允许 caller 填 human 身份或借引用取得写权 | 🟨 产品边界已核；API 路径/字段及身份、撤回竞争由后端合同 review 冻结，当前无此接口 |
+| OQ-4 | K2 从已发送消息接手的 wire contract | 归 F309 modification。callback 接手操作以 `sourceMessageId`、`operationId` 定位；thread/actor/invocation 由认证上下文确定。服务端读取并核验真实人原话、引用/版本、接收目标、既有 Task 与撤回状态，原子绑定唯一 request，再绑定真实执行；重试返回同一请求，不允许 caller 填 human 身份或借引用取得写权 | ✅ PR #5019 已合入并通过 exact-HEAD 独立审查；前端消费与 Alpha 仍由 Task414/父线程验收 |
 | OQ-5 | Task 发布的普通文档是否新增独立评审轮 | 本轮 K1/K2 不新增；普通工作区文本按修改请求返回候选并决定，PNG/MP4 继续原 round。只有 publication 而没有可授权的文本 owner 目标时不显示虚假的“写回原文件”；未来文档 publication review 另核 owner 合同 | 🟨 不把媒体 round 泛化列为本轮前置，后续领域范围保持开放 |
-| OQ-6 | R32 哪些结果需要另起 invocation 叫醒原猫 | 三类决定/异常均需 durable 聊天回执和原猫可消费的通知；建议纯采用/不采用只回执，不额外起一轮空 ACK；冲突/unknown 仅在该猫现有责任要求诊断时触发现有续办，显式要求再改才进入下一请求。活动执行沿正常消息摄入，不重复启动；通知本身不自动重试写入 | 🟨 回执缺口确定，唤醒策略待后端与执行消息 owner 校准；不以新增唤醒替代 receipt 真相 |
+| OQ-6 | R32 哪些结果需要另起 invocation 叫醒原猫 | 三类决定/异常均有 durable 聊天回执；纯采用/不采用只回执，不额外起一轮空 ACK。冲突/unknown 只在同一 Task 仍开放且原 owner 未改变时尝试 refs-only 续办，并且只有 Queue 已真实 started/already_processing 才记 `cat_woken`；延期、终态或证据不足保持 `unverified`。通知本身不自动重试写入 | ✅ PR #5019 已合入并通过 real Queue/replay/recovery 与 public/whisper 边界审查；产品前端呈现仍归 Task414/父线程验收 |
 
 当前唯一可授权的 dependency/runtime scope 见
 历史 Packet C 已 superseded，不得作为执行授权。
@@ -856,10 +1063,11 @@ remap/rebase/conflict/orphan 旅程后再 KEEP。
 
 ## Thread Topology（执行载体，不是真相源）
 
-1. **指挥与理论 thread**：当前 source thread；责任猫维护验收后的 vision、边界与 Phase 状态，并持续驱动下一步。
+1. **F309 指挥 thread**：`[thread-id]` / Astra；按 CVO1601 统筹整个 Feature 的范围、分工、依赖、交付与验收。初始 source thread `[thread-id]` 保留历史来源，当前协调回到指挥线程。
 2. **Phase execution threads**：每个 Phase 单独承载实现、证据与 review，不在指挥 thread 堆执行噪音。
 3. **runtime 重启后的验收 thread**：只消费已合入 main 的 exact SHA，在隔离验收环境复跑真实用户旅程。
 4. **CVO517作品体验执行批次**：新thread以 `codex6-sol` 为实现/交付owner、`codex-sol`（GPT-5.6）为独立reviewer；在自身隔离worktree自治实现、修复、review、commit/push及merge，最终回父 `[thread-id]` / `codex-astra` 做Alpha。创建以F128返回的实际thread为准，pending proposal不冒称已开工；原child其余责任及Task909保留。
+5. **当前全入口归一施工**：原 Task414 / `[thread-id]` 的 Sol6.1 单写实现、处理审查意见与合入；Sonnet 负责 #6249 独立审查，Astra 在本指挥线程持合后 Alpha 和整体结果。此批次沿既有 Phase U，不新开 Phase 或转移其他内容 owner。
 
 Feature、Research、ownership、commit/PR 与 task 状态仍是 canonical truth；thread 只是协作载体。这里复用家里
 现有 Feature/Phase/验收概念，不新增 Stage、Queue、Registry 或另一套状态机。

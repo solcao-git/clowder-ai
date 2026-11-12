@@ -1,15 +1,19 @@
 import { spawn } from 'node:child_process';
-import { type ImmutableMedia, immutableMediaSchema } from '@cat-cafe/shared';
-import sharp from 'sharp';
+import { constants } from 'node:fs';
+import { open } from 'node:fs/promises';
+import { type ImmutableMedia, immutableMediaSchema, type ReviewedMediaType } from '@cat-cafe/shared';
 import { z } from 'zod';
 import { MediaOwnerError } from './media-errors.js';
+import { probeImmutableImage } from './published-image-probe.js';
+import { verifiedVideoFrameRate } from './published-media-frame-rate.js';
 
-const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const videoStreamSchema = z.object({
   index: z.number().int().min(0).max(64),
   id: z.string().min(1),
   codec_type: z.literal('video'),
   codec_name: z.string().min(1),
+  field_order: z.string().optional(),
+  nb_frames: z.string().optional(),
   width: z.number().int().positive(),
   height: z.number().int().positive(),
   // ffprobe legitimately omits this for square-pixel MP4s (or emits N/A).
@@ -27,33 +31,40 @@ const videoStreamSchema = z.object({
 const videoProbeSchema = z.object({
   format: z.object({ format_name: z.string(), start_time: z.string() }),
   streams: z.array(z.unknown()).max(64),
+  packets: z.array(z.unknown()).max(250000).optional(),
 });
 
-export async function probeImmutableMedia(
-  bytes: Buffer,
-  mediaType: 'image/png' | 'video/mp4',
-): Promise<ImmutableMedia> {
-  if (mediaType === 'image/png') {
-    if (!bytes.subarray(0, 8).equals(pngSignature)) throw new MediaOwnerError('invalid_media');
-    try {
-      const decoder = sharp(bytes, { limitInputPixels: 40_000_000, failOn: 'error' });
-      const metadata = await decoder.metadata();
-      if (
-        metadata.format !== 'png' ||
-        (metadata.pages && metadata.pages > 1) ||
-        (metadata.orientation && metadata.orientation !== 1)
-      ) {
-        throw new MediaOwnerError('invalid_media');
-      }
-      await decoder.stats();
-      return immutableMediaSchema.parse({ kind: 'image', width: metadata.width, height: metadata.height });
-    } catch {
-      throw new MediaOwnerError('invalid_media');
-    }
-  }
+export async function probeImmutableMedia(bytes: Buffer, mediaType: ReviewedMediaType): Promise<ImmutableMedia> {
+  if (mediaType !== 'video/mp4') return probeImmutableImage(bytes, mediaType);
   if (bytes.length < 12 || bytes.subarray(4, 8).toString('ascii') !== 'ftyp')
     throw new MediaOwnerError('invalid_media');
-  return parseVideoProbe(await runVideoProbe(bytes));
+  return probeVideo(bytes);
+}
+
+/** Only accepts a server-owned immutable snapshot, never a caller-supplied locator or URL. */
+export async function probeImmutableVideoFile(path: string): Promise<Extract<ImmutableMedia, { kind: 'video' }>> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const header = Buffer.alloc(12);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead !== header.length || header.subarray(4, 8).toString('ascii') !== 'ftyp')
+      throw new MediaOwnerError('invalid_media');
+  } finally {
+    await handle.close();
+  }
+  return probeVideo(path);
+}
+
+async function probeVideo(source: Buffer | string): Promise<Extract<ImmutableMedia, { kind: 'video' }>> {
+  const media = parseVideoProbe(await runVideoProbe(source));
+  // Frame-clock enrichment is optional: an oversized packet audit must not reject previously supported video.
+  try {
+    // Reuse the codec/field-order fence as well as the complete presentation-clock audit.
+    const enriched = parseVideoProbe(await runVideoProbe(source, true));
+    return enriched.frameRate ? { ...media, frameRate: enriched.frameRate } : media;
+  } catch {
+    return media;
+  }
 }
 
 /** Read the container's stream clock and display transform. Frame-rate guesses are deliberately absent. */
@@ -78,6 +89,17 @@ export function parseVideoProbe(raw: unknown): Extract<ImmutableMedia, { kind: '
     const timebase = parseRational(stream.time_base, '/');
     const displayWidth = Math.round((stream.width * pixelAspectRatio.numerator) / pixelAspectRatio.denominator);
     const rotated = rotation === 90 || rotation === 270;
+    const singleFramePackets = ['h264', 'hevc'].includes(stream.codec_name) && stream.field_order === 'progressive';
+    const frameRate = singleFramePackets
+      ? verifiedVideoFrameRate({
+          packets: probe.packets,
+          expectedFrameCount: Number(stream.nb_frames),
+          streamIndex: stream.index,
+          startPts: stream.start_pts,
+          durationPts: stream.duration_ts,
+          timebase,
+        })
+      : undefined;
     const media = immutableMediaSchema.parse({
       kind: 'video',
       width: rotated ? stream.height : displayWidth,
@@ -92,6 +114,7 @@ export function parseVideoProbe(raw: unknown): Extract<ImmutableMedia, { kind: '
       startTick: stream.start_pts,
       durationTicks: stream.duration_ts,
       containerStartSeconds: Number(probe.format.start_time),
+      ...(frameRate ? { frameRate } : {}),
     });
     if (media.kind !== 'video' || !Number.isSafeInteger(media.startTick + media.durationTicks))
       throw new Error('invalid video clock');
@@ -111,9 +134,9 @@ function parseRational(value: string, separator: string) {
   return { numerator, denominator };
 }
 
-function runVideoProbe(bytes: Buffer): Promise<unknown> {
+function runVideoProbe(source: Buffer | string, includePackets = false): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    // Pipe-only input and demuxer restriction prevent URLs, playlists and external file references in an upload.
+    // Snapshot files are private server paths; MOV cannot open external track references or playlists.
     const child = spawn(
       'ffprobe',
       [
@@ -122,7 +145,7 @@ function runVideoProbe(bytes: Buffer): Promise<unknown> {
         '-max_alloc',
         '67108864',
         '-protocol_whitelist',
-        'pipe',
+        typeof source === 'string' ? 'file' : 'pipe',
         '-probesize',
         '10485760',
         '-analyzeduration',
@@ -131,14 +154,19 @@ function runVideoProbe(bytes: Buffer): Promise<unknown> {
         '1',
         '-f',
         'mov',
+        '-enable_drefs',
+        '0',
+        '-use_absolute_path',
+        '0',
         '-select_streams',
         'V',
+        ...(includePackets ? ['-show_packets', '-show_entries', 'stream:format:packet=pts,duration,stream_index'] : []),
         '-show_streams',
         '-show_format',
         '-of',
         'json',
         '-i',
-        'pipe:0',
+        typeof source === 'string' ? source : 'pipe:0',
       ],
       { stdio: ['pipe', 'pipe', 'pipe'] },
     );
@@ -159,7 +187,7 @@ function runVideoProbe(bytes: Buffer): Promise<unknown> {
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       outputSize += Buffer.byteLength(chunk);
-      if (outputSize > 512 * 1024) {
+      if (outputSize > (includePackets ? 16 * 1024 * 1024 : 512 * 1024)) {
         child.kill('SIGKILL');
         finish(new MediaOwnerError('invalid_media'));
         return;
@@ -182,6 +210,6 @@ function runVideoProbe(bytes: Buffer): Promise<unknown> {
         finish(new MediaOwnerError('invalid_media'));
       }
     });
-    child.stdin.end(bytes);
+    child.stdin.end(typeof source === 'string' ? undefined : source);
   });
 }

@@ -2,7 +2,8 @@ import '../helpers/setup-cat-registry.js';
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import Fastify from 'fastify';
-import { proposedReviewAction } from './helpers.js';
+import { canonicalTestMessageInput } from '../helpers/message-from-fixtures.js';
+import { proposedTaskAction } from './helpers.js';
 
 function createSucceedingIngress() {
   return {
@@ -81,22 +82,26 @@ describe('staged recovery origin preservation', () => {
     const target = await threadStore.create('user-1', 'Target');
     await threadStore.addParticipants(source.id, ['opus']);
     await threadStore.addParticipants(target.id, ['sonnet']);
-    const originA = await messageStore.append({
-      userId: 'user-1',
-      catId: 'opus',
-      threadId: source.id,
-      content: 'Origin A',
-      mentions: [],
-      timestamp: Date.now() - 2000,
-    });
-    const originB = await messageStore.append({
-      userId: 'user-1',
-      catId: 'opus',
-      threadId: source.id,
-      content: 'Origin B',
-      mentions: [],
-      timestamp: Date.now() - 1000,
-    });
+    const originA = await messageStore.append(
+      canonicalTestMessageInput({
+        userId: 'user-1',
+        catId: 'opus',
+        threadId: source.id,
+        content: 'Origin A',
+        mentions: [],
+        timestamp: Date.now() - 2000,
+      }),
+    );
+    const originB = await messageStore.append(
+      canonicalTestMessageInput({
+        userId: 'user-1',
+        catId: 'opus',
+        threadId: source.id,
+        content: 'Origin B',
+        mentions: [],
+        timestamp: Date.now() - 1000,
+      }),
+    );
 
     const app = Fastify();
     apps.push(app);
@@ -112,6 +117,7 @@ describe('staged recovery origin preservation', () => {
     };
 
     await app.register(callbacksRoutes, {
+      actionSuccessorAdmissionService: { async preflightStructuredTransferStanding() {} },
       registry,
       messageStore,
       threadStore,
@@ -141,7 +147,7 @@ describe('staged recovery origin preservation', () => {
       content: '@sonnet\nPlease fix the bug',
       targetCats: ['sonnet'],
       effectClass: 'assign_work',
-      proposedAction: proposedReviewAction(),
+      proposedAction: proposedTaskAction(),
       clientMessageId: 'dispatch-origin-preserve',
     };
 

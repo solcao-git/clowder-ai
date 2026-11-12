@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import type { DeploymentWaitStateV1, TaskItem } from '@cat-cafe/shared';
+import { advanceEntrustedTaskAuthority } from './EntrustedWorkRevision.js';
 import type { ReplaceDeploymentWaitIfGenerationInput } from './TaskStoreContract.js';
 
 export function deploymentWaitGeneration(state: DeploymentWaitStateV1 | undefined): number | null {
@@ -25,7 +26,11 @@ export function deploymentWaitReplacementMatches(
 }
 
 /** A custody or terminal Task write consumes its armed deployment wait in the same aggregate write. */
-export function reconcileDeploymentWaitTaskMutation(previous: TaskItem, next: TaskItem): TaskItem {
+export function reconcileDeploymentWaitTaskMutation(
+  previous: TaskItem,
+  next: TaskItem,
+  options: { statusIsExplicit?: boolean } = {},
+): TaskItem {
   const active = previous.deploymentWait?.await;
   // An admitted message may still be retried. Terminal work and owner changes
   // must revoke that authority in the same Task write, even after delivery.
@@ -42,6 +47,8 @@ export function reconcileDeploymentWaitTaskMutation(previous: TaskItem, next: Ta
   const nextStep = active ? active.continuation.then : matched?.nextStep;
   return {
     ...next,
+    // Ending an owner's parked wait resumes responsibility, unless the caller explicitly chose a status.
+    ...(ownerChanged && !terminal && !options.statusIsExplicit ? { status: 'doing' as const } : {}),
     deploymentWait: {
       waitOutcome: {
         v: 1,
@@ -61,6 +68,28 @@ export function reconcileDeploymentWaitTaskMutation(previous: TaskItem, next: Ta
   };
 }
 
+function assertPublicationState(state: DeploymentWaitStateV1): void {
+  const outcome = state.waitOutcome;
+  const claim = state.currentExecutionClaim;
+  const receipt = state.currentExecutionReceipt;
+  const recovery = state.recoverySource;
+  const transport = state.transportAttempt;
+  for (const identity of [receipt, recovery]) {
+    if (
+      identity &&
+      (!identity.invocationId || !identity.bootId || identity.generation !== deploymentWaitGeneration(state))
+    ) {
+      throw new Error('deployment publication must retain its exact child and generation');
+    }
+  }
+  if (receipt && (!receipt.notificationKey || receipt.outcomeId !== outcome?.outcomeId)) {
+    throw new Error('current History receipt must bind the logical deployment outcome');
+  }
+  if (transport && (!transport.idempotencyKey || transport.outcomeId !== outcome?.outcomeId || claim)) {
+    throw new Error('Queue transport must bind the outcome after current child claim release');
+  }
+}
+
 function assertState(state: DeploymentWaitStateV1 | undefined): void {
   if (!state) return;
   const active = state.await;
@@ -69,6 +98,7 @@ function assertState(state: DeploymentWaitStateV1 | undefined): void {
   if (claim && (!claim.invocationId || !claim.bootId || claim.generation !== deploymentWaitGeneration(state))) {
     throw new Error('current execution claim must bind the exact deployment wait generation');
   }
+  assertPublicationState(state);
   if (active) {
     if (!active.subjectRef.startsWith('deployment:') || active.autoRenew !== false) {
       throw new Error('work Task deployment wait requires one single-fire deployment await');
@@ -99,10 +129,10 @@ export function buildTaskDeploymentWaitReplacement(
     throw new Error('terminal work cannot register or advance a deployment wait');
   }
   assertState(input.deploymentWait);
-  return {
+  return advanceEntrustedTaskAuthority(existing, {
     ...existing,
     deploymentWait: input.deploymentWait,
     ...(input.status !== undefined ? { status: input.status } : {}),
     updatedAt: Date.now(),
-  };
+  });
 }

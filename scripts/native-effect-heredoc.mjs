@@ -38,6 +38,13 @@ export function hereDocumentView(raw) {
   if (!layout) return unchanged;
   const parts = splitShellExecutionSegmentsWithSeparators(layout.text);
   const roles = layout.heredocs.map((heredoc) => hereDocumentRole(heredoc, parts));
+  // A proved data body is not an unknown input channel. Blank its operator using
+  // the same delimiter/owner facts; retain offsets and all shell-input operators.
+  layout.text = layout.heredocs.reduce((text, heredoc, index) => {
+    if (roles[index] !== 'data') return text;
+    const width = DELIMITER.exec(text.slice(heredoc.operatorAt))?.[0].length ?? 0;
+    return text.slice(0, heredoc.operatorAt) + ' '.repeat(width) + text.slice(heredoc.operatorAt + width);
+  }, layout.text);
   return {
     judged: reinsert(layout, roles, (role) => role === 'shell'),
     host: reinsert(layout, roles, (role) => role !== 'data'),
@@ -50,7 +57,7 @@ const DELIMITER = new RegExp(
 const OPERATOR_TEXT = /<<-?[ \t]*(?:'[^'\n]*'|"[^"\n]*"|\\?[A-Za-z0-9_][A-Za-z0-9_.-]*)/g;
 
 /** Remove every body (and its terminator line) from the text; null when unsure. */
-function separateHereDocuments(raw) {
+export function separateHereDocuments(raw) {
   const lexer = new HereDocumentLexer(raw);
   while (lexer.index < raw.length) {
     if (lexer.step() === UNSURE) return null;
@@ -204,7 +211,11 @@ function hereDocumentRole(heredoc, parts) {
   if (ownerIndex < 0) return 'shell';
   // An unquoted delimiter expands `$( )` and backticks in the body: they run.
   if (!heredoc.quoted && /\$\(|`/.test(heredoc.body)) return 'shell';
-  if (['|', '|&'].includes(parts[ownerIndex + 1]?.separator)) return 'shell';
+  for (let index = ownerIndex + 1; ['|', '|&'].includes(parts[index]?.separator); index += 1) {
+    const consumer = ownerCommand(parts[index].text);
+    const consumerTokens = tokenizeSimpleShellCommand(consumer);
+    if (!consumerTokens || !consumesInputAsData(consumerTokens, consumer)) return 'shell';
+  }
   const command = ownerCommand(parts[ownerIndex].text);
   const tokens = tokenizeSimpleShellCommand(command);
   if (tokens && FOREIGN_INTERPRETERS.test(commandName(tokens[0]) ?? '')) return 'opaque';

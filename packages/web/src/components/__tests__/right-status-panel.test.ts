@@ -90,7 +90,7 @@ describe('RightStatusPanel', () => {
     expect(html).toContain('运行日志');
     expect(html).toContain('对话 ID：');
     expect(html).toContain('test-thread');
-    expect(html).toContain('ChatGPT 对话');
+    expect(html).toContain('ChatGPT 会话');
     expect(html.indexOf('data-testid="cloud-conversation-link"')).toBeLessThan(html.indexOf('对话信息'));
     expect(html).toContain('布偶猫');
     expect(html).toContain('缅因猫');
@@ -98,7 +98,7 @@ describe('RightStatusPanel', () => {
   });
 
   it('AC-Z15 R7: ideate mode preserves targetCats UNION across all panels (cloud Codex P2)', () => {
-    // co-creator alpha catch + cloud Codex round-3 P2: ideate 多猫场景下 ParallelStatusBar
+    // co-creator alpha catch + cloud Codex round-3 P2: ideate 多猫场景下状态面板
     // 用 UNION 显示，但状态面板若用 slot-first，cat 完成清 slot 后
     // 卡片消失 → 跨 panel state coherence regression（顶部双卡，侧边/移动端单卡）。
     // 修法：所有 panel 都把 intentMode 传给 deriveActiveCats，UNION 全程一致。

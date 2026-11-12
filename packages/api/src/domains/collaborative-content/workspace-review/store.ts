@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import {
   type WorkspaceContentActor,
   type WorkspaceContentReview,
@@ -8,7 +9,10 @@ import {
   workspaceContentReviewSchema,
 } from '@cat-cafe/shared';
 import Database from 'better-sqlite3';
+import { CollectiveWorkspaceCustody } from './collective-custody.js';
 import { WorkspaceContentReviewError } from './errors.js';
+import { ProjectReviewAudienceStore } from './project-message/audience-store.js';
+import { VideoProjectMessageImportCursor } from './project-message/cursor.js';
 import { RetainedWorkspaceLedger } from './retained-ledger.js';
 
 interface ReviewRow {
@@ -27,11 +31,17 @@ interface LegacyOperationResultRow extends OperationRow {
 export interface WorkspaceReviewMutation {
   readonly reviewId: string;
   readonly expectedRevision: number;
+  /** Original caller CAS remains stable when an audience revision is translated to canonical CAS. */
+  readonly fingerprintRevision?: number;
+  /** Internal derivative bookkeeping commits or rolls back with the authoritative operation. */
+  readonly committed?: (result: WorkspaceReviewMutationResult) => void;
+  readonly assertScopedRevision?: () => void;
   readonly operationId: string;
   readonly actor: WorkspaceContentActor;
   readonly now: string;
   readonly kind: string;
   readonly request: unknown;
+  readonly preparationSource?: WorkspaceContentReviewReceipt['preparationSource'];
 }
 
 export interface WorkspaceReviewMutationResult {
@@ -45,6 +55,9 @@ export class WorkspaceContentReviewStore {
   private readonly database: Database.Database;
   private readonly ownsDatabase: boolean;
   readonly retained: RetainedWorkspaceLedger;
+  readonly collectiveCustody: CollectiveWorkspaceCustody;
+  readonly projectAudiences: ProjectReviewAudienceStore;
+  readonly projectMessageImports: VideoProjectMessageImportCursor;
 
   constructor(
     path: string | Database.Database,
@@ -98,11 +111,19 @@ export class WorkspaceContentReviewStore {
         PRIMARY KEY(review_id, operation_id)
       );
     `);
+    const columns = this.database.pragma('table_info(workspace_content_reviews)') as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'collaboration_scope'))
+      this.database.exec('ALTER TABLE workspace_content_reviews ADD COLUMN collaboration_scope TEXT');
+    this.database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS workspace_content_reviews_scope
+      ON workspace_content_reviews(collaboration_scope, content_ref) WHERE collaboration_scope IS NOT NULL`);
+    this.projectAudiences = new ProjectReviewAudienceStore(this.database);
     this.retained = new RetainedWorkspaceLedger(this.database);
+    this.projectMessageImports = new VideoProjectMessageImportCursor(this.database);
+    this.collectiveCustody = new CollectiveWorkspaceCustody(this.database);
   }
 
   close(): void {
-    if (this.ownsDatabase) this.database.close();
+    if (this.ownsDatabase && this.database.open) this.database.close();
   }
 
   get(reviewId: string): WorkspaceContentReview | null {
@@ -112,10 +133,14 @@ export class WorkspaceContentReviewStore {
     return row ? workspaceContentReviewSchema.parse(JSON.parse(row.body)) : null;
   }
 
-  getByContent(ownerUserId: string, contentRef: string): WorkspaceContentReview | null {
+  getByContent(ownerUserId: string, contentRef: string, scopeRef?: string): WorkspaceContentReview | null {
     const row = this.database
-      .prepare('SELECT body FROM workspace_content_reviews WHERE owner_user_id = ? AND content_ref = ?')
-      .get(ownerUserId, contentRef) as ReviewRow | undefined;
+      .prepare(
+        scopeRef
+          ? 'SELECT body FROM workspace_content_reviews WHERE collaboration_scope = ? AND content_ref = ?'
+          : 'SELECT body FROM workspace_content_reviews WHERE owner_user_id = ? AND content_ref = ? AND collaboration_scope IS NULL',
+      )
+      .get(scopeRef ?? ownerUserId, contentRef) as ReviewRow | undefined;
     return row ? workspaceContentReviewSchema.parse(JSON.parse(row.body)) : null;
   }
 
@@ -126,15 +151,30 @@ export class WorkspaceContentReviewStore {
     const initial = workspaceContentReviewSchema.parse(review);
     return this.database
       .transaction(() => {
-        const existing = this.getByContent(initial.ownerUserId, initial.contentRef);
-        if (existing) return existing;
+        const existing = this.getByContent(
+          initial.ownerUserId,
+          initial.contentRef,
+          initial.collaborationScope?.scopeRef,
+        );
+        if (existing) {
+          if (!isDeepStrictEqual(existing.collaborationScope, initial.collaborationScope))
+            throw new WorkspaceContentReviewError('access_denied');
+          return existing;
+        }
         this.assertNewReview(initial);
         if (initial.revision !== 1) throw new WorkspaceContentReviewError('invalid_action');
         this.database
           .prepare(
-            'INSERT INTO workspace_content_reviews (review_id, owner_user_id, content_ref, revision, body) VALUES (?, ?, ?, ?, ?)',
+            'INSERT INTO workspace_content_reviews (review_id, owner_user_id, content_ref, revision, body, collaboration_scope) VALUES (?, ?, ?, ?, ?, ?)',
           )
-          .run(initial.reviewId, initial.ownerUserId, initial.contentRef, initial.revision, JSON.stringify(initial));
+          .run(
+            initial.reviewId,
+            initial.ownerUserId,
+            initial.contentRef,
+            initial.revision,
+            JSON.stringify(initial),
+            initial.collaborationScope?.scopeRef ?? null,
+          );
         this.writeOperationReceipt({ ...input, reviewId: initial.reviewId, expectedRevision: 0 }, initial, false);
         return initial;
       })
@@ -202,11 +242,10 @@ export class WorkspaceContentReviewStore {
         const current = this.get(input.reviewId);
         if (!current) throw new WorkspaceContentReviewError('not_found');
         if (current.revision !== input.expectedRevision) throw new WorkspaceContentReviewError('revision_conflict');
-        return {
-          review: current,
-          receipt: this.writeOperationReceipt(input, current, false),
-          replayed: false,
-        };
+        input.assertScopedRevision?.();
+        const result = { review: current, receipt: this.writeOperationReceipt(input, current, false), replayed: false };
+        input.committed?.(result);
+        return result;
       })
       .immediate();
   }
@@ -223,11 +262,13 @@ export class WorkspaceContentReviewStore {
         const current = this.get(input.reviewId);
         if (!current) throw new WorkspaceContentReviewError('not_found');
         if (current.revision !== input.expectedRevision) throw new WorkspaceContentReviewError('revision_conflict');
+        input.assertScopedRevision?.();
         const next = workspaceContentReviewSchema.parse(transition(current));
         if (
           next.reviewId !== current.reviewId ||
           next.ownerUserId !== current.ownerUserId ||
           next.contentRef !== current.contentRef ||
+          !isDeepStrictEqual(next.collaborationScope, current.collaborationScope) ||
           next.revision !== current.revision + 1
         ) {
           throw new WorkspaceContentReviewError('invalid_action');
@@ -237,7 +278,9 @@ export class WorkspaceContentReviewStore {
           .run(next.revision, JSON.stringify(next), next.reviewId, current.revision);
         if (changed.changes !== 1) throw new WorkspaceContentReviewError('revision_conflict');
         const receipt = this.writeOperationReceipt(input, next, false);
-        return { review: next, receipt, replayed: false };
+        const result = { review: next, receipt, replayed: false };
+        input.committed?.(result);
+        return result;
       })
       .immediate();
   }
@@ -257,6 +300,7 @@ export class WorkspaceContentReviewStore {
       actor: input.actor,
       createdAt: input.now,
       replayed,
+      ...(input.preparationSource ? { preparationSource: input.preparationSource } : {}),
     };
     this.database
       .prepare(
@@ -269,6 +313,8 @@ export class WorkspaceContentReviewStore {
 
 function fingerprint(input: WorkspaceReviewMutation): string {
   return createHash('sha256')
-    .update(JSON.stringify([input.actor, input.expectedRevision, input.kind, input.request]))
+    .update(
+      JSON.stringify([input.actor, input.fingerprintRevision ?? input.expectedRevision, input.kind, input.request]),
+    )
     .digest('hex');
 }

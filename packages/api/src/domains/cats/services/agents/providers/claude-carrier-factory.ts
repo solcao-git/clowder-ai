@@ -15,7 +15,7 @@
  * hook sidechannel (Stop/PostToolUse) for output. Works with ANY claude
  * version — no pinned binary required (2.1.170 pin removed).
  */
-import type { CatId } from '@cat-cafe/shared';
+import { type CatId, catRegistry } from '@cat-cafe/shared';
 import type { AgentMessage, AgentService, AgentServiceOptions, ToolExecutionPolicy } from '../../types.js';
 import { ClaudeAgentService } from './ClaudeAgentService.js';
 import { ClaudeBgCarrierService } from './ClaudeBgCarrierService.js';
@@ -193,6 +193,7 @@ export class FallbackCarrierWrapper implements AgentService {
         provider: 'anthropic',
         carrier: 'other',
         deliverySemantics: 'unsupported',
+        activeInvocationGuidance: 'unsupported',
       }
     );
   }
@@ -230,6 +231,10 @@ export class FallbackCarrierWrapper implements AgentService {
   }
 
   private async *_invoke(prompt: string, options?: AgentServiceOptions): AsyncGenerator<AgentMessage> {
+    // Account incompatibility is not carrier health. Reject even if bg is already degraded;
+    // selecting a token must not silently change the explicitly requested carrier.
+    if (options?.claudeTokenAccount && this.targetTier === 'bg_daemon')
+      throw new Error('claude_token_carrier_unsupported');
     let degradedDuringStream = false;
     try {
       for await (const msg of this.carrier.invoke(prompt, options)) {

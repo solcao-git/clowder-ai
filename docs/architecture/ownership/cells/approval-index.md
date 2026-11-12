@@ -6,6 +6,10 @@ canonical_features: [F246]
 code_anchors:
   # API — adapters + routes
   - packages/api/src/domains/approval-hub/ApprovalIngress.ts
+  - packages/api/src/domains/approval-hub/ApprovalDecisionReceiptService.ts
+  - packages/api/src/domains/approval-hub/approval-decision-receipt-append.ts
+  - packages/api/src/domains/approval-hub/ApprovalDecisionReceiptOutbox.ts
+  - packages/api/src/domains/approval-hub/approval-decision-receipt-hooks.ts
   - packages/api/src/domains/approval-hub/ApprovalLifecycleEpochAuthority.ts
   - packages/api/src/domains/approval-hub/ApprovalProducerRegistry.ts
   - packages/api/src/domains/approval-hub/projectApprovalNavigation.ts
@@ -36,6 +40,7 @@ code_anchors:
   # Shared types
   - packages/shared/src/approval-producer-catalog.ts
   - packages/shared/src/types/approval-hub.ts
+  - packages/shared/src/types/approval-decision-receipt.ts
   - packages/shared/src/types/approval-lifecycle.ts
   - packages/shared/src/types/entity-proposal.ts
   - packages/shared/src/types/schedule-mutation.ts
@@ -78,6 +83,7 @@ cited_by:
   - {feature: F306, date: 2026-08-27, delta: "Phase B read-through projection — only anchored pending approval-kind runtime interactions enter the Hub; inline decisions stay disabled and navigate to the exact canonical thread card."}
   - {feature: F306, date: 2026-08-28, delta: "operator permission-funnel correction — production command/file approvals use upstream auto_review and never create routine human script cards; explicit user-reviewed canonical records remain projection-compatible."}
   - {feature: F306, date: 2026-08-28, delta: "Danger coordinate correction — authorized cross-directory capability does not enter Approval Hub; irreversible/sanctuary effects belong to structural target guards and recoverability, not a Codex-only workspace jail. No current Clowder AI guard intercepts Codex native shell; AC-C7 remains open."}
+  - {feature: F322, date: 2026-10-14, delta: "J3 boundary — conversation_decision records share the F306 TTL=0 lifecycle/index but never become Approval Hub items; F310 may derive a verified Needs Me presentation without copying decision truth or granting approval authority."}
   - {feature: F313, date: 2026-09-02, delta: "Phase C — canonical Resolution × Materialization projection, durable per-producer writer epoch, and F266 ref-only Approval/dispatch extension with production cutover fail-closed."}
   - {feature: F246, date: 2026-09-17, delta: "PROPOSED ONLY — M3 batch issuer/finalized manifest and TTL=0 command custody with CAS/lease recovery; feature-owner implementation custody still required; no child resolution or memory authority transfer."}
 ---
@@ -132,6 +138,32 @@ the shared adapter and Hub only project it. Proposal and dispatch snapshots carr
 target-version and dispatch refs. Until a canonical owner resolver/repair dispatcher and explicit production epoch
 migration are supplied, the complete v3 composition stays inactive and the route returns
 `approval_route_unavailable` without creating a case, card, Task or F167 lease.
+
+### Durable decision receipts
+
+The shared catalog explicitly selects `shared-origin-thread` delivery for all 11 producers, including
+origin-card F306. Runtime admission requires an exact adapter `readDecision` binding. Producer-owned
+stores, CAS, materialization and existing wakes retain their authority.
+
+Before a decision handler runs, the shared HTTP boundary persists owner/producer/proposal identity in
+a SQLite delivery outbox. It then rereads the exact canonical decision and uses the message store's
+permanent atomic idempotency key (producer + proposal + terminal resolution) to append one bounded Host
+receipt in `approvalCardRef.threadId`. The outbox never stores proposal content or decides a resolution;
+it removes the intent only after append succeeds. Admission failure returns 503 before business mutation.
+Post-commit delivery failure preserves the decision and intent, exposes a pending header and warning,
+and retries on startup and a bounded periodic sweep. Lost append acknowledgements replay the same message.
+Rollback retains unconsumed intents for compatible recovery. No UI history window is used for recovery.
+
+`approvalDecisionReceiptV1Schema` admits only this named Host system carrier into cat context. Ordinary
+system badges remain display-only. On the first durable write only, the receipt service may supplement the
+requester's exact active run in the canonical card thread through the existing per-run Append capability and
+provider dispatcher, with `force:false` and a fixed invocation/response identity. A replay, absent/unsupported run,
+or failed/closed handoff retains the message without another attempt, Queue admission, new invocation or wake.
+Native input-read callbacks log the exact receipt/run/provider correlation without copying proposal content.
+This best-effort live projection does not create another approval or change producer effects/wake contracts.
+The catalog-driven contract suite covers each real producer transition, HTTP selection, durable append
+and next-invocation `ContextAssembler` visibility. SQLite reopen plus real Redis acknowledgement-loss
+tests cover persistence and dedupe across service instances.
 
 ### Data Flow
 
@@ -208,6 +240,7 @@ ActivityBar (bell icon + badge count)
 - Approval Hub is not a substitute for execution safety. Current runtime-sanctuary and governed-shell fixtures cover Claude PreToolUse and MCP `shell_exec` respectively; neither intercepts Codex app-server native shell. AC-C7 owns the missing provider-neutral effect/target guard. main/Alpha accepted the no-human-prompt contract; production runtime revision `69cdd42b7` predates #4047 and is `live=pending restart`.
 - If a machine-review host nevertheless emits a raw command/file request, the runtime adapter returns a fail-closed decline without calling the human interaction port. Only a separately authorized explicit `user` reviewer may create an approval-kind runtime interaction; no current production writer selects it.
 - The adapter projects only anchored, pending, explicitly user-reviewed approval-kind records owned by the current user. Question and elicitation records never become `ApprovalItem` values.
+- F322 `conversation_decision` records also remain outside Approval Hub. Their explicit owner decision is a conversation return, not a domain approval grant; F310 may read the same canonical pending index only through its source-proof contract and must not create an Approval Hub copy or decision route.
 - `inlineApprovable=false`: Hub is discovery/navigation only. Every decision is submitted from the exact canonical thread card, whose card ref is preserved in the item.
 - Terminal, stale, restarted, transport-lost, and provider-cancelled records disappear from pending reads while remaining readable in their source thread.
 

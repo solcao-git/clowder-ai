@@ -3,6 +3,7 @@ import type { MailboxRead } from '../unified-mailbox-state';
 import { matchHostedApproval } from './approval-match';
 import type { CanonicalRead, ReadEvidence, SettledLookup } from './approval-reconcile';
 import { lookupSettled as lookupSettledHistory, type SettledLookupInput } from './settled-lookup';
+import { mailboxSourcesReadable } from './source-read-eligibility';
 
 /**
  * F322 S3-2b-1c: what one canonical re-read, made after a write, can say about one approval.
@@ -71,6 +72,7 @@ export function listedCopiesAligned(
 ): boolean {
   const copies = listedCopies(read, address);
   return (
+    mailboxSourcesReadable(read, 'approvals') &&
     copies.length > 0 &&
     copies.every(
       (copy) =>
@@ -87,6 +89,10 @@ function approvalsReadInFull(read: UnifiedAttentionReadV1): boolean {
     approvals.status === 'available' &&
     approvals.exhaustiveness === 'complete' &&
     read.consistency.state === 'verified' &&
+    read.page.offset === 0 &&
+    (!read.personalView || (read.personalView.mode === 'visible' && read.personalView.ignoredTotalCount === 0)) &&
+    read.mentionPeriod !== 'earlier' &&
+    read.mentionPeriod !== 'handled' &&
     read.page.hasMore === false &&
     read.page.hasMoreApprovals !== true
   );

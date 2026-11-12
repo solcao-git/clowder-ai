@@ -19,6 +19,11 @@ import {
   verifySameRunGuard,
 } from './f311-exploration-recovery.journey.mjs';
 import { startExplorationBrowserFixture } from './f311-exploration-workspace.harness.mjs';
+import { verifyHistoryEntryJourney } from './f311-history-entry.journey.mjs';
+import { waitForResponsiveWorkspaceLayout } from './f311-responsive-workspace-layout.mjs';
+import { verifyV2ClosureJourney } from './f311-v2-closure.journey.mjs';
+import { verifyV2ExplorationReading } from './f311-v2-exploration.journey.mjs';
+import { verifyV2PublicSources } from './f311-v2-public-sources.journey.mjs';
 import { CONTRACT_THREAD_ID } from './f311-workspace-browser.harness.mjs';
 
 await import('tsx');
@@ -84,6 +89,51 @@ const runsFor = (title) =>
   catalog.experiments.filter(
     (run) => refIdentity(run.nodeRef) === refIdentity(catalog.nodes.find((node) => node.title === title).nodeRef),
   );
+
+test(
+  'v2 Workspace tools reads the existing duck goal, four walking originals and two Cortex matches without target aliasing',
+  { timeout: 120_000 },
+  async () => {
+    report.publicSourceReading = await verifyV2PublicSources({ fixture, browser, capture });
+    report.checks.push(
+      '352afab6 exact original target snapshot through actual authenticated reader; v1-v4 same-scene four-video sync; both Cortex originals and ten-second read window; no invented ancestry, narrow stacking/dark/explicit reentry; not production auth or AC-UX6.',
+    );
+  },
+);
+
+test(
+  'v2 history entry leads with the published archive, recovers an old selection, opens exact sources, and returns',
+  { timeout: 120_000 },
+  async () => {
+    const historyEntry = await verifyHistoryEntryJourney({ fixture, browser, capture });
+    report.historyEntry = historyEntry;
+    report.checks.push(
+      `Workspace tools → Program preserves an old F314 coordinate, leads with explicit current-history recovery before evaluation gaps, opens ${historyEntry.stepCount}-step/${historyEntry.caseCount}-case history with exact original and cited source links, and restores the exact selected step after return; zero Program/proposal writes.`,
+    );
+  },
+);
+
+test(
+  'v2 journey preserves preparation and exploration reading, opens one fixture decision, and returns an exact Chat source',
+  { timeout: 120_000 },
+  async () => {
+    report.closureJourney = await verifyV2ClosureJourney({ fixture, browser, capture });
+    report.checks.push(
+      'One explicitly isolated F266 candidate traverses Workspace tools → Program → preparation → F314 history → restored selection → Mailbox → later Chat exact-use source; source and rollback only navigate, with zero Program/candidate writes and no optimistic adoption claim.',
+    );
+  },
+);
+
+test(
+  'v2 Workspace tools opens the isolated public archive, keeps counterexamples visible and links exact original videos',
+  { timeout: 120_000 },
+  async () => {
+    await verifyV2ExplorationReading({ fixture, browser, catalog, capture });
+    report.checks.push(
+      'v2 Workspace tools/public archive reading, independent current/selected pointers, unfiltered counterexample, original paired playback/seek/pause, 416/320/dark; isolated owner Program only, not real 352afab6 source binding.',
+    );
+  },
+);
 
 test(
   'same-version runs, explicit paired scope, regressions, source traces and canvas navigation in the real F307 host',
@@ -158,13 +208,15 @@ test(
       await subset.getByText(/^仅在对照侧：/).waitFor();
       await subset.getByText(/^仅在本版侧：/).waitFor();
       await page.setViewportSize({ width: 320, height: 900 });
+      await waitForResponsiveWorkspaceLayout(page, page.getByTestId('evolution-program-surface'), 320);
       await subset.scrollIntoViewIfNeeded();
       await contained(subset);
       await contained(work);
       await capture(page, 'exploration-partial-scope-320');
       await page.setViewportSize({ width: 1360, height: 960 });
       const expand = page.getByRole('button', { name: '展开阅读 →', exact: true });
-      if (await expand.isVisible()) await expand.click();
+      // Wait for the desktop control after resize; a one-shot visibility probe can skip reopening.
+      await expand.click();
       await work.waitFor();
       await comparison.getByRole('button', { name: /^退步 [1-9]/ }).click();
       await comparison.getByRole('button', { name: /左侧 · 更远/ }).click();
@@ -317,6 +369,7 @@ test(
       assert.equal(reading[fixture.duck.program.programId].exploration.draft.binding.title, 'v8');
       for (const width of [416, 320]) {
         await page.setViewportSize({ width, height: 900 });
+        await waitForResponsiveWorkspaceLayout(page, page.getByTestId('evolution-program-surface'), width);
         await contained(work);
         await page.getByTestId('evolution-program-surface').evaluate((el) => {
           el.scrollTop = 0;

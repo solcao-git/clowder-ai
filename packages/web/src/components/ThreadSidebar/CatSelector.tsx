@@ -5,6 +5,9 @@ import { catColorMix, catColorVar } from '@/lib/cat-slug';
 
 interface CatSelectorProps {
   selectedCats: string[];
+  label?: string;
+  familyLabel?: (name: string) => string;
+  compact?: boolean;
   onSelectionChange: (ids: string[]) => void;
 }
 
@@ -12,7 +15,11 @@ interface CatSelectorProps {
  * F32-b Phase 3: Breed-grouped cat chip selector.
  * Used in thread creation (DirectoryPickerModal) and thread settings.
  */
-export function CatSelector({ selectedCats, onSelectionChange }: CatSelectorProps) {
+export function CatSelector({
+  selectedCats,
+  onSelectionChange,
+  compact = false,
+}: CatSelectorProps) {
   const { getCatsByBreed } = useCatData();
   const groups = getCatsByBreed();
 
@@ -51,8 +58,9 @@ export function CatSelector({ selectedCats, onSelectionChange }: CatSelectorProp
                   <button
                     key={cat.id}
                     type="button"
+                    aria-pressed={isSelected}
                     onClick={() => toggleCat(cat.id)}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors border ${
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 ${compact ? 'rounded-lg shell-focusable' : 'rounded-full'} text-xs transition-colors border ${
                       isSelected
                         ? 'font-medium border-current'
                         : 'border-cafe text-cafe-secondary hover:border-[var(--console-border-strong)]'

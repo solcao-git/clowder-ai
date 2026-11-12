@@ -2,6 +2,8 @@
 
 import { type ExactAssetVersionRefV1, refIdentity } from '@cat-cafe/shared';
 import { useEffect, useMemo, useState } from 'react';
+import { useShellPresentation } from '@/components/shell/shell-presentation';
+import { DEFAULT_ARTIFACT_WORK_CHAT_BASIS } from '@/components/workbench/artifact-work-presentation';
 import {
   createCapabilityEvolutionWorkspaceSurface,
   isCapabilityEvolutionWorkspaceSurface,
@@ -13,12 +15,11 @@ import { useIsDesktop } from '@/hooks/useIsDesktop';
 import { useChatStore } from '@/stores/chatStore';
 import { CapabilityEvolutionProgramDetail } from './CapabilityEvolutionProgramDetail';
 import { CapabilityEvolutionWorkspace } from './CapabilityEvolutionWorkspace';
-import { evolutionProgramPresentation, productStatus } from './capability-evolution-presentation';
 import { EvolutionChangePanel } from './EvolutionChangePanel';
-import { EvolutionJourney, journeyMoment } from './EvolutionJourney';
+import { journeyMoment } from './EvolutionJourney';
+import { EvolutionLifecycleControls } from './EvolutionLifecycleControls';
 import { RawDetails } from './EvolutionProgramContext';
-import { EvolutionProgramName } from './EvolutionProgramName';
-import { EvolutionProgramOrigin } from './EvolutionProgramOrigin';
+import { EvolutionReadingHeader } from './EvolutionReadingHeader';
 import { EvolutionActualUse, EvolutionSource, EvolutionVersionEvidence } from './EvolutionVersionEvidence';
 import { EvolutionVersionHistory } from './EvolutionVersionHistory';
 import { useEvolutionAssetReview } from './evolution-asset-resource';
@@ -40,6 +41,8 @@ import { useEvolutionLifecycle } from './use-evolution-lifecycle';
 import { useEvolutionOwnerReadingDefault } from './use-evolution-owner-reading-default';
 import { useEvolutionScroll } from './use-evolution-scroll';
 import './evolution-workspace.css';
+import './evolution-v2.css';
+import './preparation/evolution-preparation-v2.css';
 import './preparation/evolution-preparation.css';
 import './preparation/evolution-preparation-visual.css';
 import './preparation/evolution-preparation.responsive.css';
@@ -50,7 +53,31 @@ export function EvolutionProgramList({ onOpenProgram }: { onOpenProgram: (progra
   return <CapabilityEvolutionWorkspace targetThreadId={null} onOpenProgram={onOpenProgram} />;
 }
 
+function enterProgramReading(surfaceId: string, desktop: boolean): void {
+  if (!desktop) return;
+  const threadId = useChatStore.getState().currentThreadId;
+  useF307ExperienceWorkbenchStore
+    .getState()
+    .enterMainAreaAttention(
+      surfaceId,
+      threadId ? { kind: 'chat-workspace', threadId, chatBasis: DEFAULT_ARTIFACT_WORK_CHAT_BASIS } : undefined,
+    );
+}
+
+function returnFromProgramReading(): void {
+  const store = useF307ExperienceWorkbenchStore.getState();
+  if (
+    store.mainAreaAttentionPresentation.kind === 'chat-workspace' &&
+    store.mainAreaAttentionPresentation.mode === 'full-window'
+  ) {
+    store.returnFromMainAreaFullWindow();
+    return;
+  }
+  store.exitMainAreaAttention();
+}
+
 export function EvolutionProgramSurface({ programId }: { programId: string }) {
+  const v2 = useShellPresentation() === 'v2';
   const { projection, error, reload } = useEvolutionPrograms(programId);
   const reading = useEvolutionReading((state) => state.programs[programId] ?? DEFAULT_READING);
   const update = useEvolutionReading((state) => state.update);
@@ -68,6 +95,7 @@ export function EvolutionProgramSurface({ programId }: { programId: string }) {
       store.dispatch({ type: 'refresh-surface', surface: descriptor });
   }, [programId, projection?.program.displayName, projection?.origin]);
   const main = useF307ExperienceWorkbenchStore((state) => state.mainAreaAttentionSurfaceId === surfaceId);
+  const attentionPresentation = useF307ExperienceWorkbenchStore((state) => state.mainAreaAttentionPresentation);
   const desktop = useIsDesktop();
   const [expanded, setExpanded] = useState(false);
   const reviewing = main || (!desktop && expanded);
@@ -103,11 +131,11 @@ export function EvolutionProgramSurface({ programId }: { programId: string }) {
   const open = (_id: string, view: EvolutionReadingView = 'judgment') => {
     openEvolutionReading(programId, view);
     setExpanded(true);
-    if (desktop) useF307ExperienceWorkbenchStore.getState().enterMainAreaAttention(surfaceId);
+    enterProgramReading(surfaceId, desktop);
   };
   const returnToRail = () => {
     setExpanded(false);
-    useF307ExperienceWorkbenchStore.getState().exitMainAreaAttention();
+    returnFromProgramReading();
   };
   const backToWorkspace = () => {
     const store = useF307ExperienceWorkbenchStore.getState();
@@ -155,44 +183,15 @@ export function EvolutionProgramSurface({ programId }: { programId: string }) {
         </div>
       </div>
     );
-  const status = productStatus(projection);
   const moment = reading.journeyMoment ?? journeyMoment(projection);
   const showVersions = reading.view === 'history' || moment === 3;
-  const controls = (
-    <details className="relative text-xs text-cafe-secondary">
-      <summary className="cursor-pointer">更多</summary>
-      <div className="absolute right-0 top-6 z-10 w-36 rounded-lg border border-cafe-subtle bg-cafe-surface p-2 shadow-sm">
-        {projection.program.lifecycle === 'active' && (
-          <button
-            className="w-full p-2 text-left"
-            type="button"
-            disabled={lifecycle.pending}
-            onClick={() => void lifecycle.run('pause')}
-          >
-            暂停项目
-          </button>
-        )}
-        {projection.program.lifecycle === 'paused' && (
-          <button
-            className="w-full p-2 text-left"
-            type="button"
-            disabled={lifecycle.pending}
-            onClick={() => void lifecycle.run('resume')}
-          >
-            恢复项目
-          </button>
-        )}
-        {projection.program.lifecycle !== 'active' && projection.program.lifecycle !== 'paused' && (
-          <p className="p-2">记录已保留</p>
-        )}
-      </div>
-    </details>
-  );
+  const controls = <EvolutionLifecycleControls projection={projection} lifecycle={lifecycle} />;
   return (
     <div
       ref={viewport}
       className="evolution-workspace min-h-0 flex-1 overflow-y-auto"
       data-testid="evolution-program-surface"
+      data-evolution-presentation={v2 ? 'v2' : 'classic'}
       data-reading-view={reviewing ? reading.view : 'detail'}
       onScroll={(event) => onScroll(event.currentTarget.scrollTop)}
     >
@@ -206,39 +205,18 @@ export function EvolutionProgramSurface({ programId }: { programId: string }) {
           />
         ) : (
           <>
-            <header>
-              <div className="mb-6 flex items-center justify-between">
-                <button type="button" className="text-xs text-cafe-secondary" onClick={returnToRail}>
-                  {desktop ? '← 返回侧栏' : '← 返回详情'}
-                </button>
-                {controls}
-              </div>
-              <p className={moment === 2 ? 'sr-only' : 'evolution-eyebrow'}>
-                能力进化 · 第 {projection.program.cycle} 轮 · {status.label}
-              </p>
-              <h1 className="evolution-title mt-2">
-                {evolutionProgramPresentation(projection.program, projection.origin).title}
-              </h1>
-              {moment === 2 ? (
-                <details className="exploration-project-context">
-                  <summary>项目详情与推进</summary>
-                  <p>
-                    第 {projection.program.cycle} 轮 · {status.label}
-                  </p>
-                  <EvolutionProgramOrigin projection={projection} />
-                  <EvolutionProgramName projection={projection} />
-                  <EvolutionProgressAction projection={projection} compact />
-                  <EvolutionJourney projection={projection} />
-                </details>
-              ) : (
-                <>
-                  <EvolutionProgramOrigin projection={projection} />
-                  <EvolutionProgramName projection={projection} />
-                </>
-              )}
-              {moment !== 2 && <EvolutionJourney projection={projection} />}
-            </header>
-            {moment !== 2 && <EvolutionProgressAction projection={projection} />}
+            <EvolutionReadingHeader
+              projection={projection}
+              controls={controls}
+              returnToRail={returnToRail}
+              desktop={desktop}
+              fullWindow={
+                attentionPresentation.kind === 'chat-workspace' && attentionPresentation.mode === 'full-window'
+              }
+              moment={moment}
+              v2={v2}
+            />
+            {moment !== 2 && !(v2 && moment === 1) && <EvolutionProgressAction projection={projection} />}
             <div role="tablist" aria-label="项目阅读内容" className="evolution-tabs">
               {(['judgment', 'history'] as const).map((view) => (
                 <button
@@ -306,7 +284,8 @@ export function EvolutionProgramSurface({ programId }: { programId: string }) {
                               {asset.catalog?.versions.find(
                                 (item) => refIdentity(item.versionRef) === refIdentity(version.ref),
                               )?.title ?? version.ref.version}
-                              {version.current && <span className="ml-2">当前采用</span>}
+                              {version.sourceCurrent && <span className="ml-2">来源当前版本</span>}
+                              {version.adopted && <span className="ml-2">当前采用</span>}
                             </span>
                             <span className="mt-1 block break-all font-mono text-cafe-muted">
                               {version.ref.version}
@@ -319,7 +298,9 @@ export function EvolutionProgramSurface({ programId }: { programId: string }) {
                         {asset.catalog ? '资产来源尚未提供版本记录。' : pendingOwnerRead(readStatus, '版本记录')}
                       </p>
                     )}
-                    {asset.catalog && <EvolutionSource label="采用来源" source={asset.catalog.currentProofRef} />}
+                    {asset.catalog && (
+                      <EvolutionSource label="来源当前版本证明" source={asset.catalog.currentProofRef} />
+                    )}
                     {selected && typeof window !== 'undefined' && (
                       <a
                         data-testid="evolution-version-link"

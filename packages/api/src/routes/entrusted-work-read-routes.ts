@@ -18,6 +18,7 @@ const callbackReadSchema = z
     taskId: z.string().trim().min(1).max(1_000),
     observedRevision: z.number().int().positive().optional(),
     includeCompleted: z.boolean().optional(),
+    includeCancelled: z.boolean().optional(),
   })
   .strict();
 
@@ -26,6 +27,10 @@ const webQuerySchema = z
   .object({
     observedRevision: z.coerce.number().int().positive().optional(),
     includeCompleted: z
+      .enum(['true', 'false'])
+      .transform((value) => value === 'true')
+      .optional(),
+    includeCancelled: z
       .enum(['true', 'false'])
       .transform((value) => value === 'true')
       .optional(),
@@ -62,14 +67,14 @@ export function registerEntrustedWorkReadRoutes(app: FastifyInstance, options: E
       return { error: 'Identity required' };
     }
     const query = z
-      .object({ view: z.enum(['active', 'completed']).optional() })
+      .object({ view: z.enum(['active', 'completed', 'cancelled']).optional() })
       .strict()
       .safeParse(request.query);
     if (!query.success) {
       reply.status(400);
       return { error: 'Invalid Schedule view' };
     }
-    return { ownerReads: await options.service.listForOwner(userId, query.data.view) };
+    return options.service.readForOwner(userId, query.data.view);
   });
 
   app.get('/api/entrusted-work/needs-me', async (request, reply) => {
@@ -78,7 +83,7 @@ export function registerEntrustedWorkReadRoutes(app: FastifyInstance, options: E
       reply.status(401);
       return { error: 'Identity required' };
     }
-    return { ownerReads: await options.service.listNeedsMeForOwner(userId), coverage: { state: 'complete' as const } };
+    return options.service.readNeedsMeForOwner(userId);
   });
 
   app.get('/api/entrusted-work/:taskId/owner-read', async (request, reply) => {
@@ -97,6 +102,7 @@ export function registerEntrustedWorkReadRoutes(app: FastifyInstance, options: E
       const ownerRead = await options.service.read({
         taskId: params.data.taskId,
         includeCompleted: query.data.includeCompleted,
+        includeCancelled: query.data.includeCancelled,
         viewer: { surface: 'human', userId },
         ...(query.data.observedRevision ? { observedRevision: query.data.observedRevision } : {}),
       });
@@ -119,6 +125,7 @@ export function registerEntrustedWorkReadRoutes(app: FastifyInstance, options: E
       const ownerRead = await options.service.read({
         taskId: parsed.data.taskId,
         includeCompleted: parsed.data.includeCompleted,
+        includeCancelled: parsed.data.includeCancelled,
         viewer: { surface: 'cat', userId: actor.userId, threadId: actor.threadId, catId: actor.catId },
         ...(parsed.data.observedRevision ? { observedRevision: parsed.data.observedRevision } : {}),
       });

@@ -1,6 +1,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { openFileMenu } from '@/test-utils/open-file-menu';
 import { ContentReviewSurface } from '../ContentReviewSurface';
 import { discussionView } from './WorkspaceContentReviewSurface.fixture';
 
@@ -48,8 +49,11 @@ it('uses separate reply authority while historical canvas and annotation state s
       />,
     ),
   );
-  expect(container.querySelector<HTMLButtonElement>('[data-mode="markup"]')?.disabled).toBe(true);
-  expect(container.querySelector<HTMLButtonElement>('[data-mode="comment"]')?.disabled).toBe(true);
+  const button = (label: string) =>
+    [...container.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent === label);
+  expect(button('画笔')?.disabled).toBe(true);
+  expect(button('圈选')?.disabled).toBe(true);
+  await openFileMenu(container);
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="打开作品讨论"]')?.click());
   const text = container.querySelector<HTMLTextAreaElement>('textarea[aria-label^="回复批注"]');
   expect(text).not.toBeNull();

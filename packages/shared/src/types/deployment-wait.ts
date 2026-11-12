@@ -81,14 +81,30 @@ export interface DeploymentWaitOutcomeV1 extends WaitOutcomeBaseV1<DeploymentSub
   readonly renewal?: never;
 }
 
+export interface DeploymentWaitExecutionIdentity {
+  readonly invocationId: string;
+  readonly generation: number;
+  readonly bootId: string;
+}
+
 export interface DeploymentWaitStateV1 {
   readonly await?: DeploymentAwaitStateV1;
   readonly waitOutcome?: DeploymentWaitOutcomeV1;
   /** Registration's existing owner turn holds first-consumer priority until its callback settles. */
-  readonly currentExecutionClaim?: {
-    readonly invocationId: string;
-    readonly generation: number;
-    readonly bootId: string;
+  readonly currentExecutionClaim?: DeploymentWaitExecutionIdentity;
+  /** History receipt for the exact current child. Persistence does not assert model consumption. */
+  readonly currentExecutionReceipt?: DeploymentWaitExecutionIdentity & {
+    readonly outcomeId: string;
+    readonly notificationKey: string;
+    readonly messageId?: string;
+  };
+  /** Terminal child evidence retained when its claim is released by generation CAS. */
+  readonly recoverySource?: DeploymentWaitExecutionIdentity;
+  /** Publication identity only; QueueLedger remains the sole pending execution owner. */
+  readonly transportAttempt?: {
+    readonly outcomeId: string;
+    readonly idempotencyKey: string;
+    readonly messageId?: string;
   };
 }
 
@@ -109,6 +125,7 @@ export interface DeploymentWaitObservationProjection {
 
 /** Read-only Hub projection. Task and deployment owners remain the only writers. */
 export interface DeploymentWaitItemProjection {
+  readonly projectPath?: string;
   readonly taskId: string;
   readonly threadId: string;
   readonly threadTitle: string | null;
@@ -136,11 +153,13 @@ export interface DeploymentCandidateProjection {
   readonly unknownCount: number;
 }
 
-export interface DeploymentWaitListResponse {
-  readonly projectPath: string;
+export type DeploymentWaitListResponse = {
   readonly items: readonly DeploymentWaitItemProjection[];
   readonly candidate: DeploymentCandidateProjection | null;
-}
+} & (
+  | { readonly scope?: 'project'; readonly projectPath: string }
+  | { readonly scope: 'all'; readonly projectPath: null }
+);
 
 export type DeploymentWaitEvaluation =
   | {

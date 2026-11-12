@@ -8,9 +8,11 @@ import type { WorkspaceWritebackService, WorkspaceWritebackView } from '../../wo
 import { reviewModificationBindings } from '../artifact-review/modification-request-reference.js';
 import type { ArtifactReviewService } from '../artifact-review/service.js';
 import type { ArtifactReviewStore } from '../artifact-review/store.js';
+import type { ContentModificationChatProjection } from './chat-projection.js';
 import type { ModificationFileLineage } from './file-lineage.js';
 import type { ContentModificationRecord } from './journal.js';
 import { ContentModificationJournalError } from './journal-errors.js';
+import { isModificationResultRound } from './media-response-round.js';
 import type { ContentTextModificationService } from './text/text-service.js';
 import { ModificationTextError } from './text/text-store.js';
 
@@ -36,6 +38,8 @@ export class ContentModificationResultService {
       text: ContentTextModificationService;
       writer: WorkspaceWritebackService;
       fileLineage: ModificationFileLineage;
+      receipts?: Pick<ContentModificationChatProjection, 'projectRejection' | 'projectWriteback'>;
+      onTextWriteback?: (record: ContentModificationRecord, writebackReceiptRef: string) => Promise<void>;
     },
   ) {}
 
@@ -43,6 +47,8 @@ export class ContentModificationResultService {
     record: ContentModificationRecord,
     principal: MediaReviewPrincipal,
   ): Promise<ModificationCandidate[]> {
+    if (record.payload.source.kind === 'video-project' || record.progress.prepared?.kind === 'project')
+      throw new ModificationTextError('invalid_patch');
     const bound = record.progress.review;
     if (!bound) return [];
     if (record.progress.prepared?.kind === 'text') {
@@ -62,8 +68,13 @@ export class ContentModificationResultService {
         .map((item) => item.record.progress.review!.round!),
     );
     const candidates: ModificationCandidate[] = [];
-    for (const returned of view.review.rounds.filter(
-      (round) => round.number > (bound.round ?? 0) && round.number <= lastResultRound,
+    for (const returned of view.review.rounds.filter((round) =>
+      isModificationResultRound(round, {
+        requestId: record.requestId,
+        round: bound.round ?? 0,
+        reviewRevision: original.revision,
+        lastResultRound,
+      }),
     )) {
       if (returned.responseAuthor?.kind !== 'cat' || returned.responseAuthor.actorId !== record.payload.targetCatId)
         throw new ModificationTextError('task_changed');
@@ -146,7 +157,12 @@ export class ContentModificationResultService {
         .find((item) => item.acceptOperationId === command.acceptOperationId);
       if (prior && prior.candidateRef === command.candidateRef) {
         const receipt = await this.deps.writer.find(prior.fileReceiptRef, principal);
-        if (receipt?.state === 'applied') return { acceptance: prior, receipt: publicWritebackReceipt(receipt) };
+        if (receipt?.state === 'applied') {
+          const visible = publicWritebackReceipt(receipt);
+          await this.deps.receipts?.projectWriteback(record, prior, visible);
+          if (record.progress.prepared?.kind === 'text') await this.deps.onTextWriteback?.(record, visible.receiptRef);
+          return { acceptance: prior, receipt: visible };
+        }
       }
       // This exact file acceptance won before our later request cancellation. Other Task closures still fence new effects.
       if (
@@ -181,7 +197,11 @@ export class ContentModificationResultService {
       { ...command, bytes },
       { userId: principal.userId, editSessionToken: command.editSessionToken },
     );
-    return { acceptance, receipt: publicWritebackReceipt(receipt) };
+    const visible = publicWritebackReceipt(receipt);
+    await this.deps.receipts?.projectWriteback(record, acceptance, visible);
+    if (visible.state === 'applied' && record.progress.prepared?.kind === 'text')
+      await this.deps.onTextWriteback?.(record, visible.receiptRef);
+    return { acceptance, receipt: visible };
   }
 
   async reject(requestId: string, candidateRef: string, principal: MediaReviewPrincipal) {
@@ -191,13 +211,15 @@ export class ContentModificationResultService {
     if (!record || !(await this.writeback(record, principal))) throw new ModificationTextError('not_found');
     const candidate = (await this.candidates(record, principal)).find((item) => item.candidateRef === candidateRef);
     if (!candidate) throw new ModificationTextError('not_found');
-    return this.deps.store.requests.cancellations.unlessCancelled(requestId, principal.userId, () => {
+    const rejection = this.deps.store.requests.cancellations.unlessCancelled(requestId, principal.userId, () => {
       const old = this.rejections(requestId, principal.userId).find((item) => item.candidateRef === candidateRef);
       if (old) return old;
       const rejection = this.deps.store.acceptances.reject(requestId, principal.userId, candidateRef);
       this.deps.store.requests.noteHumanDecision(requestId, principal.userId);
       return rejection;
     });
+    await this.deps.receipts?.projectRejection(record, rejection);
+    return rejection;
   }
 
   rejections(requestId: string, ownerUserId: string) {

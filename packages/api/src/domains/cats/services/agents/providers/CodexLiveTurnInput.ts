@@ -1,4 +1,3 @@
-import type { IdleFreshnessController } from '../../freshness/FreshnessNoticeBroker.js';
 import type {
   LiveProviderInputOutcome,
   PreparedProviderRequestV1,
@@ -6,14 +5,16 @@ import type {
 } from '../../types.js';
 import { requireExactPreparedProviderMessage } from '../../types.js';
 import { asCodexAppServerRecord, type CodexAppServerJsonObject } from './CodexAppServerEventMapper.js';
+import type { CodexLiveContextKind } from './CodexLiveRunPort.js';
 import { CodexAppServerRpcError } from './codex-app-server-rpc-error.js';
 
 export interface LiveProviderInput {
-  kind: 'text' | 'notice' | 'context';
+  kind: 'text' | 'context';
   text: string;
   sourceRef: string;
   sourceRefs?: readonly string[];
-  contextKind?: 'inbox_notice' | 'meeting_context' | 'recovery_context';
+  contextKind?: CodexLiveContextKind;
+  clientUserMessageId?: string;
 }
 export const LIVE_CONTEXT_TRIGGER =
   'The Host attached source-linked context at its original trust level. Continue this call; this is not a new user request.';
@@ -61,14 +62,16 @@ export class CodexLiveTurnInput {
   submitContextAtBoundary(
     text: string,
     sourceRefs: readonly string[],
-    contextKind: 'inbox_notice' | 'meeting_context' | 'recovery_context',
+    contextKind: CodexLiveContextKind,
     signal: AbortSignal,
     authorize: () => Promise<boolean>,
     threadId: string,
     activeTurnId: string | null,
+    clientUserMessageId?: string,
   ): Promise<string> {
     try {
       const { submission, receipt } = this.createContextSubmission(text, sourceRefs, contextKind, signal, authorize);
+      submission.input.clientUserMessageId = clientUserMessageId;
       void this.sendContext(submission, threadId, activeTurnId);
       return receipt;
     } catch (error) {
@@ -78,13 +81,19 @@ export class CodexLiveTurnInput {
   private createContextSubmission(
     text: string,
     sourceRefs: readonly string[],
-    contextKind: 'inbox_notice' | 'meeting_context' | 'recovery_context',
+    contextKind: CodexLiveContextKind,
     signal: AbortSignal,
     authorize: () => Promise<boolean>,
   ): { submission: Submission; receipt: Promise<string> } {
     if (!this.deps.isOpen() || signal.aborted) throw new LiveContextCancelledError();
     if (
-      !['inbox_notice', 'meeting_context', 'recovery_context'].includes(contextKind) ||
+      ![
+        'meeting_context',
+        'recovery_context',
+        'page_action_result',
+        'owner_voice_context',
+        'late_result_notice',
+      ].includes(contextKind) ||
       sourceRefs.length === 0 ||
       sourceRefs.length > 32
     )
@@ -124,7 +133,13 @@ export class CodexLiveTurnInput {
       if (!this.deps.isOpen() || value.signal?.aborted || !(await value.authorize?.()))
         throw new LiveContextCancelledError();
       if (value.signal?.aborted) throw new LiveContextCancelledError();
-      const result = await this.writeContext(threadId, activeTurnId, recorded.text, value.input.contextKind);
+      const result = await this.writeContext(
+        threadId,
+        activeTurnId,
+        recorded.text,
+        value.input.contextKind,
+        value.input.clientUserMessageId,
+      );
       const acceptedTurnId = acceptedContextTurnId(result, activeTurnId);
       accepted = true;
       await this.settle(request, 'accepted', acceptedTurnId);
@@ -156,6 +171,7 @@ export class CodexLiveTurnInput {
         await this.deps.request(activeTurnId ? 'turn/steer' : 'turn/start', {
           threadId,
           input: [{ type: 'text', text }],
+          clientUserMessageId: value.input.sourceRef,
           ...(activeTurnId ? { expectedTurnId: activeTurnId } : {}),
         }),
       );
@@ -181,40 +197,6 @@ export class CodexLiveTurnInput {
       this.pending.delete(value);
     }
   }
-  async startIdle(threadId: string, idle: IdleFreshnessController): Promise<string | null> {
-    const notice = await idle.prepare();
-    if (!notice) return null;
-    let accepted: string | null = null;
-    let request: ProviderRequestGenerationCommitV1 | undefined;
-    try {
-      const recorded = await this.record({ kind: 'notice', text: notice.text, sourceRef: notice.noticeId });
-      request = recorded.request;
-      if (!this.deps.isOpen()) throw new Error('Live call ended');
-      const result = asCodexAppServerRecord(
-        await this.deps.request('turn/start', {
-          threadId,
-          input: [],
-          turnTrigger: 'live_freshness',
-          additionalContext: { 'cat-cafe.live-freshness': { kind: 'application', value: recorded.text } },
-        }),
-      );
-      const id = asCodexAppServerRecord(result?.turn)?.id;
-      if (typeof id !== 'string' || !id) throw new Error('Live idle acceptance identity unavailable');
-      accepted = id;
-      await this.settle(request, 'accepted', accepted);
-      await idle.commitDelivered(notice, { acceptedTurnId: accepted });
-    } catch (error) {
-      if (accepted) return accepted;
-      await this.settle(request, this.failureOutcome(error));
-      if (
-        !this.deps.isOpen() ||
-        (error instanceof CodexAppServerRpcError && /empty.*input|input.*empty/i.test(error.message))
-      )
-        idle.defer(notice);
-      else await idle.markMissed(notice, error instanceof CodexAppServerRpcError ? 'rpc_rejected' : 'transport_failed');
-    }
-    return accepted;
-  }
   close(): void {
     for (const request of this.pending) request.reject(new Error('Live call ended'));
     this.pending.clear();
@@ -224,7 +206,10 @@ export class CodexLiveTurnInput {
     activeTurnId: string | null,
     text: string,
     contextKind: LiveProviderInput['contextKind'],
+    clientUserMessageId?: string,
   ): Promise<ReturnType<typeof asCodexAppServerRecord>> {
+    if (contextKind === 'owner_voice_context' && !activeTurnId)
+      throw new Error('Owner voice context requires an active native turn');
     const additionalContext = {
       'cat-cafe.live-context': { kind: contextKind === 'meeting_context' ? 'untrusted' : 'application', value: text },
     };
@@ -233,6 +218,7 @@ export class CodexLiveTurnInput {
         threadId,
         input: [{ type: 'text', text: LIVE_CONTEXT_TRIGGER }],
         additionalContext,
+        ...(clientUserMessageId ? { clientUserMessageId } : {}),
         ...(activeTurnId ? { expectedTurnId: activeTurnId } : { turnTrigger: 'live_context' }),
       }),
     );
@@ -254,7 +240,7 @@ export class CodexLiveTurnInput {
     return { text, ...(request ? { request } : {}) };
   }
   private verifiedApplicationText(input: LiveProviderInput, prepared: PreparedProviderRequestV1): string {
-    const decision = input.kind === 'notice' ? 'app_server_live_freshness_context' : 'app_server_live_context';
+    const decision = 'app_server_live_context';
     const application = prepared.nativeInstructions.find((item) => item.injectionDecision === decision);
     const expectedMessage = input.kind === 'context' ? LIVE_CONTEXT_TRIGGER : '';
     if (

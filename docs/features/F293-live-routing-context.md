@@ -5,6 +5,7 @@ topics: [routing, availability, quota, provider-health, capability-profile, cust
 tips_exempt: "Renewed 2026-09-18 for the typed preflight reason/context split; this is harness-internal routing evidence with no distinct user-invoked discovery action. Existing Team guidance remains the user surface; AC-E4 remains open."
 doc_kind: spec
 created: 2026-08-08
+updated: 2026-10-24
 description: "把能力、偏好与新鲜供给接入发送边界，并贯通可验证接责、失败回弹、用户取消与精确多方确认，使传球不再停在消息已发。"
 description_source: human
 description_author: codex-sol
@@ -13,7 +14,7 @@ description_updated_at: 2026-09-02T05:08:22Z
 
 # F293 — Live Routing Context
 
-> **Status**: Phases A–C baseline merged / Team UX M1 merged (AC-UX1–3; AC-UX6 evidence complete except Alpha) / profile feedback M2 (AC-UX4/5, AC-D4/D5) open / Phases D–E and expanded continuity remain open | **Owner**: 小太阳·Maine Coon (@codex-sol, GPT-5.6 Sol) | **Priority**: P1
+> **Status**: Phases A–C baseline merged / Phase O notification delivery merged + scoped Alpha verified (production dormant) / Team UX M1 merged (AC-UX1–3; AC-UX6 evidence complete except Alpha) / profile feedback M2 (AC-UX4/5, AC-D4/D5) open / Phases D–E and expanded continuity remain open | **Owner**: 小太阳·Maine Coon (@codex-sol, GPT-5.6 Sol) | **Priority**: P1
 
 > **Kickoff reviewer**: Ragdoll (@fable5)，一次 consolidated verdict
 
@@ -48,7 +49,7 @@ operator明确要求：
 - [F220](F220-a2a-collab-reliability.md) 持有 execution liveness；[F246](F246-approval-hub.md) 持有 exact proposal/stale approval，但尚无通用“人 + 猫针对同一 revision”的 AND-join。
 - [F307](F307-composable-workbench.md) 已把个人真实 surface adapters 落到同一个右侧 Workbench kernel；F293 的 Team 产品面可沿 descriptor/owner-state 边界接入，不再等待另一个 Workspace 宿主。
 - [F311](F311-capability-evolution-workspace.md) 已冻结完整的 Capability Evolution Program 生命周期，并把“F208 画像写回”与“F293 路由消费验证”拆成两个单变量对象；它需要 F293 提供真实消费证据，但不拥有路由判定，也不阻塞 F293 建设自己的 domain kernel。
-- F310、[F312](F312-memory-initiative-closure-command.md) 与 [F313](F313-analysis-to-outcome-closure-command.md) 分别冻结了真实托付、跨 owner release 与 finding→outcome 的持续持球/验收纪律。它们提供 journey/执行方法和 owner refs，不成为 F293 的第二套 custody、command 或 outcome store。
+- [F310](F310-growing-real-delegation.md)、[F312](F312-memory-initiative-closure-command.md) 与 [F313](F313-analysis-to-outcome-closure-command.md) 分别冻结了真实托付、跨 owner release 与 finding→outcome 的持续持球/验收纪律。它们提供 journey/执行方法和 owner refs，不成为 F293 的第二套 custody、command 或 outcome store。
 - Phase C 已由 PR #4211 合入：canonical F051 refresh、typed F153 health 与 durable dispatch terminal 统一经 `AutomaticRoutingSignalService` 写同一 immutable signal contract；resolver 用 shared owner revision 复用未变化 timeline、仍按每次 `observedAt` 重算 expiry。dispatch success 只恢复因果匹配的 exact-cat signal，provider-wide health recovery 仍归 F153 authority 或 bounded expiry。
 - 2026-09-07 页面审计：`TeamWorkspacePanel` 仍以 catId/provider/model/hash 作为列表主叙事，`RoutingPreferenceControls` 先于成员列表。F315 T1–T4 已有诊断；[PR #4293](https://github.com/zts212653/clowder-ai/pull/4293) 仍 OPEN，只覆盖三个 Team 文案/展示文件。当天只读接口样本为 28 位成员、18 位有画像；此数值不是产品常量或能力排名。
 - 底层使用私人还是公司账号，不是猫能可靠观测的事实。把它写成 `ExecutionSlot` 或展示字段只会制造 phantom precision。
@@ -102,7 +103,7 @@ Why: `routing-context` 继续只负责决策时的组合、解释与 preflight�
 | Feature | 它拥有 | F293 现在怎么接 | 是否阻塞 Phase A routing kernel |
 |---|---|---|---|
 | [F307](F307-composable-workbench.md) | Workspace working-set/layout/restore 宿主 | Team 以后作为 owner-backed surface descriptor 接入；F293 只供 read model 与动作，不写 layout truth | 否；产品激活仍服从 F307 Phase D |
-| F310 | 普通来源里的托付识别、Task custody admission、Needs Me/Schedule 旅程 | F293 只在需要选下一只猫时给 route decision；不把“识别到任务”或 Task admission 当 routing custody | 否 |
+| [F310](F310-growing-real-delegation.md) | 普通来源里的托付识别、Task custody admission、Needs Me/Schedule 旅程 | F293 只在需要选下一只猫时给 route decision；不把“识别到任务”或 Task admission 当 routing custody | 否 |
 | [F311](F311-capability-evolution-workspace.md) | Evolution Program、claim/economics、owner refs、keep/tune/rollback/sunset | F208 applied revision 的写回效果由 F293 before/after snapshot + preflight refs 证明；F311 只消费 lineage | 否；F300 缺口只 gate 需要同源读取的 join |
 | [F312](F312-memory-initiative-closure-command.md) | 记忆 initiative 的 release 顺序、runtime acceptance 与 vision guard | 复用其 command→execution→acceptance 纪律推进 F293，不复制 memory catalog/state | 否，非 runtime 依赖 |
 | [F313](F313-analysis-to-outcome-closure-command.md) | finding→approval→owner mutation→fresh outcome 的单 Feature 闭环 | 若 F293 将来收到真实 repair finding，沿 owner refs/Approval 处理；普通确定性实现仍走 tests/guards | 否，非 runtime 依赖 |
@@ -227,6 +228,25 @@ F293 不再把“F300 runtime 未启动”当成全局停止条件。当前按 c
 - [x] AC-C4: 过期负面信号转 unknown；成功 probe 或人工 clear 才确认 recovery。恢复计算使用完整 immutable timeline，不受合并 refs 或展示容量限制；重复错误有 dedupe / noise control。
 - [x] AC-C5: dispatch 遭遇真实 quota/provider failure 后写入同一 signal contract，后续 route 立即可见。
 - [x] AC-C6: 真实 dispatch 成功原子记录 exact-cat probe 起止时间，闭合同 owner/exact cat、故障时间不晚于 probe 开始的自动 provider/health 断言，包含晚落盘的旧失败。failed/queued/silent 不算恢复；较新失败、异猫、provider/pool/manual 不被清除，且不猜隐藏账号。
+
+### Phase B/C follow-through — 动态派活两刀（2026-10-24）
+
+**PR1：恢复回执去噪，Phase C follow-through / AC-C4 + INV-C11。** 先交独立完整功能；PR2 不混入这张 PR。只压缩展示，完整 immutable timeline、closure/recovery authority、Team/账本历史保留。
+
+- [x] AC-NR1: 无 active/expired 约束时，将所有匹配的 recovered 历史合成一条，显示已恢复状态记录数和最近 recovery 的有界引用；计数发生在展示容量裁剪之前，不把多个记录误称为多个独立故障。当前故障、人工暂停、过期 unknown 的归约与完整因果恢复不变。
+- [x] AC-NR2: 按 2026-10-25 的已接受纠正，正常或仍可执行的告警状态不生成发送后预检系统消息，也不在猫的 MCP 发送回执回显 B/C 诊断；旧正常卡在实时、历史重载与回放均隐藏。实际拒绝保留原目标、中文说明和原消息重试；内部 Queue/child/terminal 的 exact snapshotRef 与完整决定保留。能改变选择的可用性、余粮与候选事实放在选候选前，不补发无用后置摘要。未识别的协议证据不静默丢弃。
+
+**PR2：派活事实条，Phase B/C follow-through — dispatch quota facts。** 接既有 AC-B3/B4、AC-C1/C2，由 Phase E 做真实 A2A 验收。F293 只读 canonical owner 的 typed supply facts，不新增额度账本、画像事实、调度器、opaque score 或阈值自动解限；expanded custody/Cancel/AND-join 不在此刀。
+
+- [ ] AC-QF1: cat→当前 quota pool 绑定须由账号/执行 owner 证明，采用不泄漏身份的 opaque pool identity、binding revision/evidence，并进入 catalog/snapshot digest；actual-send 与最终冻结的 ExecutionAccountSnapshot.accountRevision 对齐，换号须重检或 unknown。账号归属不等于执行/模型的池适用性：当前 Codex main/spark/review/overflow 均仅为 exact account 下的独立观测，缺 provider typed applicability proof 时全部 `applicability: unknown`（包括 main），不进 provenQuotaPools、不改变 availability。将来逐池生效须取 exact frozen binding 的 limitId 或同等 typed proof，evidenceRef 指向 binding proof。缺绑定、无主观测、principal 不匹配或读取失败均 unknown，不按 provider/家族猜。owner 原文：`[thread-id]#private-source-id`「契约结论」。
+- [ ] AC-QF2: 同一 resolver 消费余量、多窗口、resetAt、observedAt 及 source freshness/validUntil；旧读数只可 stale 展示。Codex 按账号，Claude/Kimi/Gemini 按实际计划和窗口分别记录；Kimi 家内 Allegro 的 5 小时、7 天、月度约束并存，Gemini 懒启动周窗口仍待核。窗口不平均、不相加，不把 resetAt 当作 freshness 保证或把正向事实塞进负面 signal。
+- [ ] AC-QF3: 在选人前，对 caller/roster/F208 形成的角色 longlist 经同一 read service 读取 advisory selection snapshot A；Queue 只对 new-execution-capable targets 记录独立 queue-admission observation B（stage=queue_admitted、executionPreflight=pending），保留内部 provenance，不作为发送后 MCP 诊断回显，也不冒充执行 allowed/rejected 或恢复证据。exact continue_current 沿用 active run 的 frozen binding 与原 C，不生成 B、不承诺新 C、不新增 pre-append check；混合 fan-out 的 B.targets 排除这组 target。append race 退回 next_work 时实际新 child 仍取 fresh C，初始响应不回填 B。Queue 执行前先冻结 provider 实际消费的 binding/account revision，再 resolve execution preflight C，C 完成后才创建 child/启动 provider；执行 notice 与 terminal observer 共用 exact C。B→C 换号正常重检，无法证明同源时 unknown/warned；C 后不另读换号。显式目标不变。owner 裁定：`[thread-id]#private-source-id` 与 continue_current 澄清 `[thread-id]#private-source-id`。
+- [ ] AC-QF4: 仅展示 canonical account owner 允许的账号展示名；不把 raw accountRef、email/user/workspace 或私人/公司身份写入 F293 subject/evidence/log。备用账号标记 switchRequired，不计入当前猫的 provenQuotaPools 或当前可用余量。
+- [ ] AC-QF5: 每轮常驻路由内容不增加；选人前 6 猫事实条约 300 token，以同一近似分词器和实物计量。正常发送后的预检诊断为零；真实拒绝保留决策与恢复依据，内部原始事实完整留存。
+- [ ] AC-QF6: 至少一次真实 A2A：role longlist 内原非首选猫因 fresh capacity 被选中，执行 C 仍成立，对方实际接下且 You 未补粮情报；另覆盖 stale、unknown binding、switchRequired、operator 已定限制到期四类反例。只显示成功不算交付。
+- [ ] AC-QF7: 上线前补同四周猫发起交接分母；按独立任务必要派工去重，含该派未派与人类接管，区分主动点名和被迫补救。上线一周看每百次比例、粮相关纠正、交付量/等待/返工，并用新题复做盲选；30%/50% 仅参考，不作硬阈值。
+
+性能 prerequisite [#6067](https://github.com/zts212653/clowder-ai/pull/6067) 已合入 `473adb24f8c1d3d8619b0fb9aec7608232ffcb01`，owner 的 resolver/store claim 释放；PR2 已同步并验证组合版本。TTL=0 全账本仍为真相，decision projection 可重建。latest-main gate 冻结 `248a60f94b186b5585d91844b1d8dc40e6036dee`，分类 full/high，却在无关 F294 browser admission 规划处退出 1；full gate 未执行/未通过，已将原始失败源回投 F294 v3 既有执行 owner。按 SOP 采用受影响覆盖，high-assurance 非作者审查要求不变。
 
 ### Phase D — Slow Routing Knowledge Freshness & Migration
 

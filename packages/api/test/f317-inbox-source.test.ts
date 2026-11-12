@@ -2,12 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createCatId } from '@cat-cafe/shared';
 import { InvocationQueue } from '../src/domains/cats/services/agents/invocation/InvocationQueue.js';
-import { createInitialQueuedMessageCustody } from '../src/domains/cats/services/agents/invocation/QueuedMessageCustodyCoordinator.js';
 import { MessageStore } from '../src/domains/cats/services/stores/ports/MessageStore.js';
-import type { QueuedMessageCustody } from '../src/domains/cats/services/stores/ports/queued-message-custody.js';
-import { LiveInbox } from '../src/domains/concierge/live/inbox/LiveInbox.js';
 import type { LiveInboxScope } from '../src/domains/concierge/live/inbox/live-inbox-contract.js';
 import { MessageLiveInboxSource } from '../src/domains/concierge/live/inbox/MessageLiveInboxSource.js';
+import { createPersistedQueueFixture } from './helpers/persisted-queue-fixture.js';
 
 const target = createCatId('codex-astra');
 const scope: LiveInboxScope = {
@@ -15,47 +13,66 @@ const scope: LiveInboxScope = {
   threadId: 'home',
   catId: target,
   invocationId: 'live-child',
+  parentInvocationId: 'live-parent',
   callId: 'live',
   generation: 1,
 };
-function custody(overrides: Partial<QueuedMessageCustody> = {}): QueuedMessageCustody {
-  return {
-    version: 1,
-    entryId: 'entry',
-    revision: 1,
-    intent: 'coordinate',
-    status: 'queued',
-    allTargetCats: [target],
-    pendingTargetCats: [target],
-    notifiedByCatIds: [],
-    seenByCatIds: [],
-    seenInvocationIdByCatId: {},
-    failedByCatIds: [],
-    handledByCatIds: [],
-    priority: 'normal',
-    createdAt: 1000,
-    updatedAt: 1000,
-    ...overrides,
-  };
+async function append(store: MessageStore, queue: InvocationQueue, index = 1) {
+  const from = { kind: 'agent' as const, catId: createCatId('opus') };
+  const content = `private-body-${index}`;
+  const result = await queue.send(
+    store,
+    {
+      userId: scope.userId,
+      threadId: scope.threadId,
+      from,
+      content,
+      mentions: [target],
+      timestamp: index,
+      deliveryStatus: 'queued',
+      extra: { crossPost: { sourceThreadId: `source-${index % 10}`, effectClass: 'coordinate' } },
+    },
+    {
+      kind: 'conversation_input',
+      threadId: scope.threadId,
+      userId: scope.userId,
+      from,
+      ownerAuthProvenance: 'strict',
+      content,
+      targetCats: [target],
+      intent: 'coordinate',
+      authorIntentByCatId: { [target]: { requested: 'continue_current', boundParentInvocationId: 'live-parent' } },
+    },
+  );
+  assert.ok(result.message && result.entry);
+  return result.message;
 }
-function append(store: MessageStore, index = 1, queue = custody()) {
-  return store.append({
-    userId: 'owner',
-    threadId: 'home',
-    catId: createCatId('opus'),
-    content: `private-body-${index}`,
-    mentions: [target],
-    timestamp: index,
-    deliveryStatus: 'queued',
-    queueCustody: queue,
-    extra: { crossPost: { sourceThreadId: `source-${index % 10}`, effectClass: 'coordinate' } },
-  });
+function deliveredFixture() {
+  const f = createPersistedQueueFixture();
+  const source = new MessageLiveInboxSource({ store: f.messages, queue: f.queue, authorize: async () => true });
+  async function deliver() {
+    const result = await f.delivery.deliver({
+      ownerUserId: scope.userId,
+      threadId: scope.threadId,
+      targetCatId: target,
+      idempotencyKey: 'inbox-source',
+      content: 'private-body-delivered',
+      from: { kind: 'external', connectorId: 'test' },
+      ownerAuthProvenance: 'strict',
+      source: { connector: 'test', label: 'inbox-source' },
+    });
+    assert.ok(result.message);
+    return { message: result.message, invocationId: await f.waitForAwakening(result.message.id) };
+  }
+  return { ...f, source, deliver };
 }
 
-test('Message source pages >100 persisted Queue sources with no body or manufactured receipts', async () => {
+test('Message source pages >100 canonical Queue sources without exposing bodies or writing receipts', async () => {
   const store = new MessageStore();
-  const original = Array.from({ length: 237 }, (_, i) => append(store, i));
-  const source = new MessageLiveInboxSource({ store, authorize: async () => true });
+  const queue = new InvocationQueue();
+  const original = [];
+  for (let index = 0; index < 237; index++) original.push(await append(store, queue, index));
+  const source = new MessageLiveInboxSource({ store, queue, authorize: async () => true });
   let cursor: string | undefined;
   const found: string[] = [];
   for (let page = 0; page < 10; page++) {
@@ -70,38 +87,38 @@ test('Message source pages >100 persisted Queue sources with no body or manufact
     found,
     original.map((message) => message.id),
   );
-  assert.ok(original.every((message) => message.queueCustody?.bodyExposures === undefined));
+  assert.ok(original.every((message) => !Object.hasOwn(message, 'queueCustody')));
+  assert.equal(queue.list(scope.threadId, scope.userId).length, 237);
 });
 
-test('exact target receipt facts remain independent; a legacy seen flag is not an exact read', async () => {
-  const store = new MessageStore();
-  const message = append(
-    store,
-    1,
-    custody({
-      notifiedByCatIds: [target],
-      seenByCatIds: [target],
-      seenInvocationIdByCatId: { [target]: 'legacy-child' },
-      bodyExposures: [{ targetCatId: target, invocationId: 'exact-child', seenAt: 15 }],
-    }),
-  );
-  const source = new MessageLiveInboxSource({ store, authorize: async () => true });
-  const ref = await source.read(scope, message.id);
+test('exact History delivery does not fabricate native read, notification or retained context evidence', async (t) => {
+  const f = deliveredFixture();
+  t.after(() => f.close());
+  const { message } = await f.deliver();
+  const ref = await f.source.read(scope, message.id);
   assert.deepEqual(ref?.facts, {
     persisted: true,
-    notified: true,
-    readByInvocationIds: ['exact-child'],
+    notified: false,
+    readByInvocationIds: [],
     readInCurrentContext: false,
     handled: false,
     playback: 'unknown',
   });
+  assert.equal(f.queue.list(scope.threadId, scope.userId).length, 0, 'delivery already retired the pending target');
+  await f.close();
+  assert.equal(
+    (await f.source.read(scope, message.id))?.facts.handled,
+    true,
+    'terminal belongs to the exact original response',
+  );
 });
 
-test('permission, user/thread/target, recall, terminal and whisper boundaries are rechecked on exact reads', async () => {
+test('permission, owner/thread/target, recall, cancellation and whisper boundaries are rechecked', async () => {
   const store = new MessageStore();
+  const queue = new InvocationQueue();
   let allowed = true;
-  const source = new MessageLiveInboxSource({ store, authorize: async () => allowed });
-  const message = append(store);
+  const source = new MessageLiveInboxSource({ store, queue, authorize: async () => allowed });
+  const message = await append(store, queue);
   assert.ok(await source.read(scope, message.id));
   allowed = false;
   await assert.rejects(source.read(scope, message.id), { name: 'LiveInboxAuthorityUnavailableError' });
@@ -117,85 +134,6 @@ test('permission, user/thread/target, recall, terminal and whisper boundaries ar
   message.recall = { version: 1, exposure: 'none', recalledAt: 20 };
   assert.equal(await source.read(scope, message.id), null);
   delete message.recall;
-  assert.ok(message.queueCustody);
-  message.queueCustody.withdrawnByCatIds = [target];
+  store.markCanceled(message.id);
   assert.equal(await source.read(scope, message.id), null);
-});
-
-test('Host append events wake during a long tool and reconnect rereads the same canonical store', async () => {
-  let wakes = 0;
-  const deliveries: string[] = [];
-  const store = new MessageStore();
-  const queue = new InvocationQueue();
-  const source = new MessageLiveInboxSource({ store, queue, authorize: async () => true });
-  const options = {
-    scope,
-    source,
-    wake: () => {
-      wakes++;
-    },
-    deliver: async (batch: { references: readonly { messageId: string }[] }) => {
-      deliveries.push(...batch.references.map((item) => item.messageId));
-      return 'accepted' as const;
-    },
-  };
-  const inbox = new LiveInbox(options);
-  store.onAppend = () => inbox.signal();
-  const entry = queue.enqueue({
-    threadId: scope.threadId,
-    userId: scope.userId,
-    source: 'agent',
-    ownerAuthProvenance: 'strict',
-    content: 'private-body-1',
-    targetCats: [target],
-    intent: 'coordinate',
-  }).entry;
-  assert.ok(entry);
-  const message = append(store, 1, createInitialQueuedMessageCustody(entry));
-  queue.backfillMessageId(scope.threadId, scope.userId, entry.id, message.id);
-  assert.equal(wakes, 1);
-  assert.equal(deliveries.length, 0);
-  await inbox.atBoundary({ kind: 'tool_complete', generation: 1, userSpeaking: false });
-  assert.deepEqual(deliveries, [message.id]);
-  inbox.close();
-  const recovered = new LiveInbox({ ...options, scope: { ...scope, invocationId: 'new-child', generation: 2 } });
-  await recovered.atBoundary({ kind: 'idle', generation: 2, userSpeaking: false });
-  assert.deepEqual(deliveries, [message.id, message.id]);
-});
-
-test('same-child reconnect cannot mistake a historical read for retained working context', async () => {
-  const store = new MessageStore();
-  const message = append(
-    store,
-    1,
-    custody({
-      bodyExposures: [{ targetCatId: target, invocationId: scope.invocationId, seenAt: 15 }],
-      seenByCatIds: [target],
-      seenInvocationIdByCatId: { [target]: scope.invocationId },
-    }),
-  );
-  let retained = false;
-  const source = new MessageLiveInboxSource({
-    store,
-    authorize: async () => true,
-    retainsCurrentInvocationReads: () => retained,
-  });
-  assert.equal((await source.read(scope, message.id))?.facts.readInCurrentContext, false);
-  const deliveries: string[] = [];
-  const inbox = new LiveInbox({
-    scope,
-    source,
-    wake() {},
-    deliver: async (batch) => {
-      deliveries.push(...batch.references.map((row) => row.messageId));
-      return 'accepted';
-    },
-  });
-  assert.equal(
-    (await inbox.atBoundary({ kind: 'idle', generation: 1, userSpeaking: false })).kind,
-    'successor_required',
-  );
-  assert.deepEqual(deliveries, []);
-  retained = true;
-  assert.equal((await inbox.atBoundary({ kind: 'idle', generation: 1, userSpeaking: false })).pending, 0);
 });

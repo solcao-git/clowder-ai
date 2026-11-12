@@ -1,20 +1,22 @@
 import type { InvocationTrajectorySummary } from '@cat-cafe/shared';
 import type { FastifyInstance } from 'fastify';
 import { resolveCanonicalInvocationTrajectory } from '../domains/cats/services/session/CanonicalInvocationTrajectoryResolver.js';
-import {
-  projectRequestGenerationGaps,
-  projectRequestGenerations,
-} from '../domains/cats/services/session/RequestGenerationProjector.js';
-import {
-  requestGenerationSourceKey,
-  resolveRequestGenerationSourceStates,
-} from '../domains/cats/services/session/request-generation-source-policy.js';
 import type { TranscriptEvent } from '../domains/cats/services/session/TranscriptReader.js';
 import {
   filterThreadRecords,
   resolveThreadAccess,
   threadAccessDeniedBody,
 } from '../domains/cats/services/session/thread-access-policy.js';
+import {
+  projectRequestGenerationGaps,
+  projectRequestGenerations,
+} from '../domains/cats/services/session/transcript-index/RequestGenerationProjector.js';
+import {
+  requestGenerationSourceKey,
+  resolveRequestGenerationSourceStates,
+} from '../domains/cats/services/session/transcript-index/request-generation-source-policy.js';
+import type { TranscriptReadObserver } from '../domains/cats/services/session/transcript-index/transcript-read-observer.js';
+import type { TranscriptReadStage } from '../infrastructure/transcript-read-diagnostics.js';
 import { resolveUserId } from '../utils/request-identity.js';
 import { strictParseTranscriptInteger } from './session-transcript-route-helpers.js';
 import type { ReadableSession, SessionTranscriptRouteOptions } from './session-transcript-route-types.js';
@@ -28,6 +30,7 @@ interface InvocationTrajectoryRouteDependencies {
   listInvocationSummaries: (
     sessions: ReadableSession[],
     limit: number,
+    userId: string,
     signal?: AbortSignal,
   ) => Promise<{
     invocations: InvocationTrajectorySummary[];
@@ -37,7 +40,9 @@ interface InvocationTrajectoryRouteDependencies {
     sessions: ReadableSession[],
     invocationId: string,
     signal?: AbortSignal,
+    observer?: TranscriptReadObserver,
   ) => Promise<ReadonlyMap<string, readonly TranscriptEvent[]>>;
+  createReadObserver?: (requestId: string, stage: TranscriptReadStage) => TranscriptReadObserver | undefined;
   messageStore?: SessionTranscriptRouteOptions['messageStore'];
   keyedContentDigest?: (value: string) => Promise<string>;
   profileRepository?: SessionTranscriptRouteOptions['profileRepository'];
@@ -97,6 +102,20 @@ export function registerInvocationTrajectoryRoutes(
     if (request.query.reveal !== undefined && request.query.reveal !== 'exact') {
       return reply.status(400).send({ error: 'Invalid reveal mode', code: 'INVOCATION_GENERATION_REVEAL_INVALID' });
     }
+    // The resolver has already read every authorized candidate and selected the
+    // matching sessions. Reuse that request's snapshot instead of hydrating it
+    // again; the next HTTP request still performs its own fresh read.
+    let canonicalEvents: ReadonlyMap<string, readonly TranscriptEvent[]> = new Map();
+    const readCanonicalEvents = async (sessions: ReadableSession[], invocationId: string, signal?: AbortSignal) => {
+      let observer: TranscriptReadObserver | undefined;
+      try {
+        observer = dependencies.createReadObserver?.(request.id, 'canonical');
+      } catch {
+        /* Observation is optional. */
+      }
+      canonicalEvents = await dependencies.readInvocationEvents(sessions, invocationId, signal, observer);
+      return canonicalEvents;
+    };
     const result = await withTranscriptReadSignal(request, reply, (signal) =>
       resolveCanonicalInvocationTrajectory(
         {
@@ -112,7 +131,7 @@ export function registerInvocationTrajectoryRoutes(
           turnExecutionStore,
           sessionChainStore,
           threadStore,
-          readInvocationEvents: dependencies.readInvocationEvents,
+          readInvocationEvents: readCanonicalEvents,
         },
       ),
     );
@@ -125,10 +144,7 @@ export function registerInvocationTrajectoryRoutes(
         .send({ error: 'Invocation session chain changed during read', code: 'INVOCATION_SESSION_CHAIN_CHANGED' });
     }
     try {
-      const bySession = await withTranscriptReadSignal(request, reply, (signal) =>
-        dependencies.readInvocationEvents(sessions as ReadableSession[], request.params.invocationId, signal),
-      );
-      const events = sessions.flatMap((session) => [...(bySession.get((session as ReadableSession).id) ?? [])]);
+      const events = sessionIds.flatMap((sessionId) => [...(canonicalEvents.get(sessionId) ?? [])]);
       const hidden = projectRequestGenerations(events);
       const gaps = projectRequestGenerationGaps(events);
       let generations = hidden;
@@ -193,7 +209,7 @@ export function registerInvocationTrajectoryRoutes(
     }
     return reply.send(
       await withTranscriptReadSignal(request, reply, (signal) =>
-        dependencies.listInvocationSummaries(scopedSessions, Math.min(limitValue, 500), signal),
+        dependencies.listInvocationSummaries(scopedSessions, Math.min(limitValue, 500), userId, signal),
       ),
     );
   });

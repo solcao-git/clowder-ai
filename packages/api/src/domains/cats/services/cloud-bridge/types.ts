@@ -52,6 +52,8 @@ export interface CloudInvokeDispatchParams {
   readonly intent: string;
   /** Exact persisted source message ID: return anchor and Host idempotency key. */
   readonly sourceMessageId: string;
+  /** The durable child invocation that issued this source's return grant. */
+  readonly dispatchInvocationId?: string;
 }
 
 /**
@@ -62,7 +64,7 @@ export type BridgeDispatchOutcome =
       readonly kind: 'sent';
       readonly capturedUrl: string;
       /** The only transport; the legacy PinchTab bridge was removed (issue #1538). */
-      readonly transport: 'host';
+      readonly transport: 'host' | 'events';
       readonly hostMessageId: string;
       readonly idempotentReplay?: boolean;
     }
@@ -93,7 +95,10 @@ export type BridgeFallbackReason =
   | 'dispatch-failed'
   | 'host-append-failed'
   | 'missing-source-message-id'
-  | 'incomplete-dispatch-provenance';
+  | 'incomplete-dispatch-provenance'
+  | 'ambiguous-cloud-cat'
+  | 'source-retargeted'
+  | 'source-history-unknown';
 
 /**
  * The cloud invoke bridge — awaited by `invokeSingleCat` only until a bounded

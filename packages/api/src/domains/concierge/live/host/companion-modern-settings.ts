@@ -1,14 +1,36 @@
 import { CONCIERGE_CONFIG_DEFAULTS, clampBallSize } from '@cat-cafe/shared';
-import { type CompanionCommand, type CompanionReply, validateCompanionReply } from '@clowder-ai/plugin-contract-beta23';
+import { type CompanionCommand, validateCompanionReply } from '@clowder-ai/plugin-contract-beta23';
+import { validateCompanionReply as validateWorkReply } from '@clowder-ai/plugin-contract-beta25';
+import { validateCompanionReply as validatePresentationReply } from '@clowder-ai/plugin-contract-beta27';
+import { validateCompanionReply as validateLetterReply } from '@clowder-ai/plugin-contract-beta28';
+import {
+  type CompanionCommand as AppAssistCommand,
+  validateCompanionReply as validateAppAssistReply,
+} from '@clowder-ai/plugin-contract-beta29';
 import { z } from 'zod';
+import type { HostCompanionReply } from '../../../plugin/desktop-window-runtime/companion-private-wire.js';
+import type { CompanionArchiveContract } from '../../../plugin/desktop-window-runtime/published-companion-v2.js';
 import type { CompanionOwnerClient } from '../companion-owner-client.js';
 
 const unavailable = () => ({ kind: 'settings', status: 'unavailable', reason: 'temporarily_unavailable' }) as const;
-type Update = Extract<CompanionCommand, { kind: 'settings.update' }>;
+type Update = Extract<CompanionCommand | AppAssistCommand, { kind: 'settings.update' }>;
 const settledCall = z.enum(['unchanged', 'stopped']);
+// Published beta.23/24 archives reject smaller replies. Keep the saved owner
+// preference intact, but project a value their public contract can consume.
+const publishedModernBallSizeMin = 48;
+
+function publishedBallSize(size: number | null | undefined, contract: CompanionArchiveContract['contract']) {
+  const clamped = clampBallSize(size);
+  return ['0.1.0-beta.25', '0.1.0-beta.27', '0.1.0-beta.28', '0.1.0-beta.29'].includes(contract)
+    ? clamped
+    : Math.max(publishedModernBallSizeMin, clamped);
+}
 
 /** Read the same owner record, applying only its canonical legacy defaults. */
-export async function readModernCompanionSettings(client: CompanionOwnerClient): Promise<CompanionReply> {
+export async function readModernCompanionSettings(
+  client: CompanionOwnerClient,
+  contract: CompanionArchiveContract['contract'] = '0.1.0-beta.23',
+): Promise<HostCompanionReply> {
   const response = await client.requestResponse('/api/concierge/config?view=settings');
   if (response.statusCode === 401 || response.statusCode === 403) return { kind: 'error', code: 'permission_required' };
   if (response.statusCode !== 200 || response.body.status !== 'available')
@@ -28,15 +50,20 @@ export async function readModernCompanionSettings(client: CompanionOwnerClient):
     values: {
       dutyCatProfileId: config.dutyCatProfileId,
       skin: config.skin,
-      ballSize: clampBallSize(size),
+      ballSize: publishedBallSize(size, contract),
       behaviorEnabled: config.behaviorEnabled ?? true,
       proactivePolicy: config.proactivePolicy,
       personaTone: config.personaTone,
       householdReadsAllowed: config.householdReadsAllowed ?? true,
+      ...(contract === '0.1.0-beta.29' ? { appAssistEnabled: config.appAssistEnabled === true } : {}),
     },
     companions: response.body.companions,
     selectedCompanionStatus: response.body.selectedCompanionStatus,
   };
+  if (contract === '0.1.0-beta.25') return validateWorkReply(candidate) ? candidate : unavailable();
+  if (contract === '0.1.0-beta.27') return validatePresentationReply(candidate) ? candidate : unavailable();
+  if (contract === '0.1.0-beta.28') return validateLetterReply(candidate) ? candidate : unavailable();
+  if (contract === '0.1.0-beta.29') return validateAppAssistReply(candidate) ? candidate : unavailable();
   return validateCompanionReply(candidate) ? candidate : unavailable();
 }
 
@@ -44,7 +71,7 @@ export async function updateModernCompanionSettings(
   client: CompanionOwnerClient,
   command: Update,
   stopped: () => void,
-): Promise<CompanionReply> {
+): Promise<HostCompanionReply> {
   if (command.field === 'dutyCatProfileId') {
     const read = await readModernCompanionSettings(client);
     if (read.kind !== 'settings' || read.status !== 'available')

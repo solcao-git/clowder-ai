@@ -1,9 +1,50 @@
 ---
 cell_id: memory
+mcp_admission_status: accepted
+mcp_admission_ref: "architecture-cell:memory"
+mcp_admission_claims:
+  - ref: "architecture-cell:memory"
+    toolName: cat_cafe_propose_event_memory_correction
+    resourceFamily: identity-proposal
+    boundaryKind: resource-entry
+    decision: accepted
 title: Memory / Evidence
 summary: Evidence indexing、retrieval、scanner selection、bootstrap、library memory，以及带 append-only content-free owner outcome refs 的 execution-time cue orchestration。
-canonical_features: [F102, F152, F209, F255, F260, F263, F271, F276, F282, F287, F321]
+canonical_features: [F102, F152, F209, F221, F227, F231, F255, F260, F263, F271, F276, F282, F287, F321]
 code_anchors:
+  - packages/api/src/domains/memory/MessageSearchAnswerPublicationService.ts
+  - packages/api/src/domains/memory/MessageSearchAnswerPublicationStore.ts
+  - packages/api/src/routes/callback-message-search-answer-routes.ts
+  - packages/api/src/routes/message-search-answer-route.ts
+  - packages/mcp-server/src/tools/message-search-answer-tool.ts
+  - packages/api/src/domains/memory/MessageSearchService.ts
+  - packages/api/src/domains/memory/message-query-qualifier.ts
+  - packages/api/src/domains/memory/message-query-native.ts
+  - packages/api/src/domains/memory/LunaCurationClient.ts
+  - packages/api/src/domains/memory/curation/ThreadOverviewRepository.ts
+  - packages/api/src/domains/memory/curation/ThreadOverviewBackfill.ts
+  - packages/api/src/domains/memory/summary-pending-input.ts
+  - packages/api/src/domains/memory/cue/sources/ThreadOverviewMemoryCueSource.ts
+  - packages/api/src/domains/memory/owner/OwnerMemoryActionCoordinator.ts
+  - packages/api/src/domains/memory/owner/OwnerMemoryActionReceiptStore.ts
+  - packages/api/src/domains/memory/EventMemoryStore.ts
+  - packages/api/src/domains/memory/event/EventMemoryLifecycleService.ts
+  - packages/api/src/domains/memory/event/EventMemoryCorrectionProposalStore.ts
+  - packages/api/src/domains/memory/entity/EntityMemoryLifecycleStore.ts
+  - packages/api/src/domains/memory/entity/EntityMemoryLifecycleService.ts
+  - packages/api/src/domains/memory/profile/ProfileMemoryLifecycleStore.ts
+  - packages/api/src/domains/memory/profile/ProfileMemoryLifecycleService.ts
+  - packages/api/src/domains/memory/taste/TasteMemoryLifecycleService.ts
+  - packages/api/src/domains/memory/taste/TasteMemoryLifecycleStore.ts
+  - packages/api/src/domains/memory/taste/TasteMemoryProjectionWriter.ts
+  - packages/api/src/domains/memory/taste/TasteTakeawayCandidateImporter.ts
+  - packages/api/src/domains/cats/services/profile/ProfileRepository.ts
+  - packages/api/src/domains/cats/services/profile/writeProfileUpdate.ts
+  - packages/api/src/routes/owner-memory-browser-auth.ts
+  - packages/api/src/routes/entity-memory-owner.ts
+  - packages/api/src/routes/profile-memory-owner.ts
+  - packages/api/src/routes/event-memory-correction-decision-routes.ts
+  - packages/shared/src/types/memory-owner-lifecycle.ts
   - packages/api/src/domains/memory/interfaces.ts
   - packages/api/src/domains/memory/IndexBuilder.ts
   - packages/api/src/domains/memory/SqliteEvidenceStore.ts
@@ -80,6 +121,8 @@ code_anchors:
   - packages/api/src/routes/taste-observatory.ts
   - packages/mcp-server/src/tools/memory-cue-tools.ts
 doc_anchors:
+  - docs/architecture/f322-message-search-answer-contract.md
+  - feature-specs/2026-10-08-f321-luna-thread-recall.md
   - docs/decisions/020-f102-memory-system-architecture.md
   - docs/features/F102-memory-adapter-refactor.md
   - docs/features/F152-expedition-memory.md
@@ -105,6 +148,10 @@ doc_anchors:
   - feature-discussions/2026-08-02-f287-close-gate/close-gate-report.md
 static_scan_hints: [IEvidenceStore, IIndexBuilder, RepoScanner, EvidenceStore, IndexBuilder, Scanner, Memory, passage_vectors, entity_id, entity conflict, EntityRegistry, EntityConflictContext, Perspective, searchEvidence, search_evidence, AutoDreamStore, DreamDiaryEntry, SleepPosture, PrivateCue, OwnedSeed, F255PendingCueSink, DiaryEvidenceProjector, world:diary, LifecycleTraceStore, lifecycle_traces, VerificationEvent, ThreeAxisSnapshot, MemoryReflectionStore, SessionReflectionProducer, DailyContextReflectionProducer, DailyContextReflectionTaskSpec, reflection_outputs, pull_only, applyPullOnlyDownrank, ProactiveMemoryOpportunityEvaluator, ProactiveMemoryColdStartConfig, proactive-memory-judgment, opportunityRef, RecallOpportunityCatalog, MemoryCuePlaneService, MemoryCueResolverRegistry, MemoryCueInvocationPromptService, MemoryCueEpisodeStore, MemoryCueDrillHandleService, MemoryCueSourceReader, memory_cue_events]
 cited_by:
+  - {feature: F322, date: 2026-10-26, delta: "memory owns one TTL=0 bounded answer publication; original completed R or explicit message owns its Host-only binding, with no parallel search/index/queue"}
+  - {feature: F322, date: 2026-10-22, delta: "query eligibility is a bounded native read-only consumer of canonical readable message bodies; publication rechecks authority and revision, while recall, source stores, sorting and memory curation ownership stay in existing lanes"}
+  - {feature: F321, date: 2026-10-08, delta: "F102 source-thread overviews and durable native session/cursor metadata; catalog v6 first-owner-message resolver and F296 bounded T2 historical clue; message/source/Task authority remains in existing lanes"}
+  - {feature: F321, date: 2026-10-07, delta: "Phase A adds browser-owner adapters to original lane services, durable request receipts and Event correction approval; memory source owners remain separate and F287 cue episodes stay content-free"}
   - {feature: F322, date: 2026-10-02, delta: "message-unit query consumes existing passage indexing and canonical message/thread visibility; HTTP, MCP and concierge share one stateless projection without a new index or source store"}
   - {feature: F191, date: 2026-05-07, delta: new cell}
   - {feature: F209, date: 2026-05-22, delta: "passage-level semantic recall, entity registry as retrieval anchors, typed evidence drill-down readers, and Perspective query-plan surface"}
@@ -133,6 +180,44 @@ cited_by:
 
 # Memory / Evidence
 
+## F321 owner lifecycle consumers
+
+Architecture cell: memory, with the original Profile repository and proposal writer retained.
+Map delta: new browser owner read/action adapters and lane lifecycle services. `OwnerMemoryActionCoordinator`
+coordinates exact owner/lane/target/request receipts; it is not a replacement memory authority or a universal M3 writer.
+Why: the owner page must inspect, correct, retire or forget the same memory used by existing readers.
+
+Canonical source: Event uses `EventMemoryStore`; Entity uses the original registry/evidence database;
+Profile uses the original `ProfileRepository` targets and shares `profileUpdateLock` with proposal approvals.
+Taste retains the original repository/F221 proposal store and disposable Git publisher; integrated V62 stores lifecycle,
+candidate and exact request evidence. Confirming an older takeaway requires both source and candidate revisions.
+Person continues `people/OwnerMemoryActionService`. Browser writes require session, allowed Origin/Referer and CSRF;
+callback, agent-key and self-reported owner credentials do not substitute for that adapter.
+Event cat corrections publish through the existing Approval Hub with server-bound original source coordinates.
+The MCP admission records the existing F321 Phase A Event correction entry landed in #5227:
+`cat_cafe_propose_event_memory_correction` binds the exact Event ID, revision and original source to a pending
+owner decision in `identity-proposal`; `EventMemoryLifecycleService` remains the canonical writer.
+
+Consumer evidence: `rg -n 'new (ProfileMemory|EntityMemory|EventMemory|OwnerMemory)|profileMemoryOwnerRoutes|entityMemoryOwnerRoutes|eventsRoutes' packages/api/src/index.ts`.
+Claim guards: `event-correction-owner-auth.test.ts`, original owner-lifecycle route tests, exact recovery-boundary tests,
+`owner-lifecycle-durable-redis.test.ts` and `MemoryEventCorrections.test.tsx` reject forged authority, stale revision,
+unconfirmed results and a second mutation on retry. Frozen historical writes and reopen reconciliation are guarded by
+`event-legacy-forget-replay.test.ts`; `event-forget-fence-concurrency.test.ts` uses two actual SQLite connections
+to keep reconciliation and trigger replacement atomic. These executed boundaries do not establish arbitrary
+old-binary rollback compatibility. Public publication retains a confirmed Git tree at `refs/cat-cafe/taste/published` in the shared object database,
+without changing the main worktree or index. Readers and browse/observatory projections pin that approved tree;
+private content retains the original safe file reader. Every database open atomically reconciles/reinstalls the
+Taste lifecycle fence for evidence documents and passages, including old writers and stale scanner bytes.
+`taste-published-canonical-and-reindex.test.js` exercises actual separated Git publication/read roots and reindexing.
+Detailed outcomes live in
+*(internal reference removed)*.
+
+The dynamic `defineCanonicalTool` extractor yielded no target for the new correction declaration in the producer's
+Convention Graph scan. Use an explicit census of `cat_cafe_propose_taste`,
+`cat_cafe_propose_event_memory_correction`, their callback routes, original stores and Approval Hub adapters;
+the empty extraction is not absence proof or automatic contract coverage. Browser correction cards share presentation
+and uncertain-result recovery only; Event and Taste still use separate original endpoints and receipt validators.
+
 ## Canonical Owner
 
 F102 owns the memory system contract: `IIndexBuilder`, `IEvidenceStore`, indexing, retrieval modes, local SQLite evidence, and resolver boundaries.
@@ -148,6 +233,10 @@ F313 D7 adds no memory state. `MemoryCueEpisodeStore` remains the only append-on
 exact primary-key read. A successful authenticated applied/dismissed callback returns only
 `F287/memory-cue-consumption:<eventId>@<createdAt>`; the F287 Paw Feel owner adapter may reread and verify that event,
 owner and time, but F278 stores only the ref and never receives the cue body or rationale.
+
+F321 Luna keeps source-thread current overviews in F102, with commit-bound native session and resumable historical cursor metadata. The first-owner-message typed opportunity admits only the thread_overview resolver, whose clean librarian reads the whole readable directory and then complete chosen overviews. It remains historical T2 evidence; only the exact F296 clue policy may carry its bounded body. MemoryCueEpisodeStore records actual presentation/drill/application; current work truth must be reread from Task/PR.
+
+F321 input accounting consumes MessageStore's canonical visibilitySeq order. Append/publication/terminal notifications only invalidate derived pending hints; bounded reconciliation uses watermark and input-revision CAS on the existing writer queue. Frozen backfill frontiers and live watermarks use canonical v2 coordinates, while fact provenance retains raw source IDs. MessageStore remains the publication authority; no parallel timeline or accounting source is created.
 
 F321 A1b reads that same ledger by authenticated owner, resolver family and source anchor. The
 source summary counts consumption events and projects the latest presentation's thread and outcome;
@@ -262,6 +351,7 @@ score, acceptance KPI, cat ranking, automatic tuning, or prompt feedback loop.
 - Compile entity mentions from a revision-fenced WAL snapshot into private staging. The evidence writer queue copies bounded batches, then atomically publishes registry truth, its revision event and generation heads. The current mention view exposes only published generations; per-document and per-entity heads share one monotonic sequence. Publication reserves the SQLite writer before reading fences, rejects any newer overlapping document/entity head, and advances heads monotonically; garbage collection excludes all in-flight staging generations. A rejected publisher rolls back its source mutation and returns a retryable conflict. Preserve older `INSERT OR IGNORE` / `DELETE` consumers through compatibility triggers, and recover interrupted projection cleanup and pending document publications on startup.
 - Keep long projection computation outside the live SQLite writer lock: scheduler ledgers and recall telemetry share that database and still perform synchronous writes. Corpus rebuilds yield between document / message units instead of making one corpus-sized native transaction.
 - Projection batches also own their WAL checkpoint cost: a connection-scoped lease temporarily disables automatic checkpoints and awaits PASSIVE maintenance in the existing projection process. The maintenance job opens only an existing main database, without migrations or a writer transaction. Observe actual frame progress at batch boundaries, apply finite backpressure when readers prevent reclamation, and restore the exact prior connection setting. Maintenance failure cannot revoke published registry/head truth; retain the generation recovery receipt for deferred cleanup. Concurrent checkpoints require a SQLite build containing the WAL-reset fix. This removes bulk checkpoint work from incidental ledger commits, not the physical I/O latency of every individual write.
+- Document, message and transcript indexing batches use `SqliteEvidenceStore.runCheckpointedBatch` under the same writer queue and checkpoint lease. Each file-backed batch awaits PASSIVE maintenance before restoring the connection policy and releasing its queue slot; the next indexing batch yields through that queue. A pinned reader can stop indexing with retryable backpressure after a committed batch, so callers retain that progress and may retry after the reader releases. Markdown source hashes become complete in the passage replacement transaction; message retries consume the existing durable pending-mention marker; failed dirty flushes restore unfinished thread IDs without clearing concurrent marks. The in-memory path stays local. This preserves passage transactions and sync settings while keeping bulk checkpoint I/O off the API thread; it does not bound every WAL write, header sync or OS scheduling delay.
 - Treat F211 runtime session output as evidence after transcript/digest materialization; do not reach back into live runtime binding state, external runtime registration, or agent-key auth from memory indexing code.
 - Keep F255 diary product writes invocation-authenticated and owner-scoped; project them into `world:diary` after product commit, with startup reconciliation for repair.
 - Keep F255 cue ingestion receipt-only and cat seed decisions invocation-authenticated; expose bounded private context only to the matching Present Loop wake.

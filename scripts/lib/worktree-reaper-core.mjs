@@ -16,6 +16,8 @@
  * - A fact that could not be determined is a third state → review, never folded into a pass.
  */
 
+import { retentionStatus } from './worktree-retention.mjs';
+
 export const DEFAULT_POLICY = Object.freeze({
   /** Directory basenames that are never touched, whatever their state or declaration. */
   whitelist: Object.freeze([
@@ -32,7 +34,6 @@ export const DEFAULT_POLICY = Object.freeze({
   mergedIdleDays: 7,
   /** Days a quarantined directory stays restorable before --purge may delete it. */
   quarantineDays: 14,
-  maxWorktrees: 40,
 });
 
 export const LIFECYCLE_POLICIES = Object.freeze(['merged', 'ttl', 'never']);
@@ -42,8 +43,14 @@ const review = (reason) => ({ verdict: 'review', reason });
 const quarantine = (reason) => ({ verdict: 'quarantine', reason });
 const known = (v) => v !== null && v !== undefined;
 
-export function isProtected(name, policy = DEFAULT_POLICY) {
-  return policy.whitelist.includes(name) || policy.protectedPrefixes.some((p) => name.startsWith(p));
+export function isProtected(name, policy = DEFAULT_POLICY, primaryName = 'cat-cafe') {
+  return (
+    policy.whitelist.includes(name) ||
+    policy.protectedPrefixes.some((p) => name.startsWith(p)) ||
+    name === `${primaryName}-alpha` ||
+    name === `${primaryName}-runtime` ||
+    name.startsWith(`${primaryName}-runtime-`)
+  );
 }
 
 /** Uncommitted work is never moved automatically, whatever the declared policy. */
@@ -64,23 +71,27 @@ function isCompleteDeclaration(l) {
   return l.policy !== 'ttl' || isIsoDate(l.expiresAt);
 }
 
+function classifyMerged(e, policy) {
+  const dirty = dirtyGuard(e);
+  if (dirty) return dirty;
+  if (!known(e.inMain)) return review('ancestry-unknown');
+  if (!e.inMain) return keep('not-merged-yet');
+  if (!known(e.idleDays)) return review('idle-unknown');
+  if (e.idleDays < policy.mergedIdleDays) return keep('recently-active');
+  return quarantine('merged-idle');
+}
+
 function classifyDeclared(e, policy, now) {
   if (!isCompleteDeclaration(e.lifecycle)) return review('declaration-incomplete');
+  const retention = retentionStatus(e.lifecycle, now);
+  if (retention) return retention === 'retained-until' ? keep(retention) : review(retention);
   const { policy: declared, expiresAt } = e.lifecycle;
   if (declared === 'never') return keep('policy-never');
   if (declared === 'ttl') {
     if (now < Date.parse(expiresAt)) return keep('ttl-active');
     return dirtyGuard(e) ?? quarantine('ttl-expired');
   }
-  if (declared === 'merged') {
-    const dirty = dirtyGuard(e);
-    if (dirty) return dirty;
-    if (!known(e.inMain)) return review('ancestry-unknown');
-    if (!e.inMain) return keep('not-merged-yet');
-    if (!known(e.idleDays)) return review('idle-unknown');
-    if (e.idleDays < policy.mergedIdleDays) return keep('recently-active');
-    return quarantine('merged-idle');
-  }
+  if (declared === 'merged') return classifyMerged(e, policy);
   return review('policy-invalid');
 }
 
@@ -130,6 +141,9 @@ function ownerIntentSinceQuarantine(q) {
   if (l === null || l === undefined) return review('lifecycle-unknown');
   if (l.policy === 'never') return keep('policy-never');
   if (!LIFECYCLE_POLICIES.includes(l.policy) || !isCompleteDeclaration(l)) return review('declaration-incomplete');
+  const retention = retentionStatus(l);
+  if (retention === 'retention-invalid') return review(retention);
+  if (retention && Date.parse(l.retention.recordedAt) >= q.quarantinedAt) return review('retained-in-quarantine');
   if (Date.parse(l.createdAt) > q.quarantinedAt) return review('redeclared-in-quarantine');
   return null;
 }

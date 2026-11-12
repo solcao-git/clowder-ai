@@ -1,28 +1,25 @@
 'use client';
 import {
   type CollectiveAcceptedWorkResult,
+  type CollectiveClientCafeSection,
   type CollectiveClientContext,
+  type CollectiveMediaSurfaceRefV1,
+  collectiveClientCafeSectionSchema,
   collectiveClientContextSchema,
-  collectiveClientWorkResultAcceptedSchema,
   collectiveContextReadySchema,
 } from '@cat-cafe/shared';
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import type { CollectiveConnectionProjection } from './collective-client';
+import {
+  type BridgeConnection,
+  type BridgeGeneration,
+  collectiveFocusKey,
+  collectiveFocusMessage,
+  handleCollectiveAccountabilityChange,
+  queueAcceptedWorkResult,
+} from './collective-context-bridge-messages';
+import { mediaSurfaceRefMatches, readMediaSurfaceRef } from './collective-media-surface-ref';
 import type { CollectiveWorkActionTarget } from './collective-work-action';
-
-interface BridgeGeneration {
-  bridgeId: string;
-  contextId?: string;
-  revision: number;
-}
-
-interface BridgeConnection {
-  serviceOrigin: string;
-  serviceInstanceId: string;
-  collectiveId: string;
-  connectionId: string;
-  authorizedHumanId: string;
-}
 
 /** This bridge carries public coordinates only. Host data and authority never cross the frame. */
 export function useCollectiveContextBridge(
@@ -37,7 +34,9 @@ export function useCollectiveContextBridge(
   const collectiveId = connection?.collectiveId;
   const connectionId = connection?.connectionId;
   const authorizedHumanId = connection?.authorizedHumanId;
+  const authorityStatus = connection?.authorityStatus;
   const [context, setContext] = useState<CollectiveClientContext>();
+  const [mediaRef, setMediaRef] = useState<CollectiveMediaSurfaceRefV1>();
   const generation = useRef<BridgeGeneration>();
   const current = useRef<CollectiveClientContext>();
   const pendingWorkResults = useRef(new Map<string, Promise<void>>());
@@ -45,6 +44,7 @@ export function useCollectiveContextBridge(
   const clear = useCallback(() => {
     current.current = undefined;
     setContext(undefined);
+    setMediaRef(undefined);
   }, []);
   const reset = useCallback(() => {
     generation.current = undefined;
@@ -85,6 +85,7 @@ export function useCollectiveContextBridge(
       serviceInstanceId,
       serviceOrigin,
     });
+    const mediaConnection = bridgeConnection && authorityStatus ? { ...bridgeConnection, authorityStatus } : undefined;
     const handleReady = (data: unknown) => {
       if (!collectiveContextReadySchema.safeParse(data).success) return false;
       reset();
@@ -99,9 +100,7 @@ export function useCollectiveContextBridge(
       active.revision = value.revision;
       current.current = value;
       setContext(value);
-      const focusKey = focusWork
-        ? `${value.bridgeId}:${value.contextId}:${value.revision}:${focusWork.connectionId}:${focusWork.workId}:${focusWork.workRevision}:${focusWork.resultRevision}`
-        : undefined;
+      const focusKey = focusWork ? collectiveFocusKey(value, focusWork) : undefined;
       if (
         focusWork &&
         focusKey &&
@@ -110,31 +109,41 @@ export function useCollectiveContextBridge(
       ) {
         focusedGeneration.current = focusKey;
         iframeRef.current?.contentWindow?.postMessage(
-          {
-            type: 'collective:host-focus-work',
-            bridgeId: value.bridgeId,
-            contextId: value.contextId,
-            contextRevision: value.revision,
-            workId: focusWork.workId,
-            workRevision: focusWork.workRevision,
-            channelId: focusWork.channelId,
-            resultEventId: focusWork.resultEventId,
-            resultRevision: focusWork.resultRevision,
-          },
+          collectiveFocusMessage(value, focusWork),
           bridgeConnection.serviceOrigin,
         );
       }
     };
-    const onMessage = (event: MessageEvent<unknown>) => {
+    const handleCafeSection = (data: unknown, active?: BridgeGeneration) => {
+      const parsed = collectiveClientCafeSectionSchema.safeParse(data);
+      if (!parsed.success) return false;
+      const value = parsed.data;
+      const context = current.current;
       if (
+        !active ||
+        !context ||
         !bridgeConnection ||
-        event.source !== iframeRef.current?.contentWindow ||
-        event.origin !== bridgeConnection.serviceOrigin
+        !clientCafeSectionMatches(value, context, active, bridgeConnection)
       )
-        return;
-      if (handleReady(event.data)) return;
+        return true;
+      const next = { ...context, cafeSection: value.section };
+      current.current = next;
+      setContext(next);
+      return true;
+    };
+    const handleMedia = (data: unknown) => {
+      const media = readMediaSurfaceRef(data, current.current, mediaConnection);
+      if (!media) return false;
+      setMediaRef(media);
+      return true;
+    };
+    const onMessage = (event: MessageEvent<unknown>) => {
+      if (!isCurrentCollectiveFrame(event, iframeRef.current, bridgeConnection)) return;
       const active = generation.current;
       if (
+        handleReady(event.data) ||
+        handleMedia(event.data) ||
+        handleCollectiveAccountabilityChange(event.data, active, bridgeConnection) ||
         queueAcceptedWorkResult({
           data: event.data,
           active,
@@ -144,7 +153,8 @@ export function useCollectiveContextBridge(
           currentGeneration: () => generation.current,
           postToClient: (message) =>
             iframeRef.current?.contentWindow?.postMessage(message, bridgeConnection.serviceOrigin),
-        })
+        }) ||
+        handleCafeSection(event.data, active)
       )
         return;
       handleContext(event.data, active);
@@ -158,6 +168,7 @@ export function useCollectiveContextBridge(
     authorizedHumanId,
     collectiveId,
     connectionId,
+    authorityStatus,
     focusWork,
     iframeRef,
     onWorkResultAccepted,
@@ -192,6 +203,19 @@ export function useCollectiveContextBridge(
         serviceOrigin,
       );
   }, [iframeRef, serviceOrigin]);
+  const openMembers = useCallback(() => {
+    const value = current.current;
+    if (value && serviceOrigin)
+      iframeRef.current?.contentWindow?.postMessage(
+        {
+          type: 'collective:host-member-list-open',
+          bridgeId: value.bridgeId,
+          contextId: value.contextId,
+          revision: value.revision,
+        },
+        serviceOrigin,
+      );
+  }, [iframeRef, serviceOrigin]);
   const valid =
     context &&
     connectionId &&
@@ -201,7 +225,31 @@ export function useCollectiveContextBridge(
     context.humanId === authorizedHumanId
       ? context
       : undefined;
-  return { context: valid, reset, close, open };
+  const closeMedia = useCallback(() => {
+    if (mediaRef && serviceOrigin && mediaSurfaceRefMatches(mediaRef, current.current, connection))
+      iframeRef.current?.contentWindow?.postMessage(
+        { type: 'collective:host-media-return', ref: mediaRef },
+        serviceOrigin,
+      );
+    setMediaRef(undefined);
+  }, [connection, iframeRef, mediaRef, serviceOrigin]);
+  return {
+    context: valid,
+    reset,
+    close,
+    open,
+    openMembers,
+    mediaRef: mediaRef && mediaSurfaceRefMatches(mediaRef, valid, connection) ? mediaRef : undefined,
+    closeMedia,
+  };
+}
+
+function isCurrentCollectiveFrame(
+  event: MessageEvent<unknown>,
+  frame: HTMLIFrameElement | null,
+  connection: BridgeConnection | undefined,
+): connection is BridgeConnection {
+  return Boolean(connection && event.source === frame?.contentWindow && event.origin === connection.serviceOrigin);
 }
 
 function bridgeConnectionFrom(input: {
@@ -228,45 +276,9 @@ function clientContextMatches(value: CollectiveClientContext, active: BridgeGene
   );
 }
 
-function queueAcceptedWorkResult(input: {
-  data: unknown;
-  active?: BridgeGeneration;
-  connection: BridgeConnection;
-  pending: Map<string, Promise<void>>;
-  reconcile?: (evidence: CollectiveAcceptedWorkResult) => Promise<void>;
-  currentGeneration: () => BridgeGeneration | undefined;
-  postToClient: (message: unknown) => void;
-}): boolean {
-  const parsed = collectiveClientWorkResultAcceptedSchema.safeParse(input.data);
-  if (!parsed.success) return false;
-  const value = parsed.data;
-  if (!input.active || !input.reconcile || !acceptedWorkMatches(value, input.active, input.connection)) return true;
-  const key = `${value.bridgeId}:${value.workId}:${value.workRevision}`;
-  if (input.pending.has(key)) return true;
-  const operation = input
-    .reconcile(acceptedEvidence(value))
-    .then(() => {
-      const latest = input.currentGeneration();
-      if (!reconciliationContextMatches(value, latest)) return;
-      input.postToClient({
-        type: 'collective:host-work-result-reconciled',
-        bridgeId: value.bridgeId,
-        contextId: value.contextId,
-        contextRevision: value.contextRevision,
-        workId: value.workId,
-        workRevision: value.workRevision,
-      });
-    })
-    .catch(() => undefined)
-    .finally(() => {
-      if (input.pending.get(key) === operation) input.pending.delete(key);
-    });
-  input.pending.set(key, operation);
-  return true;
-}
-
-function acceptedWorkMatches(
-  value: ReturnType<typeof collectiveClientWorkResultAcceptedSchema.parse>,
+function clientCafeSectionMatches(
+  value: CollectiveClientCafeSection,
+  context: CollectiveClientContext,
   active: BridgeGeneration,
   connection: BridgeConnection,
 ) {
@@ -274,35 +286,12 @@ function acceptedWorkMatches(
     value.bridgeId === active.bridgeId &&
     value.contextId === active.contextId &&
     value.contextRevision === active.revision &&
+    value.bridgeId === context.bridgeId &&
+    value.contextId === context.contextId &&
+    value.contextRevision === context.revision &&
     value.serviceInstanceId === connection.serviceInstanceId &&
     value.collectiveId === connection.collectiveId &&
-    value.connectionId === connection.connectionId &&
-    value.humanId === connection.authorizedHumanId
-  );
-}
-
-function acceptedEvidence(
-  value: ReturnType<typeof collectiveClientWorkResultAcceptedSchema.parse>,
-): CollectiveAcceptedWorkResult {
-  return {
-    serviceInstanceId: value.serviceInstanceId,
-    collectiveId: value.collectiveId,
-    connectionId: value.connectionId,
-    workId: value.workId,
-    workRevision: value.workRevision,
-    assignmentEventId: value.assignmentEventId,
-    resultEventId: value.resultEventId,
-    resultRevision: value.resultRevision,
-  };
-}
-
-function reconciliationContextMatches(
-  value: ReturnType<typeof collectiveClientWorkResultAcceptedSchema.parse>,
-  latest?: BridgeGeneration,
-) {
-  return (
-    latest?.bridgeId === value.bridgeId &&
-    latest.contextId === value.contextId &&
-    latest.revision === value.contextRevision
+    value.humanId === connection.authorizedHumanId &&
+    value.channelId === context.channelId
   );
 }

@@ -11,12 +11,13 @@ if (!command) {
 const signalExitCodes = { SIGINT: 130, SIGTERM: 143 };
 let forwardedSignal = null;
 
-const child = spawn(command, args, {
+// JS CLI callers retain this runtime and avoid Windows command shims.
+const child = spawn(command === 'node' ? process.execPath : command, args, {
   env: process.env,
   stdio: 'inherit',
-  // Windows: `next` and friends are .CMD shims that bare spawn() cannot resolve
-  // (ENOENT). shell: true lets cmd.exe resolve them via PATHEXT like pnpm does.
-  shell: process.platform === 'win32',
+  // Windows package scripts are exposed as .cmd shims; shell resolution is
+  // required when this wrapper launches them directly.
+  shell: process.platform === 'win32' && command !== 'node' && command !== process.execPath,
 });
 
 for (const signal of Object.keys(signalExitCodes)) {

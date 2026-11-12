@@ -13,6 +13,7 @@
  */
 
 import { CONNECTOR_DEFINITIONS } from './connector-definitions.js';
+import type { MessageFrom } from './message-lifecycle.js';
 
 // ── Connector Source (附加到 StoredMessage) ──
 
@@ -52,6 +53,9 @@ export interface SchedulerMessageExtra {
 export type ReplyPreviewKind = 'scheduler_trigger';
 
 export interface ReplyPreview {
+  /** Canonical identity of the referenced message, not inferred from a null cat ID. */
+  from?: MessageFrom;
+  source?: ConnectorSource;
   senderCatId: string | null;
   content: string;
   deleted?: true;
@@ -66,27 +70,22 @@ export interface ConnectorSource {
   readonly label: string;
   /** Emoji or icon URL for avatar position */
   readonly icon: string;
-  /** Link to original source (e.g., PR URL) */
-  readonly url?: string;
+  /** Optional theme color from the plugin's declared presentation identity. */
+  readonly themeColor?: string;
   /** Connector-specific metadata (e.g. presentation='system_notice', debugging, routing) */
   readonly meta?: Readonly<Record<string, unknown>>;
   /** F134: Original sender info for group chat messages (message-level binding, not thread-level) */
   readonly sender?: { readonly id: string; readonly name?: string };
 }
 
-/**
- * F167 PR5: immutable identity for the user-visible managed-hold wake/result
- * rows that Message Bundle may offer. Runtime authorship and owner access are
- * additional server-side guards; this shared predicate keeps Web affordance
- * and API source classification on the same connector contract.
- */
-export function isSelectableManagedHoldConnectorSource(
+/** Exact identity shared by the visible waiting fact and the queued wake source. */
+export function isManagedHoldConnectorSource(
   source: Pick<ConnectorSource, 'connector' | 'meta'> | null | undefined,
 ): boolean {
   const meta = source?.meta;
   return Boolean(
     source?.connector === 'hold-ball' &&
-      meta?.wakeWhen === true &&
+      meta?.managedHold === true &&
       typeof meta.taskId === 'string' &&
       meta.taskId.trim().length > 0 &&
       typeof meta.threadId === 'string' &&
@@ -94,6 +93,13 @@ export function isSelectableManagedHoldConnectorSource(
       typeof meta.catId === 'string' &&
       meta.catId.trim().length > 0,
   );
+}
+
+/** Only the delivered wake/result is a quotable dispatch source; waiting status is context only. */
+export function isSelectableManagedHoldConnectorSource(
+  source: Pick<ConnectorSource, 'connector' | 'meta'> | null | undefined,
+): boolean {
+  return isManagedHoldConnectorSource(source) && source?.meta?.phase === 'wake';
 }
 
 // ── Connector Definition (registry entry) ──

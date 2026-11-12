@@ -4,8 +4,8 @@ related_features: [F044, F077, F128, F168, F195, F202, F232, F246, F254, F276, F
 topics: [ai-native-collaboration, multi-human, multi-agent, collective, cafe, channel, topic, asset, annotation, rich-message, task, vote, team-memory]
 doc_kind: spec
 created: 2026-08-08
-updated: 2026-09-30
-tips_exempt: "首次带猫引导在用户进入 Collective 时直接出现，并在成员和我的 Café 中提供重播；另推 capability tip 会重复这段入场体验。"
+updated: 2026-10-20
+tips_exempt: "Renewed 2026-10-18 for Task038 and the project-management v1.2 first slice: the Project entry and its list/dependencies/board views are persistent primary navigation, while accept/claim/result-file actions appear on the exact Task or result that can use them; proactive tips would duplicate visible contextual affordances before a relevant object exists. The first-entry guide remains directly visible and replayable from members and 我的 Café."
 description: "让多个独立 Café 在同一个 Collective 中围绕对话、资产、工作与关系持续协同；私人空间不被吞并，承诺、来源与团队记忆也不会掉线。"
 description_source: human
 description_author: codex-sol
@@ -16,6 +16,11 @@ design_gate_claim_contracts:
 mcp_admission_status: accepted
 mcp_admission_ref: "file:docs/features/F290-ai-native-collective.md"
 mcp_admission_claims:
+  - ref: "file:docs/features/F290-ai-native-collective.md"
+    toolName: cat_cafe_collective_artifact_command
+    resourceFamily: collective-participation
+    boundaryKind: resource-entry
+    decision: accepted
   - ref: "file:docs/features/F290-ai-native-collective.md"
     toolName: cat_cafe_collective_current_context
     resourceFamily: collective-participation
@@ -32,12 +37,17 @@ mcp_admission_claims:
     boundaryKind: resource-entry
     decision: accepted
   - ref: "file:docs/features/F290-ai-native-collective.md"
-    toolName: cat_cafe_collective_reply
+    toolName: cat_cafe_collective_submit_reply
     resourceFamily: collective-participation
     boundaryKind: resource-entry
     decision: accepted
   - ref: "file:docs/features/F290-ai-native-collective.md"
     toolName: cat_cafe_collective_propose_work
+    resourceFamily: collective-participation
+    boundaryKind: resource-entry
+    decision: accepted
+  - ref: "file:docs/features/F290-ai-native-collective.md"
+    toolName: cat_cafe_collective_suggest_project_work
     resourceFamily: collective-participation
     boundaryKind: resource-entry
     decision: accepted
@@ -60,11 +70,287 @@ mcp_admission_claims:
 
 # F290: AI-native Collective — 多人·多 Agent 共同世界
 
-> **Status**: 2026-09-25 first-cat entry Design Gate approved for real Client implementation; rejected private-room prototype remains stopped; real first reply, two-Mac UAT and full Collective experience remain open
+> **C1 当前准入边界**：Collective 工具由安装的插件提供；回复入口为 `cat_cafe_collective_submit_reply`，其余同名能力继续保留准入。下文旧 Host 回复入口的实现记录不再作为当前注册依据。
+
+> **Status**: in-progress / 2026-10-19：旧同Café选猫/失效责任邀请两P1与R1状态反例已在5739 Alpha转绿；原266在5744关闭C-UAT-1/2，并在5748 Alpha `8ae121bd2a` / boot166关闭C-UAT-3，原三处页面纠偏全部通过。图组密度5737已由原414补验并释放。10-19正式5201单独恢复及原设计141限定通过的证据保留；10-20只读观测正式health为a8df6fcb66f/boot40，Git已含5745/5748，其独立成果计数验收仍待续。完整v1.2、真人OAuth/文件打开、双真人双Café、真实模型与整项验收继续开放。
 > **Owner**: 小星星·Maine Coon (@codex-astra, GPT-6 Astra；operator 2026-09-06 交接)
 > **Design / implementation provenance**: Sol + Fable 共创原设计；Sol 负责既有 runtime/provider 纵切片
 > **Priority**: P1
 > **operator kickoff**: `[thread-id]` / `private-source-id`
+
+## 2026-10-18 项目管理 v1.2 衔接
+
+You在设计原线程`[thread-id]#private-source-id`
+冻结项目总览、看板、单项目三张v1.2；规则已进入DESIGN.md，原稿与图册保留。
+先接真实项目/四列看板与状态合同，再补猫的项目上下文及触发，接同一份待办完成整段验收。
+实施仍归原038，独立验收归266，加载后244一次对稿；不自动扩大已结束UI701子包责任。
+
+命名“工作→任务、Roadmap→项目（依赖图在项目内）”、执行者泳道、待确认独立列、
+阻塞横幅及未分配置顶已接受。实施前源码核验另明确两项真实缺口：当时commit会把当前Human记为负责人，
+尚不能表达已接纳未分配；当时setWorkDependencies没有completed禁改。按计划补合同和验证，
+不把候选当承诺，也不只靠折叠UI保护已完成记录。日期、外部材料待分拣仍属后续范围。
+原指挥线程`private-source-id`的Argon独立内容审查已批准该计划，
+覆盖SHA256 `1e4d0f19db5b8ab1a66738c0fb16c6a43e8d65b79c0ba92ede6eb8e24da084ae`，无P0/P1/P2；
+这是实施计划审查，不是代码或整项验收结论。
+You随后在同一设计原线程`private-source-id`明确授权：
+“ok 咱们这些可以交给F290去开发了～”。605已回读本人原消息；开发按上述原责任链推进，
+不再重复询问设计/开发许可。2404不授予正式环境启停或关闭整项F290的权限。
+
+完整v1.2仍未交付。You488禁止动3003/3004、494授权其余修复后，605已完成
+原Work和历史保持、原684字节成果绑定。Host仍为e8c/boot38，5739/5737不随此次操作装入Host；
+
+### 第一可操作切片已加载 Alpha，隔离数据验收限定通过（2026-10-18）
+
+原038已通过 PR #5725 把首段真实使用路径合入 main：Human可以接纳任务但保留未分配，
+之后由Human或当前获授权Cat认领同一个Work；未分配不产生assignment、不启动模型，重启后仍可恢复，
+Host冷启动也能沿新的接责历史建立原Task而不复制Work。completed/declined/cancelled任务的依赖由Service拒绝修改。
+
+共同体侧栏和触达页面已统一显示“项目/任务”；项目默认进入真实项目列表，并可切换跨项目依赖与全局看板。
+看板按稳定Work ID去重，使用待开始/进行中/待确认/已完成四列和执行者泳道；未分配置顶，blocked留在原列并显示横幅。
+原单项目计划/依赖图/与我相关、来源消息往返、历史和结果验收继续消费同一批Service记录。
+
+fresh-context 预扫补齐了同一条可操作性不变量：已接纳的未分配任务在Cat认领前仍会通过精确来源上下文暴露
+原`intendedOutcome`；终态任务不再显示后端必拒的依赖编辑器，未完成项目和已取消任务也不再暴露必拒动作；
+从全局看板打开的任务始终留在项目画布中，共享任务优先保留用户刚才所在的项目语境。以上均有原失败测试、
+Service/Connector或Client回归和真实浏览器旅程，不把预扫当作正式review放行。
+
+正式 review 首轮又找出两处投影真相丢失：单项目详情曾只拿项目成员集解析依赖，导致真实的跨项目A→B显示
+“没有前置任务”；全局看板曾把所有`status=blocked`都解释成依赖阻塞。现已把项目可见节点与已授权依赖解析全集
+分开，详情显示外部任务及来源、不可读引用显示明确计数而不扩权限；看板复用Service权限与当前Host准入语义，
+区分执行撤回、待准入、准入拒绝和真实未完成依赖。新的组件测试覆盖四种阻塞原因，真实浏览器夹具改成两个
+互不重叠项目间的依赖，并复验来源往返与外部任务不被偷加进当前项目。
+
+作者自验事实：Shared 802项、Collective Service 135项、Collective Client 307项、Connector 56项通过；
+API完整Collective通讯套件254项通过/1项按环境跳过；真实Service+Client浏览器旅程通过项目列表、跨项目依赖、
+全局四列看板、单项目与原话题往返、1440/390、明暗主题和窄屏内滚动。Hub自动预览仅返回
+`unconfirmed/no_matching_client`，因此不记录为本人已看到页面。正式非作者 reviewer 在最终
+`a72638e27b19003c0b56875f2d9cfe188f03e0d2` 上另跑39项定向检查与两条真实Service→Client浏览器旅程并批准，
+PR #5725 随后 squash 合入 `4ab46ecdba5b29a067ba80c32ad3a86262663a85`。这些证据仍不替代合入后Alpha、
+原266独立验收或原244按三张v1.2稿对照。
+
+原266随后在12:11通过实际3011 Host的“连接已有Service”入口，进入使用Alpha已构建生产模块的
+临时测试家园，完成13项检查：页面接纳未分配→本人认领同Work、授权fixture Cat认领、终态依赖保护、
+项目三视图/四列看板、四种阻塞因果、跨项目来源往返及390px边界。
+已在`215b3d2d7c`归档；Client JS/CSS与共享5211及Alpha dist逐字节相同，API boot157前后不变。
+Human动作走浏览器HTTP，Cat与准入检查使用生产Service公开方法及fixture协议；未配对真实Host、
+未执行模型或真人OAuth，未写共享5211。自有浏览器、Service和临时数据已清理，资源回执为released/proven。
+605已核回执、文件哈希并亲看桌面看板/390px详情；消费该限定结果，不重复运行探针或将其记成真人双家通过。
+
+仍开放且没有被本切片降级：项目页直接创建项目/任务的原子来源操作、跨Human指派请求/接受、可编辑分组、
+完整作品/上下文、猫的项目读取/建议/前置与评论触发、F310/F322同一待办。正式runtime/5201未启停，
+F290及Task038保持开放。实施边界、consumer证据和迁移说明见
+
+### 剩余 v1.2 已加载，运行与设计验收要求修正（2026-10-18）
+
+正常创建、跨Human接受/拒绝、同一请求退出两入口、分组/候选/作品读取成立，但两项新P1阻塞：同Café选择第二只猫却提交第一只；
+任务完成后Host撤回、项目仍保留无效责任邀请，动作409。原038已接修，非整段通过；真人OAuth/真实模型/共享后端全链未被fixture证明。
+重点是去掉双顶栏与重复待办、恢复独立单项目页和任务表、真实筛选/下一次交付/上下文。按页修正后原266复验，不召回244逐轮复审。
+原266已释放共享窗口，当前含5733的641285/boot161仅代表加载成功；图组实际验收另归原414。下面保留合入实现及作者检查证据。
+
+原038的隔离分支已实现首片之后的完整同一路径。PR #5732 的首轮一次性高风险审查
+`changes_requested`；四项阻塞Red→Green后，Kimi在exact HEAD `3434669b52062b82f2fc20e0a478f20b09fd1830`
+完成常规非作者复审并批准，随后 squash 合入 `7b4c330a223c7d245ab3235824de72f9036f7dac`。代码已在main，
+605已实际加载Alpha `29ca83de97`并核126个包文件与受审HEAD一致；原244/266整包验收仍未完成：
+
+- 项目与任务可从真实项目页创建，来源事件和对象原子绑定；跨Human责任先形成具名请求，目标Human接受/拒绝后才改变承诺，
+  接受时可以选择自己Café里的执行猫。
+- 项目看板可按执行者/负责人/项目分组，单项目使用冻结的计划/看板/依赖图/作品四视图；作品读取区分空、拒绝和不可用。
+- Cat拿到权限过滤后的项目目标、完成前置及结果出处，并可用新MCP工具提出持久项目任务/前置候选；Human接受时原子重验。
+  前置完成与任务评论回到原私人Task；离线评论先可见、wake保留并在恢复后复用同一消息。
+- F310统一待办读取目标Human自己的pending责任邀请，按稳定`accountabilityRequestId`去重；跨Host/跨Human隔离、部分失败、
+  迟到身份切换均失败封闭。项目总览的“待办 / 看谁的”直接投影同一Work、责任请求和待验收结果，不另存done；原处打开
+  精确项目任务，实际接受/拒绝仍由Collective Service写权威状态，随后同一事项退出项目待办和家里邮箱。
+
+新Work字段对旧记录是可选的，无批量迁移；一旦写入新责任历史、项目建议或wake事件，继续按fix-forward处理，
+不能承诺旧Service reader直接回退。首轮审查发现并已修复四类状态边界：项目建议不能绕过项目负责人决定、
+Human评论原语义不能被wake覆盖、Host必须复用原评论消息、责任待办分页必须绑定不可变快照；五条原始复现均已转绿。
+这些作者证据与独立复审支撑“实现已合入main”；Alpha加载证据另见上述回执，
+原244/266整包验收、正式runtime与双真人双Café实际协作仍未完成。
+F290与Task038继续开放，详细边界见
+
+修复后作者证据：Shared `808/808`、Collective Service `150/150`、Connector `57/57`、Collective Client
+`318/318`、API Collective 通讯 `255 pass / 1 environment skip / 0 fail`、MCP `1000 pass / 1 skip / 0 fail`；
+Web受影响的7个文件`177/177`，两个production browser旅程`2/2`并人工查看桌面与390px证据，generic Web build通过。
+Web全量基线则是`12301`项中`12250 pass / 51 fail`，失败集中在本次未改的既有ChatStore/Queue/FileBlock等域，
+代表文件隔离运行仍可复现；因此这里只记录受影响面通过，不冒充Web全仓全绿。
+
+### 原三处页面纠偏已在Alpha通过，成果计数仍待独立验收（2026-10-19）
+
+全局与单项目1440/390主色/白字、32/13/8/6×10几何、次级表单、实际创建和来源/移动返回均通过，关闭C-UAT-3。
+结合原5744已通过的C-UAT-1/2，三处页面纠偏收齐。605核回执与桌面/移动表单实图，
+34985于05:43:25.848Z released/proven/tokenZero；684释放固定cut需求。5745、真人/模型与完整F290不由本轮代签。
+
+05:38最新加载：605已把5748与5745共同装入Alpha `8ae121bd2a` / boot166，
+本轮C-UAT-3已按上述回执通过，成果计数另验，正式Host仍原boot38。下文保留各轮发现与修复来源。
+
+Human本人执行与混合去重、个人/全部待办往返及身份重置按证据边界通过；C-UAT-1/2关闭。
+单项目主动作的桌面/390px尺寸及导航通过，但原有primary底色被基础CSS覆盖，C-UAT-3仍为P2。
+raw receipt的passed只签其中行为和尺寸断言，完整视觉结论为corrections-required。
+原589已把实图与根因交原038；593释放共享cut，605核实图、规则及34911 released/proven，不重复派实现或召回244。
+C-UAT-3修复已在PR #5748把单Project工具栏基础selector降为与primary语义类同级，保留13px紧凑几何并让后置主色生效；
+真实browser先复现透明底色，又挡住整段降权造成的16px回归，最终桌面/390px三旅程全绿。Argon在exact HEAD
+`ccd9910ac2`独立批准后，代码squash合入`cd8634f5e6`。这只证明实现落main，原266仍需在新Alpha cut复验后才可关闭C-UAT-3。
+独立成果漏计P1已由PR #5745在exact HEAD `0dbec3ca9e`完成修复：API计数与Web分组改为消费同一Shared精确判定，
+原597指出的前后端漂移及负向验证缺口经Argon R2复核清零，随后squash合入`17aec4dc8b`。
+这只证明代码落main；本轮未激活新runtime、未操作正式Host或5201，真人OAuth/模型与完整F290仍开放。
+
+### 5739历史复验：当时发现三处呈现P2（2026-10-19）
+
+列表遗漏Human本人执行、缺“全部待办”、单项目主按钮样式三项P2仍在已接受范围内，由363回原038处理。
+下面保留5739作者实现与review的证据边界。
+
+Task038当前候选已在送审前同步最新`origin/main`，保留分段可回滚提交；review请求以PR exact HEAD及提交清单为坐标，
+不把会被rebase改写的本地SHA当稳定身份。本节及图片归档只追加证据。UAT-1改为以Service、connection、cat三元参与身份选择同一Café的猫，
+真实浏览器选择第二只猫后POST和持久assignment均指向该猫。UAT-2抽出Project/Work共同可操作谓词；completed、
+declined、cancelled、已有assignment或非active Project都会同时退出项目待办和任务动作，不再保留必然409的按钮。
+
+总览独占待办并提供真实计数/负责人/完成折叠；看板提供四个真实筛选、显示设置、泳道和卡内责任操作；单Project使用
+面包屑、计划/看板/依赖图/作品、新建任务，计划为前置排序的五列表格，右侧读取权限内目标、完成、阻塞、出处与活动。
+身份小签、下一交付、阻塞文案和作品空/拒绝/不可用均来自原投影，没有为贴图编造日期或下游。
+
+作者在最终树完成Collective Client `68 files / 329 tests`、直接lint/build、Web production artifact构建；F290 browser目录
+在不抬13文件配额的前提下，把两条新旅程并入原Project单元并保留全部case，catalog/retirement/policy `256/256`、
+consumer census `1/1`通过。受管浏览器receipt `34731`等待1063秒后以normal pressure获准，三条真实case `3/3`
+用时12.95秒，permit持有14.44秒并released、descendant cleanup proven/token-zero；桌面与390px原图见
+
+非作者R1在PR #5739的首个exact HEAD返回`changes_requested`：共享Work从邀请原Project移出或原Project结束后，
+详情/计划/卡片仍借另一个active Project展示接受动作；列表/右栏/计划没有优先消费Service执行状态与Host准入；
+已完成前置仍被卡片称作“正挡住”。修复没有改写持久邀请或依赖，而是建立两条共同派生合同：pending邀请必须经
+`request.roadmapId`找到仍active且仍含该Work的原Project，否则历史保留但所有承诺动作冻结；阻塞先消费当前
+execution/Host真相，再把未完成前置与已完成历史分开。failure-mode sweep同时修正依赖图的同型旧文案。
+
+本轮新检查先得到`7 failed / 11 passed` RED，随后详情、计划、卡片、列表、右栏、依赖图组合`25/25`及Client全量
+`69 files / 338 tests`、lint/build转绿。受管生产浏览器三case `3/3`再次通过，新增真实双Human场景证明原Project移出
+共享Work后，当前Project的详情、计划和看板均不再出现接受/拒绝；合法邀请和同Café第二只猫接受仍成立。
+receipt `34825` normal admission、等待1.34秒、持有11.31秒后released；新增实图与回执见
+不是reviewer批准、merge或Alpha签字。
+
+正式信箱英文问题也已纳入同一候选：只有精确的`f290.collective_work_result + collective_result_ready`按界面语言
+显示系统文案，新Shell邮箱覆盖中英文，中文单语Needs Me面板显示中文；其他producer/Human recommendation保持原文。
+两处均先取得中文泄漏RED，最终相关组件与copy检查`51/51`、Web lint、production build及cache policy为绿。
+
+本轮只读运行态诊断另确认：唯一owner-routed connection已精确绑定5201与原Service/Human；当前Connector实际异常为
+`ConnectorTransportError` 404 / `NOT_FOUND` / non-retryable。5201进程出生于10月8日，pending route到10月18日
+`7b4c330a22`才进入代码；磁盘dist后来包含路由不等于长驻进程已加载。因此责任来源报告`unavailable/partial`是正确的，
+不是0，也不是连接或Human授权缺失。恢复须沿既有部署生命周期更新5201，并以同一connection带凭据pending读200、
+identity匹配、Host来源`available/complete`及真实零项/有项处置共同验收，不能由checkout或Host boot号代签。
+本作者未重启、重配或写入runtime/Service。同一非作者reviewer已在exact HEAD `c72b787e9a`关闭R1全部三项且无open P1/P2，
+PR #5739随后以`c791dbb73d`合入；仍须由605协调正确Service加载与Alpha，再由266沿原路径复验；
+不召回244逐轮复审，不关闭F290或Task038。
+
+## 指挥与设计入口（2026-10-12）
+
+- **指挥线程**：`[thread-id]`。You 指定“就你们这个吧”，来源
+  `private-source-id`；Astra 接住统筹 Task `private-source-id`。
+  设计决定、实施进度与整体验收在此汇总；原 Task038、Task266 和设计 Task244 保留原 owner 与执行现场。
+- **规范入口**：[DESIGN.md](../../DESIGN.md) 的“对话”“界面上的字”与原稿一起消费；
+  图册是展示入口，不替代规范、领域合同或验收记录。
+  在总图册第十章；已获下述设计方向认可，仍为目标稿，不据此改变实施范围或验收勾选。
+
+**最新设计确认与纠正**（同指挥线程，2026-10-12 PDT）：
+
+- `private-source-id`：13b 共同体设置、参会台分别获“ok”“ok的”；
+  “我的猫”仍需对齐家内体验。认可限所引用的设计方向，不代表整套功能实现通过。
+- `private-source-id`：办事旅程与消息下最近两条具名回复预览“没啥问题”；
+  **9a 单猫详情管理方案被退回**。参与入口按家里现有成员自动发现、开关带入；不把同一成员背后的
+  多个频道/工作上下文当成多只待配置的猫。沿本文件 09-11 默认纳入与显式排除合同，
+  以及[通讯模型](../architecture/f290-communication-model.md)的家内身份、频道接收、按事项续接关系；
+  不以单猫详情集中私人任务与授权作为入场前置。原认可旅程保留；新参与稿随后获 998 确认。
+- `private-source-id`：引用 873 的 9c 稿说“审核ok update吧”“可以了 这些都ok”；
+  该设计包列出的 **9c 我的猫、9b 已允许的工作总览、2b 频道菜单、3c 例外卡、13 共同体菜单**
+  已获设计确认。已否的 9a 不恢复；未画分支、代码实现、共享产物与双真人整体验收不据此勾选。
+
+## 当前进展与下一步（2026-10-13）
+
+**10-17 W4增量**：10-12的顺序阻塞已由人类启动1394/已接受1399的有界共同作品包解除；
+原Sol6.1 writer已在PR5670接通双Human Markdown、retained PNG/MP4、版本/批注/候选/采用、来源与Work回流，
+codex-sol已独立R2批准306516，070467合流验证通过；正常retained picker第2版CAS/409已在4b66修复。cloud第二轮的请求回执/权限变化问题已在2ea59修复，经Service128、API19与真实丢回包browser3复验；第三轮review5556385646又确认cancel/reject在明确409后缓存旧CAS；aad6修复后Client10、build/types与真实Markdown browser1通过，未知回包与并发新意图仍受保护。第四轮终态6230566212已明确aad6无重大问题；正常合流冻结main7add至4d5e，作者patch-id相同，build/API47/Web49/browser3全过，E1–E5闭合，Task3254恢复普通g11。PR5670已于10:57:04Z合入main4a26e9c8a8，工位同源released/removed，代码包交付完成。runtime只读99355fa不含该merge，live=dormant；605继续协调合法加载及非作者266验收，未称真人/双家或完整Feature完成。验收仍沿605/266，
+**10-18 UI增量**：Human643与获批UI701的完整整页改版由原Task038子范围交付，PR #5714已合入
+`0a7d3762c8529dc44cd00d877c5235f7c86f2e37`。家里与独立Client共用`@cat-cafe/ui`呈现层，频道首行短名@与完整身份、
+逐猫真实回执、输入框上方本人的频道活动，以及成员/监听/许可/日程/连接入口已接通；公开短名producer到持久profile/consumer同包完成。
+Argon独立批准最终头`1bfd921dd01a542e4217dd50f0acf13feade5468`，typed来源为UI thread
+`private-source-id`。最终正常鼠标与完整默认入口5项、家里生产组件20项、完整作品往返及跨包契约/重启检查通过；
+只读runtime健康信息仍为`b65746a9d2b452705a121ab48417d76847549d5e`/boot37，不含该merge，`main=landed/live=dormant`；
+加载继续由605消费，266在匹配版本Alpha验收，再由原设计244一次整体对稿。Service reader须先升级，Host/Connector/Client按匹配切面更新。
+本UI现场不迁移038/605/266/W4责任，不关闭F290或勾选真人/整体验收AC，新的Roadmap日期与权限合同仍未加入。
+
+**10-18 UI701设计纠偏已合、加载/终核待原线**：原设计1837整体对稿未过的六项差距，沿续办1844由原作者在PR #5720修正，
+`b4a8f20abc8b97140504f1435e98bed3c540fa55`已合入。频道作品改紧凑列表并保留本频道资料库/正文/原处往返；
+公共成员按真实Human/endpoint分家，同端点多连接显式选择；工作提议浅虚线、接手实线与真实责任；
+全部作品两列/16:10类型占位与真实筛选；登录、标题行搜索、监听标识和双语窄屏一并校准。
+目录没有独立批注统计或缩略图reader，不补0、不隐式读取正文。Argon对exact40b22ce632独立typed批准2225，
+作者Client299、Host112、owner HTTP3、生产构建/类型、真实完整Host纠偏浏览器1项与15张实物已核；
+最终主线机械合流后Client301通过，合入tree与该受测tree完全相同。
+正常Web全仓lint的base5712错误保留归因，原作者2148在其未合入分支已修；本包受影响ESLint10文件与
+[PR门禁及合流证据](https://github.com/zts212653/clowder-ai/pull/5720#issuecomment-6247204560)。
+只读runtime Git仍为`b65746a9d2b452705a121ab48417d76847549d5e`、不含本merge，`main=landed/live=dormant`；
+本现场没有启停或覆盖Alpha/runtime。605加载、266独立验收，原244按1837约定只核这六项变化；
+设计终核未过之前不把local代码批准当设计通过，双真人/真实模型UAT及F290整体验收保持开放。
+
+下方10-13及更早的接口缺口/等待描述保留为当时事实，不覆盖上述有界批准与当前代码状态。
+
+**产品目标**：不同家的人和猫，把讨论变成共同工作；各自在自己的 Café 推进，成果回到同一个
+Channel / Work / Artifact，团队能一起查看、修改、判断，并看见它推动了哪一步路线。
+
+本节是当前进展入口；后文带日期的实现、未加载和阻塞描述保留为历史节点，不覆盖本节的新证据。
+本轮核对本地 main 提交、原 Task、源 thread 与既有验收原件，未重新执行真人 UAT，也未在线复核
+新的 GitHub 状态。**代码已合、版本已加载、实际旅程通过分别记录，
+不把任何一层外推为完整交付。** 更新授权：
+`[thread-id]#private-source-id`。
+
+### 已经做到哪里
+
+| 用户能力 | 已核事实与证据 | 仍未得到的结果 |
+|---|---|---|
+| 从 Café 进入真实共同体首页与频道 | #5205（`b7bb55fb82`）首页已合；原 Task704 的父 Alpha 走过首页→general→chat→状态→刷新，后续 #5209/#5225 修复运行链 | 有界首页与模型回复不代表完整 Collective 页面或团队使用已交付；见原现场 `[thread-id]` / Task704 |
+| 日常入口、刷新与会话恢复 | #5304（`92be37e99b`）已合；Task266 于 10-09 核 runtime `3ca4c4af` / boot20 的侧栏进入、reload、settings warm、back/forward。#5473 于 10-13 合入 `42282f9368`：Client 仅在 `/api/me` 明确 401 时清会话，503/网络错误保留凭据；生产组件浏览器旅程以模拟 503 证明 unavailable 后同一会话回到原共同体 | #5473 没有实际重启 Alpha/runtime，也不证明关标签页后持久登录；Task266 仍须在加载该 merge 的 Alpha 复验真实重启。该轮隔离 context 与 fixture Human/猫执行都不代验真人登录后的完整频道协作 |
+| 讨论形成 Work、依赖、历史、投票与结果判断 | 已有 `RoadmapPanel`、Service Roadmap/Work 生命周期、结果验收及普通成员退出实现；退出切片 #4646（`ab9e935f31`）保留公开历史并撤销 endpoint | 真实 Meeting/Issue→跨 Café 执行→验收→版本发布的团队流程未闭环；管理者交接与未结责任处置仍需完成 |
+
+### F322、F309、F307、F310 怎样接到 F290
+
+| 责任面 | F290 消费什么 | 当前接缝与下一验证 |
+|---|---|---|
+| [F322 日常体验](F322-everyday-work-experience.md) | 新版入口、待办、导航与连续工作体验；Collective Client 的领域页面仍由 F290 交付 | F322 已从 v2 修补推进到按旅程组织的 v3，部分已合/Alpha 通过、部分待加载或设计；不能把 F322 整屏进度等同于 F290 页面完成。按同一 Channel→Work→私人进度→成果返回实走 |
+| [F309 内容协作](F309-collaborative-content-plane.md) | 同一内容的版本、选区、批注、修改候选、采用与回执 | **W4 的实际依赖仍是 F309 AC-B6**：两个不同 authenticated Human 围绕同一 canonical Markdown 完成 read/annotate/propose/apply/version/revoke，重启后撤权仍有效。单 owner 文件/Studio 与不可变作品审阅均不能解除该依赖 |
+| [F307 通用宿主](F307-composable-workbench.md) | owner surface 的挂载、布局和返回位置 | typed content surface mount 已有；F290 仍须提供 Artifact lineage、领域权限和精确结果目标，完成自己的 consumer，不能把它记成等待 F307 全项完成 |
+
+**可并行边界**：入场、登录恢复、真实接活/回流、基础 Roadmap 和界面整合不必等 F309 全部媒介完成；
+共享内容修改必须消费内容 owner 的双 Human 授权与版本能力。F290 不另建正文 store 或编辑器。
+
+**10-12 晚的依赖回执**：F309 原 owner 已把 [AC-B6 交付包](F309-collaborative-content-plane.md#ac-b6-bounded-owner-ready-delivery-packet2026-10-12提案尚未准入)
+落在 `e44013ec0ef3a8475d3e60c5d78e4b68d065da3b`；来源为指挥线
+`private-source-id`。复用内容 owner/F309/F307，限定双 Human Markdown 的读取、批注、
+修改建议、采用新版、撤权与重启恢复。该包是**待准入的具体方案，不是可消费实现**：原 F309 Review Gate
+要求完整 AC-A4 后再进入共编 B，本切片先行需 operator 确认顺序例外。建议实施作者 Sol6.1，F309 owner
+仍是 Sol5.6；尚无 AC-B6 实施 Task，W4 保持阻塞，其余首轮路径继续。Task266 的
+
+### 10.9 团队会议带来的产品输入
+
+来源：`[thread-id]#private-source-id` 的原始转写与说话人对应；
+重点核读 19:15–28:22、01:03:49–01:05:54、01:11:36–01:12:50、01:17:54–01:21:18。
+
+- **团队想完成的工作链**：Issue / 会议事项→讨论→认领→各家猫开发与协作审查→共同查看和修改产物→验收→看见进入哪个发布版本。项目/版本管理是多人协作中的能力，接回 J2/J3/W3/W4，不另立第二份工作真相。
+- **产物能力共用**：个人 Café 与 Collective 围绕同一套产物展示、批注和修改能力协作；会议提出通过独立模块/嵌入复用，具体接法继续遵守现有 F307/F309 owner contract，不由会议措辞直接冻结新架构。
+- **部署与现实分工**：会上吴浪暂牵头多人协作及共享服务器准备；徐方瑜接 Issue 初筛；谢泽丰牵头代码合入、验收与内外同步流程，并与伙伴推进 Windows/多平台体验。这是会议中的人类分工，不自动转移现有猫的 Task、代码责任或授权。
+- **范围边界**：会议没有完整列出 10/24 功能清单，发版频率、测试规则也未全部定案。共享部署尚需实际环境与伙伴使用证据；不能因“准备服务器”写成已经部署。上述长期目标不自动成为 10/24 交付承诺。
+
+### 剩余工作与建议推进顺序
+
+下表整理原 W1–W6 / J0–J8 的下一落点，**是推进建议，不是新 Phase、开工派令或范围缩减**。
+10/24“新版界面中的真实双人双 Café 协作与一份共同产物”只作为候选目标，尚未冻结。
+
+| 顺序 | 要交付的结果 | 原责任与验收落点 |
+|---|---|---|
+| 1 | 让总览、原 Task 与实际代码一致，清除已经过时的停工理由 | Astra 汇总；Task038/266 保留原 owner。Task038 仍记录 10-05 首页交接权限阻塞，但 #5205 已于 10-06 合入；该阻塞已被后续事实超过，需原 owner 结算记录，不据此宣称整任务完成 |
+| 2 | 两位真人各带自己的 Café/猫进入同一共同体，完成两件真实工作、反馈修改与回流 | W2/W3/W5、Task038/266；结合会议中的共享部署安排核实实际场地/操作者。#5473 已修复“任意恢复失败都清 session”的明确缺口并完成模拟 503 旅程；Task266 仍须在真实 Alpha runtime 重启中复验，且尚未证明它是用户那次掉登录的唯一根因 |
+| 3 | 新版 Channel、工作卡、例外授权、私人进度和成果返回形成一条可用旅程 | F290 原实现现场与设计 Task244，消费 F322 原壳/待办；先核最新稿与现有行为，再在真实入口整页验收，不能把静态设计或局部修补当整版交付 |
+| 4 | 两位成员对同一份 Markdown 批注、让猫修改、由有权人采用并保留版本/来源；撤权真实生效 | F309/content owner 交 AC-B6，F290 接 W4/J7；复用个人内容能力，单独证明跨 Human 授权和 Collective 回流 |
+| 5 | 一件真实团队 Issue/会议事项贯穿 Roadmap、依赖、执行、验收与发布去向 | W3/W6、J2/J3；将会议中的人类工作分工变成真实使用场景，验收仍沿原 Feature 与 Task，不另造一套项目账本 |
+
+不能被上述近期顺序漏掉的原范围：共同资料库/树/版本与派生、团队记忆与决定可找回、私人想法获准发布
+（J1）、外部贡献唤回及原处回流（J2）、会议到工作（J3）、成员治理和完整部署恢复（J5/J6/W5）。
+Office 实时共编与可编辑视频保持 F309 原开放范围，不挪成 F290 自研；跨频道日报 J8/R23/AC-C4
+保留已有“完成门槛讨论暂缓”的状态，不写成已做、遗忘项或本轮新承诺。既有 AC 本轮不改勾选。
 
 Architecture cell: collective-runtime, plugin
 
@@ -78,6 +364,14 @@ Workbench、内容协作、Cat Agent runtime 与工具权限仍由 F307/F309/既
 该文统一说明家内猫身份、每频道接收关系、事项续接、默认自决、公私上下文、并发与跨频道汇总；
 列出已定约束、代码差距及待定接口。本 spec 保留范围/验收，原计划保留实施顺序，文档更新不代表运行能力已交付。
 
+10-16 W4 的有界共同作品接线沿人类启动 `private-source-id`、
+已批准执行现场 `private-source-id` 与 F309 owner 裁决
+`private-source-id`，登记 `collective_artifact_command` 为上述 family 的同来源入口。
+Host 从当前 invocation / durable public source 派生作品坐标和具名 Cat；`read` 读取固定 owner 版本与原批注，
+`respond` 只向既有 F309 journal/proposal 返回修改建议。每次复核请求人、猫主人、参与声明与资源权限；
+采用仍由有权 Human 发起并消费 owner receipt，Work/Task 验收保持原协议。
+该登记覆盖已批准 W4 包必要的工具接线，完整旅程和部署状态见
+
 首猫 MCP admission 索引登记已冻结计划的 current-context/read/reply 三个来源与回流入口；A2
 另登记 cat-authored set-interest 入口，W3 登记只生成公共提议、不创建 Task 或承诺的 propose-work 入口，归正式
 collab server 的 `collective-participation` family；读取与发送仍分别校验当前 invocation、授权来源
@@ -85,13 +379,16 @@ collab server 的 `collective-participation` family；读取与发送仍分别�
 Café×Channel 的未来显式回应请求值守。首猫切片中，Work 提议只保留当前来源与候选结果，负责人、分配须 Human
 明确接受；私人工作另经 Host owner admission，可消费范围匹配的既有 standing grant。工具本身不能扩大
 读取或 owner 权限。**这段首猫实现边界不再定义终态的
-默认人工流程**：2026-09-30 operator 已选择默认猫自决，见下文“默认自决与两轴设置”；新委托消费尚待实现验证。
+默认人工流程**：2026-09-30 operator 已选择默认猫自决，见下文“默认自决与两轴设置”；委托消费已随
+#4955 交付软件与真实模型证据，双真人/双 Café 的完整使用验收仍开放，见开头当前进展。
 首猫切片依据为 operator 授权
 `private-source-id`、Sol 文档批准 `private-source-id`，以及
 这里没有批准新增私人执行权限，也不代替实施 thread `[thread-id]` 的代码 review、
 真实双 Human UAT 或完整 F290 验收。
 
 ## 前端设计阅读入口（2026-09-20）
+
+其中明确区分静态目标、既有通讯能力与尚未实现的共同体设置；前端当前状态以本文开头对账为入口。
 
 operator `private-source-id` 要求当前版本完成家内协作、同 Channel 多任务并行和成果回流；
 原 09-24 两机入场仍是接入过程，不能替代这段验收。原计划统一记录代码缺口、责任与贯穿验收；
@@ -223,35 +520,18 @@ Connector、Artifact/Roadmap/Action Space、F307 tab/split/restore 与全部 F30
 experience gate 只保留为旅程 baseline；PR #3981 只保留为 F307 原型证据，不能恢复为 F290 第二套
 Workbench。
 
-### 当前真正没做好的 F290 能力
+### 当前未完成能力（2026-10-12 对账）
 
-1. **Server provider 真实 UAT**：本轮实现候选已把“部署新 Service / 连接已有 Service”、独立进程托管、
-   GitHub App Manifest provider setup、mode-`0600` 凭据、一次性 bootstrap、状态诚实与原实例恢复接进同一
-   产品入口；PR #4296 已完成 review 与合入。它仍须用真实 GitHub 账号从
-   干净 Alpha 完成首次创建、授权、登录与当前 Café pairing，才能勾选 AC-L1 或打开本机激活门。
-2. **真实 Collective 入口 / world switch**：默认 Service Client 与 Clowder AI `/collective` Host 已接到
-   5102 baseline 的 global rail、Collective destination、Channel/Topic 和「我的 Café」上下文；两条
-   default-entry journey 已受 Design Gate 约束。PR #4830（`fae727c52d`）又把当前 Human 的全部 active
-   memberships、显式 world target 与 back/refresh 所需的安全目录投影接进真实 Client/Host；F322 的 rail
-   视觉消费、生产 runtime 激活、真实账号下的入口切换与返回路径仍未验收。
-3. **Roadmap operating model**：Channel/Topic 已能长出持久 Work，基础 Roadmap 会显示依赖、历史和
-   精确结果回流，并支持同频道多路线切换及完成/重开；informal 与 Roadmap-scoped binding Vote / Decision
-   都已有来源和权限边界，但真实 Meeting 输入、跨 owner 治理委托与真实团队事项仍未形成完整运行面。
-4. **共同产物系统**：Asset / Artifact library、树与派生、版本、lineage、锚定批注、权限和结果
-   回写尚未形成可持续的 Collective truth。
-5. **完整多 Café 生命周期**：首条 runtime 已具备 auth-bound Membership、邀请加入、endpoint
-   pairing/revoke、typed target、离线送达与 ACK；成员退出、Human membership revoke、冲突治理和完整
-   public projection 仍未实现。
-6. **真实团队 dogfood**：还没有用 You + 吴浪 / 社区协作者完成从共同讨论到各 Café 执行再回流
-   的端到端工作。
-7. **Collective 的宿主 adapter 只完成世界目录切片**：Clowder AI Host 已承载 canonical Client、当前 Channel
-   上下文和私人 Café 返回面；#4830 已补齐 membership world-directory/navigation seam，但 F290 仍须把
-   Artifact/Review 等领域 descriptor、权限投影与返回位置接入 F307 通用宿主。不能把剩余缺口登记成
-   “等待 F307”，也不能复制布局状态或把 world-directory landed 外推为整项 adapter 完成。
-8. **首猫真实参与尚待 UAT**：选猫、参与范围、稳定具名身份、正式 Collective MCP / skill、受限
-   公共调用与独立 owner admission 后的私人 Work 回流已随 PR #4396 合入。隔离的浏览器、原生猫
-   工具与持久化测试已通过；runtime 尚未加载，仍须用两个不同的真实 GitHub Human 走通 J0、
-   refresh/restart/revoke 与 AC-A8/AC-C3，不能以“Café 连接在线”或 synthetic fixture 替代。
+当前已交付证据、责任接缝与顺序统一见开头“当前进展与下一步”，这里保留原缺口的验收范围：
+
+1. **入场与部署**：provider #4296 已合，既有登录入口可用不等于干净安装、两位真实 GitHub Human、跨机部署及恢复全部验收；AC-L1/L2/L3 继续开放。
+2. **整页体验与登录恢复**：首页 #5205、入口 #5304 已交有限范围；#5473 已合入临时不可达不清有效会话的修复与浏览器回归。最新 Collective 设计、真人世界切换、真实 Alpha runtime 重启及关闭标签页后的持久登录仍未收口。
+3. **团队工作流程**：Work/Roadmap/Vote 已有基础实现，真实 Meeting/Issue 输入、跨 owner 协作、验收与发布去向仍需完整运行证据。
+4. **共同产物与记忆**：共享 Markdown 依赖 F309 AC-B6；资料库、版本/派生、批注→Topic、修改裁决、团队记忆及原处回流仍未形成完整团队体验。
+5. **成员治理**：普通成员无未结责任时的 self-leave 已随 #4646 实现；管理者交接、未结责任处置、完整权限/公开投影与实际跨 Café 恢复仍开放，不能再写“成员退出全部未实现”。
+6. **真实团队 dogfood**：软件/模型证据不能替代 You 与吴浪或社区协作者的完整 J0–J7 / AC-D1/D2 使用验收。
+7. **领域宿主接入**：F307 typed mount、世界目录和首页已有；Artifact/Review 的领域权限、lineage 和返回位置由 F290 接通，不等待整个 F307，也不复制布局或内容状态。
+8. **首猫及多猫参与**：#4396/#4955 与后续修复已提供实现和运行证据；两个不同真人、真实家内接力/并行、refresh/restart/revoke 与 AC-A8/AC-C3 仍须按原范围验收。
 
 ### 2026-09-06 Takeover — 从连接在线到首猫真实参与
 
@@ -518,7 +798,8 @@ Host / Service / Task / 内容 owner 分工、一个 Work 一个 current assignm
 
 **已落盘的通讯约束**见[通讯模型](../architecture/f290-communication-model.md)：授权与事项定位分开，
 先沿精确来源续接，按权限装配相关上下文；不同 Work 可并行，同 Work 的责任/版本不能被旧执行覆盖。
-主人委托的登记/撤回及 Service 验证接口、物理 Thread 创建策略、听取设置细节、调度/预算与共享写入机制仍待确定。
+下述“待确定”是 09-30 冻结时点的记录：主人委托的登记/撤回及 Service 验证接口、物理 Thread 创建策略、
+听取设置细节、调度/预算与共享写入机制。前几项已有 #4955 的软件交付，具体已实现边界见
 不把“每个 @ 新建 Thread”或“一个固定 Thread 承载所有工作”写为终态。实现与验收接回
 
 ### 2026-09-30 同一套猫身份、频道基数与跨频道汇总
@@ -1091,7 +1372,7 @@ Markdown，而不伪造成当时就在资产页发生的批注 → 后续参与�
 ## Terminal Phases
 
 1. **Phase A — Collective truth + Experience Design Gate**：把个人 Café → world switch → Collective
-   destination → Channel / Roadmap / Artifact 做成可体验、可纠偏的终态切片；当前阶段。
+   destination → Channel / Roadmap / Artifact 做成可体验、可纠偏的终态切片；整体验收仍开放，实现进度见开头对账。
 2. **Phase B — Stable objects + responsibility**：冻结产品对象、持久真相、authority 与 ownership
    cell；不交付临时 schema。
 3. **Phase C — Multi-Café federation + memory**：实现跨信任域同步、注意力、离线、撤权、冲突与
@@ -1138,7 +1419,7 @@ Markdown，而不伪造成当时就在资产页发生的批注 → 后续参与�
 ## Open Questions / Design Gate
 
 2. **Resolved to F310**：全局 Needs Me / Judgment 入口的 eligibility、去重、显著度与 exact-return
-   归 F310；F290 只提供 Collective-owned canonical items 与当前
+   归 [F310](F310-growing-real-delegation.md)；F290 只提供 Collective-owned canonical items 与当前
    predicate。准入红线保持：**只收等待人类判断或修复的事项，FYI / 热闹永不进入。**
 3. 双向望窗的摘要密度与“走进去”动作如何表达，同时不泄露私人 Thread；sidecar/tab/split 的
    通用宿主策略转交 F307。
@@ -1244,6 +1525,10 @@ Service 核对负责人和当前结果版本，将反馈关联到原结果，在
 
 | 来源 | 作用 |
 |---|---|
+| `[thread-id]#private-source-id`、`#private-source-id` | operator 要求联合梳理 F290、F322、F309 与 10.9 会议中的多人协同需求，随后授权先更新本 Feature 文档；不自动批准候选排期或责任迁移 |
+| `[thread-id]#private-source-id` | 10.9 团队会议原始转写入口及六位说话人对应；产品/流程输入、人类分工与未定范围见开头当前进展 |
+| `[thread-id]#private-source-id` | 10-09 #5304 在原 runtime 的四条入口路径复验；仅证明入口恢复，不代验完整真人协作 |
+| `[thread-id]#private-source-id`、`#private-source-id` | operator 明确掉登录发生在 runtime 重启后；代码存在恢复请求失败即清 session 的缺口，用户那次故障唯一根因尚未证实 |
 | `[thread-id]` / `private-source-id` | 三个月方向图将方向 5 交给本专属 thread |
 | `[thread-id]` | F290 产品收敛与 Experience Design Gate 主 thread |
 | `[thread-id]` | 家庭联邦 / Channel 的早期脑洞，作为演进证据而非冻结 spec |
@@ -1269,6 +1554,7 @@ Service 核对负责人和当前结果版本，将反馈关联到原结果，在
 
 ### Documents
 
+- [F322 当前路线图与已定事项](F322-everyday-work-experience.md)
 - [通讯模型与执行上下文（2026-09-30 编码约束、差距与验收场景）](../architecture/f290-communication-model.md)
 - [F307 Composable Workbench](F307-composable-workbench.md)
 - [F309 Collaborative Content Plane](F309-collaborative-content-plane.md)
@@ -1279,6 +1565,7 @@ Service 核对负责人和当前结果版本，将反馈关联到原结果，在
 |---|---|---|
 | `/home/user/Downloads/AI团队协作产品规划讨论.txt` | `9af4b48cc5f3b6d84a2d014a10f3fec909b388c030cd96e8a9935ca15e171810` | You × 吴浪，62 分 28 秒 |
 | `/home/user/Downloads/落地认知与工作方法交流讨论.txt` | `daf2213ce9babed2279dbf35fa6498df0f02ccbb09892c754fc9360cebaf6ff6` | 黄挺 / You / 吴浪；开头约两小时缺录 |
+| `/home/user/Downloads/AI产品迭代与团队协作规划.txt` | `5dcb5a9b8f9a204d10e788c5a108b9c20d8177d733f5bfb2ec60a93a99b9588b` | 10.9 团队会议；说话人对应在源 thread；本次采用的产品输入保留转写时间戳，未定事项不写成决议；原文不复制进公共文档 |
 
 ### Experience prototype provenance
 

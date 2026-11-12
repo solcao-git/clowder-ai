@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { selectFakeCodexHome } from './helpers/fake-codex-home.js';
 
 const { bootstrapCatCatalog, resolveCatCatalogPath, writeCatCatalog } = await import(
   '../dist/config/cat-catalog-store.js'
@@ -353,6 +354,8 @@ function collectCatalogCatIds(catalog) {
 describe('cat-catalog-store', () => {
   // Isolate provider profiles to a clean tmpdir so tests don't read from ~/.cat-cafe/
   let savedGlobalRoot;
+  let savedCodexHome;
+  let savedCodexSqliteHome;
   const isolationRoot = mkdtempSync(join(tmpdir(), 'cat-catalog-store-isolation-'));
   before(() => {
     savedGlobalRoot = process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
@@ -360,13 +363,21 @@ describe('cat-catalog-store', () => {
   });
   beforeEach(() => {
     process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = isolationRoot;
+    savedCodexHome = process.env.CODEX_HOME;
+    savedCodexSqliteHome = process.env.CODEX_SQLITE_HOME;
+  });
+  afterEach(() => {
+    if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = savedCodexHome;
+    if (savedCodexSqliteHome === undefined) delete process.env.CODEX_SQLITE_HOME;
+    else process.env.CODEX_SQLITE_HOME = savedCodexSqliteHome;
   });
   after(() => {
     if (savedGlobalRoot === undefined) delete process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT;
     else process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = savedGlobalRoot;
   });
 
-  it('bootstraps with one seed breed from template (#948)', () => {
+  it('bootstraps with an empty member list while preserving non-member template settings (#1651)', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'cat-catalog-store-f127-default-'));
     const templatePath = join(projectRoot, 'cat-template.json');
     const template = makeF127BootstrapTemplate();
@@ -375,10 +386,7 @@ describe('cat-catalog-store', () => {
     const catalogPath = bootstrapCatCatalog(projectRoot, templatePath);
     const runtimeCatalog = JSON.parse(readFileSync(catalogPath, 'utf-8'));
 
-    // #948: New catalogs seed the first breed from template so the app starts
-    // with at least one usable member (empty registry crashes before wizard).
-    assert.equal(runtimeCatalog.breeds.length, 1, 'should seed exactly one breed');
-    assert.equal(runtimeCatalog.breeds[0].id, 'ragdoll', 'seed breed should be the first template breed');
+    assert.equal(runtimeCatalog.breeds.length, 0, 'members require explicit owner confirmation');
     assert.deepEqual(runtimeCatalog.roster?.owner, {
       family: 'owner',
       roles: ['owner'],
@@ -388,15 +396,15 @@ describe('cat-catalog-store', () => {
     });
     assert.deepEqual(
       Object.keys(runtimeCatalog.roster ?? {}).sort(),
-      ['opus', 'owner', 'sonnet'],
-      'seeded catalog roster should only expose registered runtime cats plus owner',
+      ['owner'],
+      'the initial roster should only expose its owner',
     );
     // Non-breed config (reviewPolicy, coCreator) is preserved from template.
     assert.deepEqual(runtimeCatalog.reviewPolicy, template.reviewPolicy);
     assert.deepEqual(runtimeCatalog.coCreator, template.coCreator);
   });
 
-  it('backfills allowlisted glm52 dragon-li breed into a fresh runtime catalog', () => {
+  it('preserves allowlisted glm52 dragon-li upgrades for a legacy runtime catalog', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'cat-catalog-store-glm52-'));
     const templatePath = join(projectRoot, 'cat-template.json');
     const template = makeF127BootstrapTemplate();
@@ -430,14 +438,14 @@ describe('cat-catalog-store', () => {
       evaluation: 'GLM-5.2',
     };
     writeFileSync(templatePath, JSON.stringify(template, null, 2));
-
+    writeCatCatalog(projectRoot, { ...template, breeds: [template.breeds[0]] });
     const catalogPath = bootstrapCatCatalog(projectRoot, templatePath);
     const runtimeCatalog = JSON.parse(readFileSync(catalogPath, 'utf-8'));
 
     assert.deepEqual(
       runtimeCatalog.breeds.map((breed) => breed.id),
       ['ragdoll', 'dragon-li'],
-      'fresh runtime catalog should keep the seed breed and the allowlisted glm52 breed',
+      'legacy runtime catalog should keep existing members and its allowlisted upgrade',
     );
     assert.equal(runtimeCatalog.roster?.glm52?.family, 'dragon-li', 'glm52 roster entry should be persisted');
   });
@@ -447,7 +455,7 @@ describe('cat-catalog-store', () => {
     const templatePath = join(projectRoot, 'cat-template.json');
     const template = JSON.parse(readFileSync(REPO_TEMPLATE_PATH, 'utf-8'));
     writeFileSync(templatePath, JSON.stringify(template, null, 2));
-
+    writeCatCatalog(projectRoot, template);
     bootstrapCatCatalog(projectRoot, templatePath);
     await deleteRuntimeCat(projectRoot, 'glm52');
     bootstrapCatCatalog(projectRoot, templatePath);
@@ -735,6 +743,7 @@ describe('cat-catalog-store', () => {
 
   it('creates a new runtime member without corrupting v2 top-level fields', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'cat-catalog-store-'));
+    selectFakeCodexHome(projectRoot);
     const templatePath = join(projectRoot, 'cat-template.json');
     writeFileSync(templatePath, JSON.stringify(validConfig(), null, 2));
     writeCatCatalog(projectRoot, validConfig());
@@ -776,6 +785,7 @@ describe('cat-catalog-store', () => {
 
   it('persists voiceConfig when creating a runtime member', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'cat-catalog-store-'));
+    selectFakeCodexHome(projectRoot);
     const templatePath = join(projectRoot, 'cat-template.json');
     writeFileSync(templatePath, JSON.stringify(validConfig(), null, 2));
     writeCatCatalog(projectRoot, validConfig());
@@ -1220,6 +1230,7 @@ describe('cat-catalog-store', () => {
 
   it('persists acp tombstone when disabling template-inherited ACP transport', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'cat-catalog-store-'));
+    selectFakeCodexHome(projectRoot);
     const templatePath = join(projectRoot, 'cat-template.json');
     const template = validConfig();
     template.breeds[0].variants[0].clientId = 'google';
@@ -1620,6 +1631,7 @@ describe('cat-catalog-store', () => {
 
   it('rejects runtime members that reuse an alias from another cat', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'cat-catalog-store-'));
+    selectFakeCodexHome(projectRoot);
     const templatePath = join(projectRoot, 'cat-template.json');
     writeFileSync(templatePath, JSON.stringify(validConfig(), null, 2));
     writeCatCatalog(projectRoot, validConfig());
@@ -1652,6 +1664,7 @@ describe('cat-catalog-store', () => {
 
   it('deletes a runtime-created member without touching the rest of the catalog', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'cat-catalog-store-'));
+    selectFakeCodexHome(projectRoot);
     const templatePath = join(projectRoot, 'cat-template.json');
     writeFileSync(templatePath, JSON.stringify(validConfig(), null, 2));
     writeCatCatalog(projectRoot, validConfig());
@@ -1707,6 +1720,7 @@ describe('cat-catalog-store', () => {
     const siblingRoot = join(parentRoot, 'clowder-ai-old');
     mkdirSync(projectRoot, { recursive: true });
     mkdirSync(siblingRoot, { recursive: true });
+    selectFakeCodexHome(projectRoot);
 
     const templatePath = join(projectRoot, 'cat-template.json');
     const siblingTemplatePath = join(siblingRoot, 'cat-template.json');
@@ -1756,6 +1770,7 @@ describe('cat-catalog-store', () => {
     const siblingRoot = join(parentRoot, 'clowder-ai-old');
     mkdirSync(projectRoot, { recursive: true });
     mkdirSync(siblingRoot, { recursive: true });
+    selectFakeCodexHome(projectRoot);
 
     const templatePath = join(projectRoot, 'cat-template.json');
     const siblingTemplatePath = join(siblingRoot, 'cat-template.json');

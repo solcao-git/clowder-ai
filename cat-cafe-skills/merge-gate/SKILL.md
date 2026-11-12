@@ -326,7 +326,7 @@ EOF
 )"
 
 # 3. 注册这个 PR 的追踪（F280 + #1392 AC-7）
-# → 调用 MCP: cat_cafe_register_pr_tracking(repoFullName, prNumber)
+# → tool_search 发现已安装 GitHub 插件的 PR 跟踪工具，再按其 schema 注册 repoFullName / prNumber / registrationId
 #    普通情况这就是全部参数。服务端会装上 PR 自身的状态条件（review decision /
 #    CI 终态 / 冲突 / 新 HEAD）和两个评论面，受众按你在这个 PR 上的角色解析；
 #    返回里的 notification 写明实际装了什么、过滤了什么。
@@ -372,8 +372,9 @@ gh pr comment {PR_NUMBER} --body '@codex review'
 # Skip this step for non-community PRs.
 #
 # Do not call localhost:3004 or hand-build callback auth. The author calls
-# cat_cafe_community_request_guardian(caseId, author, reviewer); the assigned non-author/non-reviewer
-# guardian receives the returned checklist + signoffToken and calls cat_cafe_community_guardian_signoff.
+# installed GitHub plugin tool github_community_request_guardian with {id, payload}, using its live schema.
+# The assigned non-author/non-reviewer guardian consumes the returned checklist/token via
+# github_community_guardian_signoff; runtime supplies native identity, not caller-supplied metadata.
 # Merge remains blocked until the canonical community case projects an approved durable signoff.
 
 # 6.8 Hotfix Cross-Cat Review Gate（F177 Phase E）🔴
@@ -496,45 +497,44 @@ PR 触及 runtime 加载面（API / Web / MCP / L0 staging 等）时，merge 只
 **注册范围**（2026-07-15 修订）：仅对**明确临时债务**注册（修法自声明是权宜、欠正式方案）；走了 hotfix 流程但修法本身已是终态的，留痕 `reminder=not-needed:<理由>` 免注册。**注册失败不阻塞清理**：记 telemetry / 留痕后继续 Step 8，事后补注册——调度器故障不该扣押 worktree（旧版 fail-closed 是自噬环）。
 
 ```bash
-# 8. 更新本地 + 清理（fail-closed）
-# ⚠️ 发现脏工作树就停止，不要“即兴”用 git stash -u 清理。
-# 原因：git stash -u/--include-untracked 会删除 untracked 文件（内部 git clean），
-# 在多 session 共享工作目录时可能导致其他 session 的未 commit 产出丢失。
-if [ -n "$(git status --porcelain)" ]; then
-  echo "❌ 工作树不干净，停止 merge-gate（fail-closed）"
-  echo "请先处理改动后再继续。禁止使用 git stash -u/--include-untracked。"
-  git status --short
-  exit 1
-fi
-# 本段从主仓（持有 main 的 worktree）执行；7.5b 已 cd 至此，git checkout main 幂等 no-op。
-# 勿在 feature worktree 执行 git checkout main（main 被主仓占用会被拒绝，见 7.5b）。
-git checkout main && git pull origin main
-git worktree remove ../cat-cafe-{feature-name}
-git branch -d {branch-name} && git worktree prune
+# 8. 工位处置（从持有main且已包含当前收尾版本的主仓执行；source绑定原Task或PR，不运行另一份旧快照的CLI）
+# 仅检查目标树；主仓其他猫的dirty不冒充目标dirty，也不在此stash/清理它。
+# origin/main须已有已确认merge；若未fetch，finish会以not-merged阻塞而非猜过。
+pnpm worktree:finish ../cat-cafe-{feature-name} --source-ref {原Task或PR的ref}
+pnpm worktree:finish ../cat-cafe-{feature-name} --source-ref {同一ref} --check
 
-# 8.5 回收 review 沙盒（review-target-id 与 request-review 约定一致）
-REVIEW_TARGET_ID="{review-target-id}"  # e.g. f113 or fix-redis-keyprefix
-REVIEW_BASE="/tmp/cat-cafe-review/${REVIEW_TARGET_ID}"
-if [ -d "$REVIEW_BASE" ]; then
-  for sandbox in "$REVIEW_BASE"/*/; do
-    [ ! -d "$sandbox" ] && continue
-    # no-force 铁律（LL-012）：有未保存改动 → 报阻塞，不硬删
-    if git worktree list 2>/dev/null | grep -q "$sandbox"; then
-      STATUS=$(cd "$sandbox" && git status --porcelain 2>/dev/null)
-      if [ -n "$STATUS" ]; then
-        echo "⚠️ Review 沙盒 $sandbox 有未保存改动，跳过"
-        continue
-      fi
-      git worktree remove "$sandbox"
-    else
-      rm -rf "$sandbox"
-    fi
-  done
-  rmdir "$REVIEW_BASE" 2>/dev/null
-  echo "✅ Review 沙盒已回收: $REVIEW_BASE"
-fi
-git worktree prune  # 清理 dangling worktree references
+# 若还需保留预览/Alpha接续，以本段代替上面的release，再check同一ref：
+# pnpm worktree:finish ../cat-cafe-{feature-name} --source-ref {原Task或PR的ref} --retain --reason "等待原验收" --until {未来ISO时刻}
+# pnpm worktree:finish ../cat-cafe-{feature-name} --source-ref {同一ref} --check
+
+# 只有released或有效retained回执代表工位收尾；blocked需处理，不能仅凭PR MERGED报完成。
+# 新released必须为storageDisposition=removed：已验证独有原件/Git metadata归档、实际移除工位并回收可重建副本；branch仍保留，不使用force/stash-u/批量rm。
+# 旧storageDisposition=quarantined只证明不占活跃名额，不能当磁盘回收；保留它的恢复记录。
 ```
+
+### Step 8.5 — 核对这个 PR 的全部登记路径
+
+Reviewer 每轮 verdict 前仍按 receive-review 收尾。作者在合入后调用下列只读入口：它枚举 Git 的全部登记，
+包含未声明旧树、嵌套 `.review-worktrees`、非标准路径和命名 Alpha，不用 capacity.active 或目录前缀代替完整清单。
+PR 状态及完整提交列表来自 canonical gh；中间 review HEAD 按提交列表关联，兼容 squash。关联查询失败就报告 unknown。
+
+```bash
+pnpm worktree:inventory --pr pr:{OWNER}/{REPO}#{PR_NUMBER}
+```
+
+逐项消费 `worktrees` 的实际 released 或有效 retained 回执。`owner-finish-required` 不等于可代删：
+携路径回原责任线程，核用途和原件后由 owner 收尾，不停止别人的预览、不造老工位的出生登记。
+旧树没有来源时沿原聊天/创建记录查证，不因 owner 退役就无限搁置。查不到归属的列 unknown，不宣称零残留。
+
+已合入中间稿与 main 内容不同、普通 finish 拒绝时，由已核原 owner 使用明确的 PR 证据：
+
+```bash
+pnpm worktree:finish {精确工位路径} --source-ref {原Task或PR的ref} --merged-pr pr:{OWNER}/{REPO}#{PR_NUMBER}
+pnpm worktree:finish {精确工位路径} --source-ref {同一ref} --check
+```
+
+工具 fresh 读取 MERGED、完整提交成员及本地 origin/main 中的合入点，保留独有提交/原件与恢复命令；
+脏状态、锁、进程、持久消费者、保护目录及 owner 检查照常执行。该参数不代替旧树的原责任核验。
 
 ### remote review 选择与处理规则
 
@@ -630,7 +630,7 @@ cd "$MAIN_WT" && git pull origin main   # 取回刚 squash 的 commit，doc-sync
 2. **Commit + push**：只有 Phase / AC / Status 至少一项真实变化才会进入本段；Timeline 是该变化的 provenance，**不能反过来把自己当成触发 commit 的理由**。本 PR 未改变 feature truth → 留痕跳过，不产出空 doc commit 刷 main（churn + index 竞态源，2026-07-15 修订）。派生 index 由生成器 / merge finalizer **机器独占维护**，不随手工 doc commit 顺手刷。message `docs(F{NNN}): sync phase progress after PR #{N} merge`（文档同步不需走 review）。
 3. **复验**：再跑一次 `node scripts/check-feature-truth.mjs` —— 确认 post-merge 写入没引入新 drift（例如加了 merged Timeline 却忘把 `spec` 推进成 `in-progress`，lint 会抓）。
 
-> 落点说明：7.5b 切到持有 main 的 worktree（通常是主仓）做 doc-sync；后续 Step 8 清理本就从主仓发起（`git worktree remove ../cat-cafe-{name}`），此时已在 main worktree，其 `git checkout main` 幂等 no-op。单仓无独立 feature worktree 时 `git worktree list` 只返回主仓，cd 即原地。
+> 落点说明：7.5b 切到持有 main 的 worktree（通常是主仓）做 doc-sync；Step 8 从目标之外调用 `worktree:finish`，不因主仓自身dirty跳过目标处置。只有主仓的单仓场景不调用工位释放；工具会拒绝main/保护目录。
 
 **检查清单**：
 - [ ] **(pre)** doc 标 ✅ 的 Phase / 打勾 AC 都有代码支撑（没撒谎）
@@ -677,7 +677,7 @@ cd "$MAIN_WT" && git pull origin main   # 取回刚 squash 的 commit，doc-sync
 | 跳过 evidence validation 直接 merge | Step 6.9 五项 E1-E5 全过才能进 Step 7；不组装 evidence = 不知道 review 是否 stale |
 | Merge **前**不核对 feature doc 说真话 | Step 7.5a：标 ✅/打勾 AC 必须有代码支撑，`check-feature-truth` 绿，再 merge |
 | Merge **后**无条件追加 Timeline | Step 7.5b：先判 Phase/AC/Status truth delta；有才同步并记 provenance，无则整段跳过 |
-| Merge 后不清理 review 沙盒 | Step 8.5 按 review-target-id 回收 `/tmp/cat-cafe-review/` |
+| Reviewer 等作者合入、作者又等 reviewer，沙盒无人收尾 | Reviewer 每轮 verdict 前 finish/check；作者 Step8.5 只读核本 target 的 owner/续留回执 |
 | 看见 `Gate route=targeted` 就当 gate 绿了开 PR / 合入 | targeted 退出码 3 = 分类完成、零测试；自己实跑 `Still owed` 的受影响检查并写进 evidence manifest（「targeted 终态语义」） |
 | 把「退出码 3 / ⚠️ 未验证」（或 runtime 未激活时的「❌ 退出码 3」）当普通失败去 debug 或重跑 full | 3 不是坏了，是已分类未验证；按 `Still owed` 补证据即可（「targeted 终态语义」） |
 | 改门禁执行链 / 共享调度只交定向测试 + review 就宣布"gate 已提速" | 定向证据只覆盖行为面；另报总反馈时间预期与验证方式，任务不因 PR merged 而 done（判例 #4152 / #4163） |
@@ -737,9 +737,11 @@ gh pr comment {PR_NUMBER} --body '@codex review'
 
 | 原 reviewer | 降级到 | 说明 |
 |-------------|--------|------|
-| 云端 Codex / 任一Maine Coon（OpenAI 池） | **另一 provider** 的在役本地 reviewer（当前为Ragdoll家族；按 dossier 常驻索引 + F293 可用性选具体个体） | **跨 provider family**：OpenAI 各 model 共享 API 池，一个没猫粮 = 都没猫粮 |
-| Ragdoll某个体 | Ragdoll其他在役个体 / Maine Coon | 同族或跨族 |
-| **禁止** | Siamese | 家族约束：不做代码 review（新版本是否放宽，等真实任务证据写进 dossier 再改） |
+| 云端 Codex / 任一Maine Coon（OpenAI 池） | **另一 provider** 的在役非作者 reviewer：Sonnet、kimi 或 gemini-argon（只审不写代码）；按 dossier + F293 可用性选择 | **跨 provider family**：同一 provider 的额度不足时不在其内部换 model |
+| Ragdoll某个体 | 非作者Maine Coon、kimi 或 gemini-argon（只审不写代码） | 稀缺创作/判断席位不进迭代循环 |
+| **禁止** | 作者自己 | 同族不同个体可审，同一个体不能自审 |
+
+Sonnet 与Ragdoll共用 Anthropic 池，所以只作为 OpenAI 池额度不足时的跨 provider 降级选项，不作为Ragdoll个体的降级选项。Siamese里只有 gemini-argon 参与 review，其他Siamese不自动加入常规 reviewer，也不授权 Argon 写代码。
 
 **铁律：降级后仍须校验"reviewer ≠ 作者"**——降级表是建议顺序，不能覆盖 self-review 禁令。
 

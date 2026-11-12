@@ -1,3 +1,4 @@
+import { secretRuntimeScript } from '@cat-cafe/mcp-server/dist/secret-runtime.js';
 /**
  * CLI Process Spawner
  * 通用 CLI 子进程管理器，处理生命周期、超时和清理
@@ -7,6 +8,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { deploymentDefaults } from '@cat-cafe/shared';
 import type { Span } from '@opentelemetry/api';
 import { context, SpanStatusCode, trace } from '@opentelemetry/api';
 import { createModuleLogger } from '../infrastructure/logger.js';
@@ -35,7 +37,8 @@ import {
 import { invalidateCliCommand } from './cli-resolve.js';
 import { resolveWindowsSpawnPlan } from './cli-spawn-win.js';
 import { buildUnixSupervisedSpawnPlan } from './cli-supervised-process.js';
-import { resolveCliTimeoutMs } from './cli-timeout.js';
+import { prepareGuardedZshDirectory } from './guarded-zsh-directory.js';
+import { registerProcessActivity } from './process-activity-registry.js';
 
 export { resolveCliSupervisorNodeArgs } from './cli-supervised-process.js';
 
@@ -50,8 +53,9 @@ const log = createModuleLogger('cli-spawn');
 
 const IS_WINDOWS = process.platform === 'win32';
 const CAT_CAFE_RUNTIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
-const GUARDED_GH_BIN = resolve(CAT_CAFE_RUNTIME_ROOT, 'scripts', 'guarded-bin');
-const GUARDED_ZSH_DIR = resolve(CAT_CAFE_RUNTIME_ROOT, 'scripts', 'guarded-zsh');
+const GUARDED_GH_BIN = secretRuntimeScript('guarded-bin');
+const GUARDED_ZSH_SOURCE_DIR = secretRuntimeScript('guarded-zsh');
+const GUARDED_ZSH_DIR = resolve(CAT_CAFE_RUNTIME_ROOT, '.cat-cafe', 'tmp', 'guarded-zsh');
 type GuardedChildEnv = Record<string, string | null | undefined>;
 type SourceEnvOverrides = Readonly<Record<string, string | null>> | undefined;
 
@@ -65,7 +69,7 @@ function shouldRefreshOriginalZdotdir(
   currentZdotdir: string,
 ): boolean {
   if (hasSourceOverride(sourceOverrides, 'CAT_CAFE_ORIGINAL_ZDOTDIR')) return false;
-  if (resolve(currentZdotdir) === GUARDED_ZSH_DIR) return false;
+  if ([GUARDED_ZSH_DIR, GUARDED_ZSH_SOURCE_DIR].includes(resolve(currentZdotdir))) return false;
   return hasSourceOverride(sourceOverrides, 'ZDOTDIR') || !env.CAT_CAFE_ORIGINAL_ZDOTDIR;
 }
 
@@ -75,6 +79,7 @@ function shouldRefreshHistfile(env: GuardedChildEnv, sourceOverrides: SourceEnvO
 }
 
 function configureGuardedZshEnv(env: GuardedChildEnv, sourceOverrides: SourceEnvOverrides): void {
+  prepareGuardedZshDirectory(GUARDED_ZSH_SOURCE_DIR, GUARDED_ZSH_DIR);
   const currentZdotdir = env.ZDOTDIR ?? env.HOME ?? process.env.HOME;
   // An explicit ZDOTDIR selects a new startup context. Refresh inherited companion values unless
   // the caller supplied those companions explicitly; otherwise parent-shell state leaks across contexts.
@@ -82,7 +87,10 @@ function configureGuardedZshEnv(env: GuardedChildEnv, sourceOverrides: SourceEnv
     env.CAT_CAFE_ORIGINAL_ZDOTDIR = currentZdotdir;
   }
   if (currentZdotdir && shouldRefreshHistfile(env, sourceOverrides)) {
-    env.HISTFILE = resolve(currentZdotdir, '.zsh_history');
+    const historyDir = [GUARDED_ZSH_DIR, GUARDED_ZSH_SOURCE_DIR].includes(resolve(currentZdotdir))
+      ? (env.CAT_CAFE_ORIGINAL_ZDOTDIR ?? env.HOME ?? process.env.HOME ?? currentZdotdir)
+      : currentZdotdir;
+    env.HISTFILE = resolve(historyDir, '.zsh_history');
   }
   env.SHELL_SESSIONS_DISABLE ||= '1';
   env.ZDOTDIR = GUARDED_ZSH_DIR;
@@ -101,12 +109,14 @@ export function withVerdictGhGuardEnv<T extends Record<string, string | null | u
   }
   mutable.CAT_CAFE_VERDICT_GH_GUARD_ROOT = CAT_CAFE_RUNTIME_ROOT;
   mutable.CAT_CAFE_VERDICT_GH_GUARD_BIN = GUARDED_GH_BIN;
-  if (existsSync(resolve(GUARDED_ZSH_DIR, '.zprofile'))) {
+  if (existsSync(resolve(GUARDED_ZSH_SOURCE_DIR, '.zprofile'))) {
     configureGuardedZshEnv(mutable, sourceOverrides);
   }
   if (!mutable.CAT_CAFE_VERDICT_REPO_FULL_NAME) {
     mutable.CAT_CAFE_VERDICT_REPO_FULL_NAME =
-      process.env.CAT_CAFE_VERDICT_REPO_FULL_NAME ?? process.env.CAT_CAFE_REPO_FULL_NAME ?? 'zts212653/cat-cafe';
+      process.env.CAT_CAFE_VERDICT_REPO_FULL_NAME ??
+      process.env.CAT_CAFE_REPO_FULL_NAME ??
+      deploymentDefaults.repositoryFullName;
   }
   return env;
 }
@@ -250,6 +260,11 @@ const ENV_VARS_TO_STRIP: ReadonlySet<string> = new Set([
   // Legacy F296 process-scoped bearer. Session hooks authenticate with the
   // invocation-bound callback pair; never leak a stale operator token to any child.
   'CAT_CAFE_HOOK_TOKEN',
+  // Jev is an API-owned selector. Neither credentials nor its private page
+  // configuration may be delegated through ambient or overridden child env.
+  'TYPESAFE_API_KEY',
+  'TYPESAFE_API_KEY_FILE',
+  'CAT_CAFE_JEV_PAGE_CONFIG',
   // Per-invocation process ownership is a capability, not ambient config. A
   // nested API or persistent host must not inherit the outer invocation.
   CLI_EXECUTION_OWNER_BINDING_ENV,
@@ -354,6 +369,9 @@ export function buildChildEnv(
   const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
   merged.PWD = workingDirectory;
   merged.INIT_CWD = workingDirectory;
+  if (['shared', 'stdio'].includes(merged.CAT_CAFE_MCP_TRANSPORT ?? '') && merged.CAT_CAFE_CREDENTIAL_FILE) {
+    delete merged.CAT_CAFE_CALLBACK_TOKEN;
+  }
   return withVerdictGhGuardEnv(merged, overrides);
 }
 
@@ -366,10 +384,15 @@ export async function* spawnCli(
   options: CliSpawnOptions,
   deps?: CliSpawnerDeps,
 ): AsyncGenerator<unknown, void, undefined> {
+  if (options.stdinInput !== undefined && options.onStdinReady) {
+    throw new Error('CLI stdin must have exactly one input owner');
+  }
   const doSpawn: SpawnFn = deps?.spawnFn ?? defaultSpawn;
   const livenessWarningDrainIntervalMs = deps?.livenessWarningDrainIntervalMs ?? LIVENESS_WARNING_DRAIN_INTERVAL_MS;
-  // Default timeout is configurable via CLI_TIMEOUT_MS env var; 0 disables timeout.
-  const timeoutMs = resolveCliTimeoutMs(options.timeoutMs);
+  // Only a caller that asks for a response timeout gets one (probes and other one-off commands).
+  // F117 KD-22: a dispatched member's timeout is its invocation's, driven by CLI_TIMEOUT_MS — never
+  // a second one here.
+  const timeoutMs = options.timeoutMs ?? 0;
 
   // Log only flag names (--foo) and arg count — never raw values.
   // Multiple providers pass prompt text via different shapes (positional,
@@ -398,7 +421,7 @@ export async function* spawnCli(
     // Incident 2026-05-29 (cross-thread-context-contamination): when stdinInput is
     // provided, open stdin as a pipe so the prompt can be streamed off the command
     // line. Otherwise keep 'ignore' (unchanged for providers not using stdin).
-    stdio: [options.stdinInput != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    stdio: [options.stdinInput != null || options.onStdinReady ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     bindExecutionOwner: options.bindExecutionOwner !== false,
   });
   if (options.bindExecutionOwner !== false) {
@@ -415,7 +438,8 @@ export async function* spawnCli(
   // cross-process prompt leakage (`ps -o command=` / /proc/<pid>/cmdline can read
   // any concurrent process's full argv). The child reads it because the CLI is
   // invoked with PROMPT='-'.
-  if (options.stdinInput != null) {
+  let closeStdin: (() => void) | undefined;
+  if (options.stdinInput != null || options.onStdinReady) {
     const childStdin = child.stdin;
     if (childStdin) {
       // EPIPE guard: child may exit before consuming all stdin. EPIPE is expected
@@ -425,8 +449,20 @@ export async function* spawnCli(
           log.warn({ err, pid: child.pid, command: options.command }, 'Unexpected CLI stdin write error');
         }
       });
-      childStdin.write(options.stdinInput);
-      childStdin.end();
+      if (options.stdinInput != null) childStdin.write(options.stdinInput);
+      if (options.stdinCloseSignal && !options.stdinCloseSignal.aborted) {
+        closeStdin = () => childStdin.end();
+        options.stdinCloseSignal.addEventListener('abort', closeStdin, { once: true });
+      } else if (!options.onStdinReady || options.stdinCloseSignal?.aborted) {
+        childStdin.end();
+      }
+      options.onStdinReady?.((input) => {
+        if (childStdin.destroyed || childStdin.writableEnded || options.signal?.aborted) {
+          throw new Error('CLI stdin is closed');
+        }
+        childStdin.write(input);
+        if (!options.stdinCloseSignal) childStdin.end();
+      });
     }
   }
 
@@ -485,6 +521,10 @@ export async function* spawnCli(
   const stdoutDrain = child.stdout ? new CliExitOutputDrain(child.stdout) : undefined;
   let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
   let exitObserved = false;
+  let resolveProcessExit!: () => void;
+  const processExit = new Promise<void>((resolve) => {
+    resolveProcessExit = resolve;
+  });
   let resolveExitDrain!: () => void;
   const exitDrainComplete = new Promise<void>((resolve) => {
     resolveExitDrain = resolve;
@@ -492,6 +532,7 @@ export async function* spawnCli(
   const observeProcessExit = (): void => {
     if (exitObserved) return;
     exitObserved = true;
+    resolveProcessExit();
     stdoutDrain?.start();
     exitDrainTimer = setTimeout(() => {
       stdoutDrain?.finish();
@@ -672,13 +713,17 @@ export async function* spawnCli(
   let localFinalTerminal: 'completed' | 'failed' | null = null;
 
   // F118 Phase B: Initialize liveness probe
+  let unregisterProcessActivity: (() => void) | undefined;
   if (options.livenessProbe && child.pid !== undefined) {
     probe = new ProcessLivenessProbe(child.pid, options.livenessProbe);
     probe.start();
     // F152: Register probe for OTel agentLiveness gauge
     if (options.invocationId) {
       const catId = options.env?.CAT_CAFE_CAT_ID ?? 'unknown';
-      registerLivenessProbe(options.invocationId, catId, () => probe!.getState());
+      const liveProbe = probe;
+      registerLivenessProbe(options.invocationId, catId, () => liveProbe.getState());
+      // F117 KD-22: the member output timeout defers while this process is still using CPU.
+      unregisterProcessActivity = registerProcessActivity(options.invocationId, () => liveProbe.activity());
     }
   }
 
@@ -705,6 +750,7 @@ export async function* spawnCli(
     finalStage: terminationController.getFinalStage(),
   });
 
+  let streamCompleted = false;
   try {
     if (!stdoutDrain) {
       throw new Error(`CLI process ${options.command} has no stdout`);
@@ -1156,7 +1202,16 @@ export async function* spawnCli(
         cliDiagnostics,
       };
     }
+    streamCompleted = true;
   } finally {
+    if (!streamCompleted) {
+      // Protocol rejection/consumer return bypasses the normal drain below the
+      // yield loop. Keep caller-owned credentials and leases alive until the
+      // supervised process exits; sending SIGTERM/SIGKILL is not exit evidence.
+      // Wait for OS exit, not inherited stdio, which may remain open afterward.
+      killChild();
+      if (!childExited) await processExit;
+    }
     if (exitDrainTimer) clearTimeout(exitDrainTimer);
     stdoutDrain?.dispose();
     drainBufferedStderr();
@@ -1165,6 +1220,7 @@ export async function* spawnCli(
       child.stderr?.destroy();
     }
     if (timeoutTimer) clearTimeout(timeoutTimer);
+    if (closeStdin) options.stdinCloseSignal?.removeEventListener('abort', closeStdin);
     if (options.signal) {
       options.signal.removeEventListener('abort', abortHandler);
     }
@@ -1172,6 +1228,7 @@ export async function* spawnCli(
     probe?.stop();
     // F152: Unregister probe from OTel gauge
     if (options.invocationId) unregisterLivenessProbe(options.invocationId);
+    unregisterProcessActivity?.();
     killChild();
 
     // F153 Phase B: End CLI session span with appropriate status

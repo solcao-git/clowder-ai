@@ -14,6 +14,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolvePromptTemplateVariables } from '@cat-cafe/shared';
 import YAML from 'yaml';
 import { findMonorepoRoot } from '../../../../utils/monorepo-root.js';
 
@@ -49,8 +50,9 @@ function resolveWithOverlay(base: string, localSuffix: string): { path: string; 
  * Unresolved placeholders are left as-is (loud failure in prompt).
  */
 export function renderTemplate(template: string, vars: Record<string, string>): string {
+  const values = { ...resolvePromptTemplateVariables(), ...vars };
   return template.replace(/\{\{(\w+)\}\}/g, (match, key: string) => {
-    return key in vars ? vars[key] : match;
+    return Object.hasOwn(values, key) ? values[key] : match;
   });
 }
 
@@ -109,7 +111,7 @@ export function loadWorkflowTriggers(): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [breed, content] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof content === 'string') {
-      result[breed] = content.trimEnd();
+      result[breed] = renderTemplate(content.trimEnd(), {});
     }
   }
   return result;
@@ -228,7 +230,7 @@ const TEMPLATE_FILES: Record<string, { base: string; local: string }> = {
   D7_serial: { base: 'd7-mode-serial.md', local: '' },
   D7_parallel: { base: 'd7-mode-parallel.md', local: '' },
   D7_solo: { base: 'd7-mode-solo.md', local: '' },
-  D12: { base: 'd12-active-participant.md', local: '' },
+  D12: { base: 'd12-recent-speaker.md', local: '' },
   D13: { base: 'd13-routing-policy.md', local: '' },
   D15: { base: 'd15-voice-off.md', local: '' },
   D15_on: { base: 'd15-voice-on.md', local: '' },
@@ -244,7 +246,6 @@ const TEMPLATE_FILES: Record<string, { base: string; local: string }> = {
   D17: { base: 'd17-guide-candidate.md', local: '' },
   D18: { base: 'd18-world-context.md', local: '' },
   D19: { base: 'd19-constitutional-knowledge.md', local: '' },
-  D20: { base: 'd20-signal-articles.md', local: '' },
 };
 
 /**

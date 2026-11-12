@@ -10,14 +10,14 @@ import { decidesOnOriginCard } from './original-place';
  * read at different moments, so the card is hosted only when the store's copy is the same decision the user is looking at.
  * "Same" means the proposal, the producer, the owner (the read's verified identity: the read carries none on the item),
  * the version, the lifecycle, the ability to act, not expired, and the credentials the producer itself checks when the
- * button is pressed — equal createdAt and lifecycle do not make two F292 revisions or two F260 fingerprints the same.
+ * button is pressed — equal createdAt and lifecycle do not make two producer detail values or two F260 fingerprints the same.
  *
  * Anything that differs, is missing, or cannot be told is unmatched. There is no default match.
  */
 export type ApprovalMismatch =
   | { reason: 'not_in_store' }
   | { reason: 'owner' }
-  | { reason: 'identity'; field: 'createdAt' }
+  | { reason: 'identity'; field: 'createdAt' | 'sourceFeatureId' | 'requesterCatId' }
   | { reason: 'capability'; field: 'decisionMode' | 'inlineApprovable' }
   | { reason: 'lifecycle'; field: 'resolution' | 'materialization' }
   | { reason: 'version'; field: 'expiresAt' | 'summary' }
@@ -84,12 +84,6 @@ function conflictCredential(detail: Record<string, unknown>): ConflictCredential
   return { fingerprint, allowedActions: allowed, canonicalReplacementRequiredFor: required };
 }
 
-/** F292 presents its `detail.revision` as `expectedRevision`; both copies must carry the same readable integer. */
-function meetingMismatch(read: Record<string, unknown>, store: Record<string, unknown>): string | null {
-  const same = Number.isSafeInteger(read.revision) && read.revision === store.revision;
-  return same ? null : 'revision';
-}
-
 function entityMismatch(read: Record<string, unknown>, store: Record<string, unknown>): string | null {
   const a = conflictCredential(read);
   const b = conflictCredential(store);
@@ -112,12 +106,24 @@ function personMemoryMismatch(read: Record<string, unknown>, store: Record<strin
 
 /** The first credential the producer would check at press time that the two copies do not share; null when they share it. */
 function credentialMismatch(read: UnifiedAttentionVisibleApproval, store: ApprovalHubItem): string | null {
-  if (read.sourceFeatureId === 'F292') return meetingMismatch(read.detail, store.detail);
   if (read.sourceFeatureId === 'F260') return entityMismatch(read.detail, store.detail);
   if (read.sourceFeatureId === 'F276' && read.decisionMode === 'claim-select') {
     return personMemoryMismatch(read.detail, store.detail);
   }
-  return null;
+  return sameDetail(read.detail, store.detail) ? null : 'detail';
+}
+
+/** Content and proposed executors are part of the version a user agrees to, including object fields in another order. */
+function sameDetail(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((entry, i) => sameDetail(entry, b[i]));
+  }
+  if (!isRecord(a) || !isRecord(b)) return false;
+  const keys = Object.keys(a);
+  return (
+    keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && sameDetail(a[key], b[key]))
+  );
 }
 
 interface MatchContext {
@@ -138,9 +144,11 @@ const ownerCheck: Check = (_read, store, { readOwnerUserId }) =>
 
 // Two copies that are equally unreadable are not "the same": a time that is not a time cannot identify a decision.
 const identityCheck: Check = (read, store) =>
-  isTime(store.createdAt) && isTime(read.createdAt) && store.createdAt === read.createdAt
-    ? null
-    : { reason: 'identity', field: 'createdAt' };
+  store.requesterCatId !== read.requesterCatId
+    ? { reason: 'identity', field: 'requesterCatId' }
+    : isTime(store.createdAt) && isTime(read.createdAt) && store.createdAt === read.createdAt
+      ? null
+      : { reason: 'identity', field: 'createdAt' };
 
 const capabilityCheck: Check = (read, store) => {
   if (store.decisionMode !== read.decisionMode) return { reason: 'capability', field: 'decisionMode' };
@@ -190,18 +198,29 @@ const CHECKS: readonly Check[] = [
 
 export function matchHostedApproval(input: HostedApprovalMatchInput): HostedApprovalMatch {
   const { read, readOwnerUserId, storeItems, now } = input;
-  const store = storeItems.find(
+  const copies = storeItems.filter(
     (candidate) =>
       isRecord(candidate) &&
       candidate.proposalId === read.proposalId &&
       candidate.sourceFeatureId === read.sourceFeatureId,
   );
-  if (!store) return { kind: 'unmatched', reason: 'not_in_store' };
-  for (const check of CHECKS) {
-    const mismatch = check(read, store, { readOwnerUserId, now });
-    if (mismatch) return { kind: 'unmatched', ...mismatch };
+  if (copies.length === 0) return { kind: 'unmatched', reason: 'not_in_store' };
+  if (
+    storeItems.some(
+      (candidate) =>
+        isRecord(candidate) &&
+        candidate.proposalId === read.proposalId &&
+        candidate.sourceFeatureId !== read.sourceFeatureId,
+    )
+  )
+    return { kind: 'unmatched', reason: 'identity', field: 'sourceFeatureId' };
+  for (const store of copies) {
+    for (const check of CHECKS) {
+      const mismatch = check(read, store, { readOwnerUserId, now });
+      if (mismatch) return { kind: 'unmatched', ...mismatch };
+    }
   }
-  return { kind: 'matched', item: store };
+  return { kind: 'matched', item: copies[0] };
 }
 
 /**
@@ -214,7 +233,5 @@ export function isHostableApproval(approval: UnifiedAttentionVisibleApproval): b
   if (!isRecord(approval) || approval.resolution !== 'open') return false;
   if (!(approval.sourceFeatureId in APPROVAL_FEATURES)) return false;
   if (decidesOnOriginCard(approval.sourceFeatureId)) return false;
-  return (
-    approval.inlineApprovable || approval.decisionMode === 'claim-select' || approval.decisionMode === 'meeting-intake'
-  );
+  return approval.sourceFeatureId === 'F128' || approval.inlineApprovable || approval.decisionMode === 'claim-select';
 }

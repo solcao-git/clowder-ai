@@ -1,3 +1,4 @@
+import { deploymentDefaults } from '@cat-cafe/shared';
 import type { AgentCarrierSession } from '../../types.js';
 import {
   asCodexAppServerRecord,
@@ -5,6 +6,7 @@ import {
   codexAppServerErrorMessage,
   respondToCodexAppServerRequest,
 } from './CodexAppServerEventMapper.js';
+import { validateCodexAccountConfiguration } from './codex-app-server-account-configuration.js';
 import { CodexAppServerRpcError } from './codex-app-server-rpc-error.js';
 
 interface PendingRequest {
@@ -99,11 +101,16 @@ export async function runCodexAppServerInitializedRpc<T>(input: {
   try {
     const initialized = await bounded(
       request('initialize', {
-        clientInfo: { name: 'cat-cafe', title: 'Clowder AI native thread controls', version: '1' },
+        clientInfo: {
+          name: 'cat-cafe',
+          title: `${deploymentDefaults.brand.displayName} native thread controls`,
+          version: '1',
+        },
         capabilities: input.capabilities ?? {},
       }),
     );
     await write({ method: 'initialized' });
+    await bounded(validateCodexAccountConfiguration(input.wire, (method, params) => bounded(request(method, params))));
     return await bounded(input.run({ request: (method, params) => bounded(request(method, params)) }, initialized));
   } finally {
     if (timer) clearTimeout(timer);

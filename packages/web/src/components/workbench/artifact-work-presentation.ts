@@ -1,3 +1,7 @@
+import { contentFileExtension, projectFileContent } from '@cat-cafe/shared';
+import { resolveFileTarget } from './real-surface-adapters';
+import type { WorkspaceSurfaceDescriptor } from './workbench-contract';
+
 export const DEFAULT_ARTIFACT_WORK_CHAT_BASIS = 30;
 export interface ArtifactWorkOwnerRef {
   readonly owner: string;
@@ -24,6 +28,8 @@ export interface ArtifactWorkPresentationSession {
   readonly threadId: string;
   readonly surfaceId: string;
   readonly mode: 'split' | 'full-window';
+  /** Explicit artwork entry, distinct from ordinary Workspace file browsing. */
+  readonly workMode?: true;
   readonly returnHandle: ArtifactWorkReturnHandle;
 }
 export interface ArtifactWorkPresentationState {
@@ -68,6 +74,7 @@ export type ArtifactWorkPresentationCommand =
       readonly threadId: string;
       readonly surfaceId: string;
       readonly returnHandle: ArtifactWorkReturnHandle;
+      readonly workMode?: true;
     }
   | { readonly type: 'set-chat-basis'; readonly initiator: Initiator; readonly basis: number }
   | (SessionCommand & { readonly type: 'enter-full-window'; readonly initiator: Initiator })
@@ -140,6 +147,7 @@ function beginSession(state: ArtifactWorkPresentationState, command: BeginComman
         threadId: command.threadId,
         surfaceId: command.surfaceId,
         mode: 'split',
+        ...(command.workMode ? { workMode: true as const } : {}),
         returnHandle: command.returnHandle,
       },
     },
@@ -219,5 +227,41 @@ export function reduceArtifactWorkPresentation(
 
 /** Structural on purpose: geometry may classify descriptors without importing an owner implementation. */
 export function isArtifactWorkSurface(surface: { readonly type?: string } | null | undefined): boolean {
-  return surface?.type === 'artifact' || surface?.type === 'review';
+  return (
+    surface?.type === 'artifact' ||
+    surface?.type === 'review' ||
+    surface?.type === 'thread-replay' ||
+    surface?.type === 'video-project'
+  );
+}
+
+type WorkSurfaceCoordinate = { readonly type?: string } & Partial<
+  Pick<WorkspaceSurfaceDescriptor, 'objectRef' | 'ownerStateRef' | 'resultTargetRef'>
+>;
+
+export function isWorkspaceArtworkPath(path: string): boolean {
+  const facts = projectFileContent({ name: path });
+  // Default work presentation is narrower than all readable or editable formats.
+  return facts.floating || facts.kind === 'markdown' || ['txt', 'docx'].includes(contentFileExtension(path));
+}
+
+/** Presentation reads the canonical file coordinate; admission and bytes remain with the file/review owners. */
+export function isWorkspaceArtworkFile(surface: WorkSurfaceCoordinate | null | undefined): boolean {
+  if (surface?.type !== 'file' || !surface.objectRef || !surface.ownerStateRef) return false;
+  const target = resolveFileTarget({
+    objectRef: surface.objectRef,
+    ownerStateRef: surface.ownerStateRef,
+    resultTargetRef: surface.resultTargetRef,
+  });
+  return target !== null && isWorkspaceArtworkPath(target.path);
+}
+
+export function isWorkspaceFullWindowSurface(
+  surface: WorkSurfaceCoordinate | null | undefined,
+  presentation: 'classic' | 'v2' = 'classic',
+): boolean {
+  return (
+    isArtifactWorkSurface(surface) ||
+    (presentation === 'v2' && (surface?.type === 'browser' || isWorkspaceArtworkFile(surface)))
+  );
 }

@@ -1,5 +1,6 @@
 import type {
   ArtifactReviewActor,
+  ArtifactReviewAnchor,
   WorkspaceContentAnnotation,
   WorkspaceContentReview,
   WorkspaceContentReviewAction,
@@ -7,6 +8,7 @@ import type {
   WorkspaceContentVisualMark,
 } from '@cat-cafe/shared';
 import type { ReactNode } from 'react';
+import type { MediaChatTarget } from '@/components/content-review/media-chat-selection';
 import type { WorkspaceAnnotationTarget } from './workspace-review-draft';
 import type { LegacyTextNotes } from './workspace-review-legacy-text';
 
@@ -19,11 +21,14 @@ export type ContentReviewAnnotation = Omit<WorkspaceContentAnnotation, 'author' 
 };
 export type ContentReviewVisualMark = Omit<WorkspaceContentVisualMark, 'author'> & { author: ArtifactReviewActor };
 export type ContentReviewView = Omit<WorkspaceContentReviewView, 'review'> & {
-  review: Pick<WorkspaceContentReview, 'reviewId' | 'ownerUserId' | 'contentRef' | 'source' | 'revision'> & {
+  review: Pick<WorkspaceContentReview, 'reviewId' | 'contentRef' | 'source' | 'revision'> & {
+    /** Only private Host projections carry this identity. Public collaboration never impersonates it. */
+    ownerUserId?: string;
     annotations: ContentReviewAnnotation[];
     visualMarks?: ContentReviewVisualMark[];
   };
 };
+export type PrivateContentReviewView = ContentReviewView & { review: { ownerUserId: string } };
 export interface ContentReviewController {
   view: ContentReviewView | null;
   error: string | null;
@@ -36,6 +41,7 @@ export interface ContentReviewController {
   setTarget(target: WorkspaceAnnotationTarget | null): void;
   setActiveAnnotationId(id: string | null): void;
   submitAnnotation(): Promise<void>;
+  addOpinion?(body: string, target: WorkspaceAnnotationTarget): Promise<boolean>;
   /** With `expectedSourceRevision`, only moves onto that exact revision; otherwise onto the current one. */
   refreshSource(options?: { readonly expectedSourceRevision?: string }): Promise<void>;
   act(action: WorkspaceContentReviewAction): Promise<boolean>;
@@ -48,16 +54,33 @@ export interface ContentLandingCapabilities {
   annotate: ContentCapability;
   reply: ContentCapability;
   markup: ContentCapability;
-  requestModification: ContentCapability & { medium: 'image' | 'video' | 'text' };
+  requestModification: ContentCapability & { medium: 'image' | 'video' | 'text' | 'project' };
   versions: ContentCapability;
   decide: ContentCapability;
   historyReadOnly: boolean;
 }
 export interface ContentReviewWorkflow {
-  mediaSource?: { src: string | null; error: string | null };
+  assetDetail?: ReactNode;
+  onCloseAssetDetail?: () => void;
+  responseDiscussion?: ReactNode;
+  videoWork?: boolean;
+  /** Display name of the already selected original work/version; not an owner coordinate. */
+  chatTitle?: string;
+  playbackHidden?: boolean;
+  onPlaybackTime?: (seconds: number) => void;
+  chapterNavigation?: ReactNode;
+  seekRequest?: { id: number; seconds: number };
+  markRequest?: number;
+  selectionRequest?: { id: number; anchor: ArtifactReviewAnchor };
+  mediaSource?: { src: string | null; downloadSrc?: string | null; error: string | null };
   panel?: ReactNode;
   annotationMaxLength?: number;
   modification?: ReactNode;
+  /**
+   * The work and version 「引用到聊天」 names, when the surface knows it better than the file view does (a media round
+   * with a Task). Null: this surface cannot name one yet. Omitted: the workspace default.
+   */
+  chatMedia?: MediaChatTarget | null;
   status?: ReactNode;
   canvasDraftKey?: string;
   discussion?: (controls: {

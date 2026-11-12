@@ -12,15 +12,11 @@
  */
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import { buildActionSuccessorFence } from '../dist/domains/ball-custody/ActionSuccessorAdmissionContract.js';
+import { actionSuccessorInvocationKeyForTarget } from '../dist/domains/cats/services/agents/invocation/InvocationQueue.js';
+import { queueEntryId } from '../dist/domains/cats/services/agents/invocation/queue-ledger/QueueLedger.js';
 import { MAX_REFRESH_ATTEMPTS, resolveSafeWaitCarrier } from '../dist/routes/callback-action-carrier-resolution.js';
-import {
-  carrier,
-  lease,
-  oldInvocationKey,
-  record,
-  recordStore,
-  request,
-} from './helpers/direct-action-carrier-fixtures.js';
+import { lease, request } from './helpers/direct-action-carrier-fixtures.js';
 
 const HOLDER = 'codex-sol';
 
@@ -40,13 +36,97 @@ function scriptedLeaseStore(...answers) {
   };
 }
 
-function resolve({ observed, messages, leaseStore, records }) {
-  return resolveSafeWaitCarrier({
-    messageStore: { getByThreadAfter: async () => messages },
-    invocationRecordStore: recordStore(
-      records ?? new Map([[oldInvocationKey(observed, HOLDER), record(observed, HOLDER)]]),
+/** The resolver reads Queue pending work or exact source → response → child → parent evidence. */
+function carrier(current, catId, state) {
+  const id = `source-${current.generation}-${catId}`;
+  const scope = { userId: current.tenantScope, threadId: current.holderThreadId };
+  const source = {
+    id,
+    ...scope,
+    catId: current.predecessorCatId,
+    from: { kind: 'agent', catId: current.predecessorCatId },
+    content: 'Implement task',
+    mentions: [catId],
+    timestamp: 100,
+  };
+  const entry = {
+    id: queueEntryId(id),
+    ...scope,
+    owner: { kind: 'user', userId: scope.userId },
+    status: 'queued',
+    targets: [catId],
+    payload: { messageId: id, sourceRecordId: id },
+    execution: { actionSuccessorFence: buildActionSuccessorFence(current, current.dispatchId) },
+  };
+  if (state === 'queued') return { source, entry };
+  const childId = `child-${current.generation}-${catId}`;
+  const parentId = `parent-${current.generation}-${catId}`;
+  const response = {
+    id: `response-${current.generation}-${catId}`,
+    ...scope,
+    catId,
+    from: { kind: 'agent', catId },
+    lifecycle: {
+      kind: 'response',
+      invocationId: childId,
+      targetId: catId,
+      inputMessageIds: [id],
+      inputEntryIds: [entry.id],
+      status: state === 'interrupted' ? 'interrupted' : 'completed',
+    },
+  };
+  source.lifecycle = {
+    kind: 'input',
+    orderKey: `100:${id}`,
+    dispatchRefs: [{ targetId: catId, phase: 'settled', statusMessageId: response.id, dispatchedAt: 110 }],
+  };
+  const child = {
+    invocationId: childId,
+    parentInvocationId: parentId,
+    ...scope,
+    catId,
+    status: state === 'interrupted' ? 'interrupted' : 'succeeded',
+    causal: { triggerMessageId: id },
+  };
+  const parent = {
+    id: parentId,
+    ...scope,
+    targetCats: [catId],
+    successfulCatIds: [catId],
+    status: state === 'interrupted' ? 'failed' : 'succeeded',
+    idempotencyKey: actionSuccessorInvocationKeyForTarget(id, catId),
+    actionLeaseCarrier: { kind: 'action_successor', leaseId: current.leaseId, generation: current.generation },
+  };
+  return { source, response, child, parent };
+}
+
+function resolve({ observed, messages, leaseStore, orphanRecovery }) {
+  const byId = new Map(
+    messages.flatMap((value) =>
+      value.response
+        ? [
+            [value.source.id, value.source],
+            [value.response.id, value.response],
+          ]
+        : [[value.source.id, value.source]],
     ),
+  );
+  const parents = new Map(messages.filter((value) => value.parent).map((value) => [value.parent.id, value.parent]));
+  const children = new Map(
+    messages.filter((value) => value.child).map((value) => [value.child.invocationId, value.child]),
+  );
+  return resolveSafeWaitCarrier({
+    invocationQueue: {
+      listAllDurable: async () => messages.filter((value) => value.entry).map((value) => value.entry),
+    },
+    messageStore: {
+      getByThreadAfter: async () => messages.map((value) => value.source),
+      getById: async (id) => byId.get(id) ?? null,
+    },
+    invocationRecordStore: { get: async (id) => parents.get(id) ?? null },
+    turnExecutionStore: { get: async (id) => children.get(id) ?? null },
     leaseStore,
+    ...(orphanRecovery ? { orphanRecovery, ownerAuthProvenance: 'strict', parentInvocationId: 'owner-parent' } : {}),
     lease: observed,
     admissionInput: request(observed),
     clientMessageId: 'client-message-1',
@@ -111,16 +191,10 @@ describe('F167 safe_wait is only answered from the lease that is in the store no
     const observed = lease();
     const winner = lease({ generation: 2, revision: observed.revision + 1, dispatchId: 'post:winner-dispatch' });
     const leaseStore = scriptedLeaseStore({ outcome: 'stale_generation', lease: winner });
-    const records = new Map([
-      [oldInvocationKey(observed, HOLDER), record(observed, HOLDER)],
-      [oldInvocationKey(winner, HOLDER), record(winner, HOLDER)],
-    ]);
-
     const resolution = await resolve({
       observed,
       messages: [carrier(observed, HOLDER, 'handled'), carrier(winner, HOLDER, 'handled')],
       leaseStore,
-      records,
     });
 
     assert.equal(resolution.kind, 'respond');
@@ -176,7 +250,6 @@ describe('F167 safe_wait is only answered from the lease that is in the store no
 
     const resolution = await resolveSafeWaitCarrier({
       messageStore: { getByThreadAfter: async () => [carrier(observed, HOLDER, 'handled')] },
-      invocationRecordStore: recordStore(new Map()),
       leaseStore,
       lease: observed,
       admissionInput: request(observed, { actorCatId: 'someone-else' }),
@@ -187,3 +260,126 @@ describe('F167 safe_wait is only answered from the lease that is in the store no
     assert.equal(leaseStore.calls.length, 0);
   });
 });
+
+describe('F167 restart resumes the same carrier independently of reading evidence', () => {
+  for (const status of ['pending', 'read']) {
+    test(`an interrupted carrier with ${status} input keeps its original generation`, async () => {
+      const observed = lease();
+      const leaseStore = scriptedLeaseStore();
+      const interrupted = carrier(observed, HOLDER, 'interrupted');
+      interrupted.source.lifecycle.dispatchRefs[0].inputRead = {
+        status,
+        ...(status === 'read' ? { at: 115 } : {}),
+      };
+      const resolution = await resolve({ observed, messages: [interrupted], leaseStore });
+      assert.equal(resolution.kind, 'continue');
+      assert.equal(resolution.admissionOutcome, 'replayed');
+      assert.equal(resolution.fence.generation, observed.generation);
+      assert.equal(leaseStore.calls.length, 0, 'no new generation or replacement proof');
+      assert.equal(interrupted.source.lifecycle.dispatchRefs[0].inputRead.status, status);
+    });
+  }
+});
+
+test('a proven Task orphan returns one typed recovery receipt instead of carrier_missing', async () => {
+  const observed = lease();
+  const recovered = lease({
+    generation: 2,
+    revision: observed.revision + 1,
+    dispatchId: 'post:refresh-dispatch',
+    orphanCarrierRecoveryTransitions: [
+      {
+        kind: 'orphan_carrier_recovery',
+        fromGeneration: 1,
+        toGeneration: 2,
+        taskId: 'task-4058',
+        taskRevision: 2,
+        sourceMessageId: 'message-orphan',
+        predecessorCatId: 'codex-astra',
+        predecessorThreadId: 'thread-holder',
+        holderCatId: HOLDER,
+        holderThreadId: 'thread-holder',
+        fromDispatchId: observed.dispatchId,
+        toDispatchId: 'post:refresh-dispatch',
+        evidenceRef: 'callback:new-invocation:refresh-dispatch',
+        at: 300,
+      },
+    ],
+  });
+  let calls = 0;
+  const resolution = await resolve({
+    observed,
+    messages: [],
+    leaseStore: scriptedLeaseStore(),
+    orphanRecovery: {
+      async recover(input) {
+        calls++;
+        assert.equal(input.lease, observed);
+        assert.equal(input.ownerAuthProvenance, 'strict');
+        return { outcome: 'recovered', lease: recovered, messageId: 'message-orphan' };
+      },
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(resolution.kind, 'respond');
+  assert.deepEqual(resolution.body.actionLease, {
+    leaseId: observed.leaseId,
+    generation: 2,
+    outcome: 'orphan_carrier_recovery',
+  });
+  assert.equal(resolution.body.status, 'orphan_carrier_recovered');
+  assert.deepEqual(resolution.body.routed, [HOLDER]);
+});
+
+for (const state of ['queued', 'handled']) {
+  test(`the same recovery request replays its ${state} orphan carrier without a second writer`, async () => {
+    const observed = lease({
+      generation: 2,
+      revision: 8,
+      dispatchId: 'post:refresh-dispatch',
+      orphanCarrierRecoveryTransitions: [
+        {
+          kind: 'orphan_carrier_recovery',
+          fromGeneration: 1,
+          toGeneration: 2,
+          taskId: 'task-4058',
+          taskRevision: 2,
+          sourceMessageId: 'message-orphan',
+          predecessorCatId: 'codex-astra',
+          predecessorThreadId: 'thread-holder',
+          holderCatId: HOLDER,
+          holderThreadId: 'thread-holder',
+          fromDispatchId: 'post:original-dispatch',
+          toDispatchId: 'post:refresh-dispatch',
+          evidenceRef: 'callback:new-invocation:refresh-dispatch',
+          at: 300,
+        },
+      ],
+    });
+    const leaseStore = scriptedLeaseStore();
+    let adoptionCalls = 0;
+    const resolution = await resolve({
+      observed,
+      messages: [carrier(observed, HOLDER, state)],
+      leaseStore,
+      ...(state === 'queued'
+        ? {
+            orphanRecovery: {
+              async recover(input) {
+                adoptionCalls++;
+                assert.equal(input.lease, observed);
+                return { outcome: 'replayed', lease: observed, messageId: 'message-orphan' };
+              },
+            },
+          }
+        : {}),
+    });
+
+    assert.equal(resolution.kind, 'respond');
+    assert.equal(resolution.body.status, 'orphan_carrier_recovered');
+    assert.equal(resolution.body.messageId, 'message-orphan');
+    assert.equal(adoptionCalls, state === 'queued' ? 1 : 0);
+    assert.equal(leaseStore.calls.length, 0, 'a replay never advances another generation');
+  });
+}
