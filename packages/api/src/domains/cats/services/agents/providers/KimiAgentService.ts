@@ -396,6 +396,12 @@ export class KimiAgentService implements AgentService {
           KIMI_MODEL_THINKING_EFFORT: effortLevel,
           // Native mode requires the kimi-code v2 engine for --agent-file.
           [KIMI_V2_ENGINE_ENV_KEY]: '1',
+          // kimi-code >= 2.5 gates project-level MCP servers (the
+          // .kimi-code/mcp.json lease) behind workspace trust; print mode
+          // cannot show the interactive "Trust this folder" prompt, so
+          // without this flag every managed invocation silently loses all
+          // cat-cafe MCP tools ("skipped 7 project-level MCP servers").
+          KIMI_CODE_TRUST_WORKSPACE: '1',
         },
         ...(options?.signal ? { signal: options.signal } : {}),
         ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
