@@ -252,42 +252,125 @@ describe('trae-event-transform', () => {
   });
 });
 
-describe('TraeAgentService buildArgs', () => {
-  it('builds args with stream-json output format', async () => {
+describe('TraeAgentService buildArgs (TRAE CLI 2.x exec)', () => {
+  it('builds exec subcommand with --json and stdin prompt slot', async () => {
     const { TraeAgentService } = await import('../dist/domains/cats/services/agents/providers/TraeAgentService.js');
     const svc = new TraeAgentService({ catId: 'test-cat', model: 'test-model' });
     // Access private method via bracket notation for testing
-    const args = svc['buildArgs']('hello', undefined, 'test-model');
-    assert.ok(args.includes('--output-format'));
-    assert.ok(args.includes('stream-json'));
-    assert.ok(args.includes('-p'));
-    assert.ok(args.includes('hello'));
+    const args = svc['buildArgs'](undefined, 'test-model');
+    assert.equal(args[0], 'exec');
+    assert.equal(args[1], '--json');
+    // 1.x argv prompt mode is retired: no -p flag, prompt travels via stdin.
+    assert.ok(!args.includes('-p'));
     assert.ok(args.includes('-y'));
+    // stdin prompt marker (`exec -` reads instructions from stdin)
+    assert.equal(args[args.length - 1], '-');
   });
 
-  it('uses -c model.name= for model selection', async () => {
+  it('selects the model with the -m flag', async () => {
     const { TraeAgentService } = await import('../dist/domains/cats/services/agents/providers/TraeAgentService.js');
     const svc = new TraeAgentService({ catId: 'test-cat', model: '智谱glm-5.2' });
-    const args = svc['buildArgs']('test', undefined, '智谱glm-5.2');
-    assert.ok(args.includes('-c'));
-    const modelIdx = args.indexOf('-c');
-    assert.equal(args[modelIdx + 1], 'model.name=智谱glm-5.2');
+    const args = svc['buildArgs'](undefined, '智谱glm-5.2');
+    const modelIdx = args.indexOf('-m');
+    assert.ok(modelIdx >= 0);
+    assert.equal(args[modelIdx + 1], '智谱glm-5.2');
+    // 1.x -c model.name workaround must be gone
+    assert.ok(!args.includes('-c'));
   });
 
-  it('includes --resume when sessionId provided', async () => {
+  it('never emits --resume (fresh session policy, same as 1.x era)', async () => {
     const { TraeAgentService } = await import('../dist/domains/cats/services/agents/providers/TraeAgentService.js');
     const svc = new TraeAgentService({ model: 'test-model' });
-    const args = svc['buildArgs']('test', 'sess-123', 'model');
-    assert.ok(args.includes('--resume'));
-    assert.ok(args.includes('sess-123'));
+    const args = svc['buildArgs']('sess-123', 'model');
+    assert.ok(!args.includes('--resume'));
+    assert.ok(!args.includes('sess-123'));
   });
 
-  it('strips = from model name to prevent key=value parsing breakage', async () => {
+  it('appends --add-dir entries for image access directories', async () => {
     const { TraeAgentService } = await import('../dist/domains/cats/services/agents/providers/TraeAgentService.js');
     const svc = new TraeAgentService({ model: 'test-model' });
-    const args = svc['buildArgs']('test', undefined, 'model=with=equals');
-    const modelIdx = args.indexOf('-c');
-    // All = should be stripped from model name
-    assert.equal(args[modelIdx + 1], 'model.name=modelwithequals');
+    const args = svc['buildArgs'](undefined, 'model', ['C:/tmp/imgs']);
+    const dirIdx = args.indexOf('--add-dir');
+    assert.ok(dirIdx >= 0);
+    assert.equal(args[dirIdx + 1], 'C:/tmp/imgs');
+  });
+});
+
+describe('trae-event-transform (TRAE CLI 2.x jsonl events)', () => {
+  it('thread.started → session_init with thread_id', () => {
+    const state = createTraeTransformState();
+    const result = transformTraeEvent(
+      { type: 'thread.started', thread_id: '01a1e3ee-ad05-72b0-9327-e892d61ebe56' },
+      CAT_ID,
+      METADATA,
+      state,
+    );
+    assert.equal(result.type, 'session_init');
+    assert.equal(result.sessionId, '01a1e3ee-ad05-72b0-9327-e892d61ebe56');
+    assert.equal(state.sessionId, '01a1e3ee-ad05-72b0-9327-e892d61ebe56');
+  });
+
+  it('item.completed agent_message → text', () => {
+    const state = createTraeTransformState();
+    const result = transformTraeEvent(
+      { type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: 'ok' } },
+      CAT_ID,
+      METADATA,
+      state,
+    );
+    assert.equal(result.type, 'text');
+    assert.equal(result.content, 'ok');
+  });
+
+  it('item.completed error → system_info (non-fatal diagnostics)', () => {
+    const state = createTraeTransformState();
+    const result = transformTraeEvent(
+      {
+        type: 'item.completed',
+        item: { id: 'item_0', type: 'error', message: 'Ignoring malformed agent role definition: …' },
+      },
+      CAT_ID,
+      METADATA,
+      state,
+    );
+    // A diagnostic error item must NOT fail the whole invocation.
+    assert.equal(result.type, 'system_info');
+    assert.ok(String(result.content).includes('Ignoring malformed'));
+  });
+
+  it('turn.started → null (silently consumed)', () => {
+    const state = createTraeTransformState();
+    const result = transformTraeEvent({ type: 'turn.started' }, CAT_ID, METADATA, state);
+    assert.equal(result, null);
+  });
+
+  it('turn.completed → done with usage', () => {
+    const state = createTraeTransformState();
+      const result = transformTraeEvent(
+      {
+        type: 'turn.completed',
+        usage: { input_tokens: 15281, cached_input_tokens: 4096, output_tokens: 2, reasoning_output_tokens: 0 },
+      },
+      CAT_ID,
+      METADATA,
+      state,
+    );
+    assert.equal(result.type, 'done');
+    const usage = result.metadata.usage;
+    assert.equal(usage.inputTokens, 15281);
+    assert.equal(result.metadata.usage.outputTokens, 2);
+    assert.equal(result.metadata.usage.cacheReadTokens, 4096);
+    assert.ok(state.emittedDone);
+  });
+
+  it('unmapped item types are silently consumed', () => {
+    const state = createTraeTransformState();
+    const result = transformTraeEvent(
+      { type: 'item.completed', item: { id: 'item_2', type: 'reasoning', text: '…' } },
+      CAT_ID,
+      METADATA,
+      state,
+    );
+    assert.equal(result, null);
   });
 });

@@ -51,6 +51,96 @@ export function transformTraeEvent(
   const type = e.type as string | undefined;
   const ts = Date.now();
 
+  // ── TRAE CLI 2.x (traecli exec --json): codex-style thread/item/turn events ──
+  // Observed on traecli 0.215.0 (2026-11-16):
+  //   {"type":"thread.started","thread_id":"..."}
+  //   {"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ok"}}
+  //   {"type":"item.completed","item":{"id":"item_0","type":"error","message":"..."}}
+  //   {"type":"turn.started"} / {"type":"turn.completed","usage":{...}}
+  // Unmapped item types (tool calls, reasoning) are silently consumed for now.
+  if (type === 'thread.started') {
+    const sessionId = e.thread_id as string | undefined;
+    if (sessionId) {
+      state.sessionId = sessionId;
+      metadata.sessionId = sessionId;
+    }
+    return {
+      type: 'session_init',
+      catId,
+      sessionId: sessionId ?? undefined,
+      ephemeralSession: false,
+      metadata,
+      timestamp: ts,
+    };
+  }
+  if (type === 'item.completed') {
+    const item = e.item as Record<string, unknown> | undefined;
+    if (typeof item !== 'object' || item === null) return null;
+    const itemType = item.type as string | undefined;
+    if (itemType === 'agent_message') {
+      const text = item.text as string | undefined;
+      if (typeof text === 'string' && text.trim()) {
+        return {
+          type: 'text',
+          catId,
+          content: text,
+          metadata,
+          timestamp: ts,
+        };
+      }
+      return null;
+    }
+    if (itemType === 'error') {
+      // Non-fatal diagnostics (e.g. malformed agent role definitions are
+      // reported as error items while the turn still completes) — surface as
+      // system_info so a warning item never fails the whole invocation.
+      const message = item.message as string | undefined;
+      if (typeof message === 'string' && message.trim()) {
+        return {
+          type: 'system_info',
+          catId,
+          content: message,
+          metadata,
+          timestamp: ts,
+        };
+      }
+      return null;
+    }
+    return null;
+  }
+  if (type === 'turn.started') return null;
+  if (type === 'turn.completed') {
+    state.emittedDone = true;
+    const rawUsage = e.usage as Record<string, unknown> | undefined;
+    const usage: TokenUsage = { ...(state.usage ?? {}) };
+    if (rawUsage) {
+      if (typeof rawUsage.input_tokens === 'number') usage.inputTokens = rawUsage.input_tokens;
+      if (typeof rawUsage.output_tokens === 'number') usage.outputTokens = rawUsage.output_tokens;
+      if (typeof rawUsage.cached_input_tokens === 'number') usage.cacheReadTokens = rawUsage.cached_input_tokens;
+    }
+    state.usage = usage;
+    return {
+      type: 'done',
+      catId,
+      metadata: { ...metadata, usage: Object.keys(usage).length > 0 ? usage : undefined },
+      timestamp: ts,
+    };
+  }
+  if (type === 'turn.failed' || type === 'error') {
+    state.emittedDone = true;
+    const errorMsg =
+      (e.error as string | undefined) ??
+      (e.message as string | undefined) ??
+      'Unknown Trae CLI 2.x error';
+    return {
+      type: 'error',
+      catId,
+      error: errorMsg,
+      metadata: { ...metadata, usage: state.usage ?? undefined },
+      timestamp: ts,
+    };
+  }
+
   // system/init → session_init
   if (type === 'system') {
     const subtype = e.subtype as string | undefined;

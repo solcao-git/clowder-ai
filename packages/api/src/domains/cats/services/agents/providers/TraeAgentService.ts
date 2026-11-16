@@ -48,31 +48,15 @@ import {
 
 const log = createModuleLogger('trae-agent');
 
-/** Well-known trae-cli binary locations on Windows. */
+/** Well-known trae-cli binary locations on Windows.
+ * TRAE CLI 2.x (traecli, e.g. 0.215.0) installs to Programs\TraeCLI\bin with
+ * traex.exe as the real binary; the 1.x installer's trae-cli.exe path is kept
+ * for machines that still run the 1.x line.
+ */
 const TRAE_WIN_PATHS = [
+  'C:\\Users\\Administrator\\AppData\\Local\\Programs\\TraeCLI\\bin\\traex.exe',
   'C:\\Users\\Administrator\\AppData\\Local\\trae-cli\\bin\\trae-cli.exe',
 ];
-
-/**
- * Windows CreateProcess command-line limit is 32,767 UTF-16 code units.
- * We use ~28K chars as the safe threshold (leaving room for the command itself,
- * flags like --output-format, -c model.name=..., -y, etc.).
- *
- * Plan C: trae-cli doesn't support stdin prompt (`-p -` treats `-` as a
- * literal string, not stdin; bare `-p` with no positional exits 1 silently).
- * It also has no prompt-file option. Re-verified on v0.120.52 (build
- * 2026-08-12) on 2026-08-20: behavior unchanged — model reasoning literally
- * said "The user only provided a single dash '-'" while stdin content was
- * ignored, and --help still shows no stdin/prompt-file flag. So when the
- * effective prompt exceeds this threshold, we truncate the L0/system prompt
- * portion while preserving the user message intact. The L0 is advisory context
- * (the model still has its base training), but the user message is the actual
- * task that must not be lost.
- *
- * Future: if trae-cli adds `-p @file` or proper stdin support, switch to
- * stdinInput like ClaudeAgentService / QoderAgentService / CodeBuddyAgentService do.
- */
-const PROMPT_ARGV_SAFE_LENGTH = 28_000;
 
 interface TraeAgentServiceOptions {
   catId?: CatId;
@@ -138,30 +122,6 @@ export class TraeAgentService implements L0InjectableAgentService {
     let errorAlreadyYielded = false;
     const uniqueEventTypes = new Set<string>();
 
-    // Plan C: Truncate L0 when effectivePrompt exceeds Windows argv limit.
-    // trae-cli doesn't support stdin prompt or prompt-file, so we must keep
-    // the prompt under ~28K chars. Preserve user message intact; trim L0.
-    if (effectivePrompt.length > PROMPT_ARGV_SAFE_LENGTH) {
-      const userMsgLen = prompt.length;
-      const maxL0Len = PROMPT_ARGV_SAFE_LENGTH - userMsgLen - 4; // 4 for "\n\n" separator
-      if (maxL0Len > 500 && options?.systemPrompt) {
-        // Trim L0 to fit, keeping the most important beginning
-        const trimmedL0 = options.systemPrompt.slice(0, maxL0Len);
-        effectivePrompt = `${trimmedL0}\n\n[L0 truncated: ${options.systemPrompt.length - maxL0Len} chars omitted]\n\n${prompt}`;
-        log.warn(
-          { catId: this.catId, originalLen: options.systemPrompt.length + userMsgLen, truncatedLen: effectivePrompt.length },
-          'Trae prompt exceeds argv limit, truncated L0 to preserve user message',
-        );
-      } else {
-        // Even user message alone exceeds limit — truncate it too (last resort)
-        effectivePrompt = effectivePrompt.slice(0, PROMPT_ARGV_SAFE_LENGTH - 100) + '\n\n[... prompt truncated at argv limit]';
-        log.warn(
-          { catId: this.catId, originalLen: effectivePrompt.length },
-          'Trae prompt severely exceeds argv limit, truncated entire prompt',
-        );
-      }
-    }
-
     try {
       const traeCommand = resolveTraeCommand();
       if (!traeCommand) {
@@ -179,7 +139,7 @@ export class TraeAgentService implements L0InjectableAgentService {
       // Build args (L0 is now injected via prompt prepend by invoke-single-cat,
       // since injectsL0Natively() returns false. This is more reliable than
       // passing long L0 content through -c developer_instructions=...)
-      const args = this.buildArgs(effectivePrompt, options?.sessionId, effectiveModel, imageAccessDirs, options?.cliConfigArgs);
+      const args = this.buildArgs(options?.sessionId, effectiveModel, imageAccessDirs, options?.cliConfigArgs);
 
       // Authentication: TRAE CLI natively reads TRAECLI_PERSONAL_ACCESS_TOKEN
       // from environment (official method for headless/CICD scenarios).
@@ -206,33 +166,31 @@ export class TraeAgentService implements L0InjectableAgentService {
       );
 
       // F299: provider request recorder fence — must fire before spawnCli.
-      // buildArgs ends with args.push('-p', prompt); rewrite the prompt slot
-      // after the fence so the recorder sees (and may rewrite) the exact body.
-      const promptIndex = args.lastIndexOf('-p');
-      const submittedPrompt = promptIndex >= 0 ? args[promptIndex + 1] : undefined;
-      if (typeof submittedPrompt !== 'string') throw new Error('trae_request_prompt_unavailable');
+      // The prompt travels via stdin (exec reads instructions from stdin),
+      // so the recorder body IS the effective prompt; no argv slot to rewrite.
       const preparedRequest: PreparedProviderRequestV1 = Object.freeze({
         v: 1,
-        message: Object.freeze({ body: submittedPrompt }),
+        message: Object.freeze({ body: effectivePrompt }),
         nativeInstructions: Object.freeze([]),
         runtime: Object.freeze({
           provider: 'trae',
-          carrier: 'argv_print',
+          carrier: 'exec_stdin',
           ...(effectiveModel ? { model: effectiveModel } : {}),
-          protocol: 'stream-json',
+          protocol: 'jsonl',
         }),
         tools: Object.freeze({ finalSurface: 'unknown' as const }),
         providerNativeVisibility: 'unknown',
       });
       await options?.beforeProviderLaunch?.(preparedRequest);
       if (!('body' in preparedRequest.message)) throw new Error('trae_prepared_message_not_exact');
-      args[promptIndex + 1] = preparedRequest.message.body;
+      const promptBody: string = preparedRequest.message.body;
 
       const cliOpts = {
         command: traeCommand,
         args,
-        // Trae CLI's `-p -` (stdin) mode doesn't reliably consume stdin content.
-        // Use argv mode instead (same as QoderAgentService). Prompt goes via -p flag.
+        // Prompt via stdin: `exec -` reads instructions from stdin (2.x).
+        // This retires the 1.x argv-only mode and its 28K truncation.
+        stdinInput: promptBody,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         env: childEnv,
         ...(options?.signal ? { signal: options.signal } : {}),
@@ -386,38 +344,30 @@ export class TraeAgentService implements L0InjectableAgentService {
   }
 
   private buildArgs(
-    prompt: string,
-    sessionId?: string,
-    model?: string,
-    imageAccessDirs?: readonly string[],
-    cliConfigArgs?: readonly string[],
+    sessionId: string | undefined,
+    model: string | undefined,
+    imageAccessDirs: readonly string[] | undefined,
+    cliConfigArgs: readonly string[] | undefined,
   ): string[] {
     const args: string[] = [];
 
-    // Output format
-    args.push('--output-format', 'stream-json');
+    // TRAE CLI 2.x (traecli exec): non-interactive mode is the `exec`
+    // subcommand and `--json` emits codex-style thread/item/turn JSONL
+    // events (mapped in trae-event-transform). The 1.x invocation shape
+    // (--output-format stream-json + -p <prompt>) is gone — 2.x parses
+    // `-p` as --profile.
+    args.push('exec', '--json');
 
-    // Session resume: DISABLED for Trae CLI v0.120.40.
-    // Bug: `--resume <sessionId> -p "prompt"` causes the model to receive the
-    // session ID as the user message instead of the `-p` prompt content.
-    // The `-p` prompt is silently discarded when `--resume` is active.
-    // This was confirmed by manual testing (2026-06-28):
-    //   trae-cli --resume 7cd54245... -p "请说你好" --output-format stream-json -y
-    // → model sees user message "7cd54245..." instead of "请说你好".
-    // Workaround: start a fresh session every time; L0 + thread context
-    // provide sufficient continuity without CLI-level session resume.
-    // TODO: Re-enable if trae-cli fixes the --resume + -p interaction.
-    // if (sessionId) {
-    //   args.push('--resume', sessionId);
-    // }
+    // Session resume: DISABLED (same policy as the 1.x era). 2.x offers
+    // `exec resume`, but our continuity model is a fresh session plus
+    // L0/thread-context injection; revisit if sessionChain needs change.
+    void sessionId;
 
-    // Model selection — trae-cli v0.120.40's --model flag is broken (exit 1, no output, no stderr).
-    // Use -c model.name=<model> config override instead, which works correctly.
-    // Guard against '=' in model name (would break key=value parsing).
+    // Model selection: 2.x has a proper -m/--model flag (the 1.x --model was
+    // broken and required the -c model.name workaround).
     const effectiveModel = model ?? this.model;
     if (effectiveModel) {
-      const safeModel = effectiveModel.replace(/=/g, '');
-      args.push('-c', `model.name=${safeModel}`);
+      args.push('-m', effectiveModel);
     }
 
     // YOLO mode (bypass tool permission checks — our route layer handles safety)
@@ -437,11 +387,9 @@ export class TraeAgentService implements L0InjectableAgentService {
     }
     args.push(...userParts);
 
-    // Print mode + prompt.
-    // Per TRAE CLI docs: `-p / --print` prints response and exits (pipe mode).
-    // Prompt follows -p as a positional argument: `traecli -p "prompt text"`
-    // Example from docs: `traecli --allowed-tool Bash,Edit -p "update the README"`
-    args.push('-p', prompt);
+    // Prompt travels via stdin: `exec -` reads instructions from stdin, which
+    // retires the 1.x argv-only limitation and its 28K truncation entirely.
+    args.push('-');
 
     return args;
   }
