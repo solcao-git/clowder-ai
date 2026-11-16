@@ -61,6 +61,59 @@ return 1
 `;
 
 /**
+ * F117 local patch (2026-11-16, nahida): append-only coverage binding.
+ * Same contract as BIND_TURN_EXECUTION_COVERAGE_LUA plus one extra outcome:
+ * a strictly larger covered set that still contains every previously covered
+ * id re-binds atomically and returns 3 ('extended').
+ *
+ * Why: the v0.14.1 upstream guard assumed one prompt build per invocation.
+ * Our dispatch retry rebuilds the prompt after a CLI failure, and newly
+ * arrived thread messages (e.g. the error reply itself) legitimately widen
+ * the covered set — that growth was classified as 'conflict' and aborted
+ * the retry with turn_execution_prompt_coverage_conflict (observed on venti,
+ * 2026-11-16). Shrinking or replacing unrelated ids still returns 0
+ * (conflict): the fail-closed spirit is preserved.
+ *
+ * Outcomes: 1 = bound, 2 = replayed (same set), 3 = extended (append-only
+ * growth), 0 = conflict, -1 = not_found / malformed state.
+ */
+export const EXTEND_TURN_EXECUTION_COVERAGE_LUA = `
+local immutableIdentity = redis.call('HGET', KEYS[1], 'immutableIdentity')
+if not immutableIdentity then return -1 end
+local currentCoverage = redis.call('HGET', KEYS[1], 'coveredMessageIds')
+local currentCoverageIdentity = redis.call('HGET', KEYS[1], 'coveredMessageIdsIdentity')
+if not currentCoverage then
+  if currentCoverageIdentity then return -1 end
+  redis.call('HSET', KEYS[1],
+    'coveredMessageIds', ARGV[1],
+    'coveredMessageIdsIdentity', ARGV[2])
+  return 1
+end
+if currentCoverageIdentity == ARGV[2] and currentCoverage == ARGV[1] then return 2 end
+
+local ok, oldArr, newArr = pcall(cjson.decode, currentCoverage)
+if ok then ok, newArr = pcall(cjson.decode, ARGV[1]) end
+if not ok or type(oldArr) ~= 'table' or type(newArr) ~= 'table' then return 0 end
+local newSet = {}
+local newCount = 0
+for _, id in ipairs(newArr) do
+  newSet[id] = true
+  newCount = newCount + 1
+end
+-- append-only: every previously covered id must survive; dropping any is a conflict
+for _, id in ipairs(oldArr) do
+  if not newSet[id] then return 0 end
+end
+if newCount < #oldArr then return 0 end
+if newCount == #oldArr then return 2 end
+
+redis.call('HSET', KEYS[1],
+  'coveredMessageIds', ARGV[1],
+  'coveredMessageIdsIdentity', ARGV[2])
+return 3
+`;
+
+/**
  * F117 KD-21: a gated fence's verdict only moves forward (gated → allowed → rejected). An open
  * child, and a record written before the fence existed (no outputFence field), stay as they are.
  */

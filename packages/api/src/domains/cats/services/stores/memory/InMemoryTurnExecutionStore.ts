@@ -62,10 +62,23 @@ export class InMemoryTurnExecutionStore implements ITurnExecutionStore {
     const existing = record.causal?.coveredMessageIds;
     if (existing) {
       const requested = [...messageIds].sort();
+      const sortedExisting = [...existing].sort();
       const same =
-        existing.length === requested.length &&
-        [...existing].sort().every((messageId, index) => messageId === requested[index]);
-      return { outcome: same ? 'replayed' : 'conflict', record: cloneTurnExecutionRecord(record) };
+        existing.length === requested.length && sortedExisting.every((messageId, index) => messageId === requested[index]);
+      if (same) return { outcome: 'replayed', record: cloneTurnExecutionRecord(record) };
+      // Append-only growth: a dispatch retry rebuilds the prompt after the
+      // CLI failed, and newly arrived thread messages (e.g. the error reply
+      // itself) legitimately widen the covered set. Extending the binding is
+      // the truthful record; shrinking or replacing unrelated ids stays a
+      // conflict (fail-closed preserved).
+      const newSet = new Set(requested);
+      const isGrowth =
+        requested.length > sortedExisting.length && sortedExisting.every((id) => newSet.has(id));
+      if (isGrowth) {
+        record.causal = { ...(record.causal ?? {}), coveredMessageIds: [...messageIds] };
+        return { outcome: 'extended', record: cloneTurnExecutionRecord(record) };
+      }
+      return { outcome: 'conflict', record: cloneTurnExecutionRecord(record) };
     }
     record.causal = { ...(record.causal ?? {}), coveredMessageIds: [...messageIds] };
     return { outcome: 'bound', record: cloneTurnExecutionRecord(record) };

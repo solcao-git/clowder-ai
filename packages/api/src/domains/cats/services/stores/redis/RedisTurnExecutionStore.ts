@@ -24,7 +24,7 @@ import { readAuthoritativeHash } from './redis-pipeline-reply.js';
 import { hydrateTurnExecution, type RedisTurnExecutionHash, sortTurnExecutions } from './turn-execution-redis-codec.js';
 import {
   ADVANCE_TURN_PROVIDER_LUA,
-  BIND_TURN_EXECUTION_COVERAGE_LUA,
+  EXTEND_TURN_EXECUTION_COVERAGE_LUA,
   CREATE_TURN_EXECUTION_LUA,
   SETTLE_TURN_OUTPUT_FENCE_LUA,
   TERMINALIZE_TURN_EXECUTION_LUA,
@@ -73,21 +73,21 @@ export class RedisTurnExecutionStore implements ITurnExecutionStore {
     assertCoveredMessageIds(messageIds);
     const before = await this.get(invocationId);
     if (!before) return { outcome: 'not_found', record: null };
-    const existing = before.causal?.coveredMessageIds;
-    if (existing) {
-      const expected = [...messageIds].sort();
-      const same =
-        existing.length === expected.length && [...existing].sort().every((id, index) => id === expected[index]);
-      return { outcome: same ? 'replayed' : 'conflict', record: before };
-    }
     const requested = [...messageIds];
     const next = {
       ...before,
       causal: { ...(before.causal ?? {}), coveredMessageIds: requested },
     };
+    // F117 local patch: EXTEND keeps the upstream BIND contract (bound /
+    // replayed / conflict) and additionally allows append-only growth
+    // ('extended') — dispatch retries rebuild prompts with newly arrived
+    // thread messages, which the strict guard misjudged as a conflict
+    // (turn_execution_prompt_coverage_conflict, venti 2026-11-16).
+    // Routing every re-bind through the atomic script also removes the
+    // read-then-write window the old two-layer check had.
     const result = Number(
       await this.redis.eval(
-        BIND_TURN_EXECUTION_COVERAGE_LUA,
+        EXTEND_TURN_EXECUTION_COVERAGE_LUA,
         1,
         TurnExecutionKeys.record(invocationId),
         JSON.stringify(requested),
@@ -98,10 +98,8 @@ export class RedisTurnExecutionStore implements ITurnExecutionStore {
     if (result === -1 || !record) return { outcome: 'not_found', record: null };
     if (result === 1) return { outcome: 'bound', record };
     if (result === 2) return { outcome: 'replayed', record };
-    const current = record.causal?.coveredMessageIds;
-    const same =
-      current?.length === requested.length && [...current].sort().every((id, index) => id === requested[index]);
-    return { outcome: same ? 'replayed' : 'conflict', record };
+    if (result === 3) return { outcome: 'extended', record };
+    return { outcome: 'conflict', record };
   }
 
   async get(invocationId: string): Promise<TurnExecutionRecord | null> {

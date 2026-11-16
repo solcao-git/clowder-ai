@@ -111,7 +111,11 @@ export interface ITurnExecutionStore {
 }
 
 export type BindCoveredMessageIdsResult =
-  | { outcome: 'bound' | 'replayed' | 'conflict'; record: TurnExecutionRecord }
+  | {
+      /** 'bound' = first binding; 'replayed' = identical set re-bound; 'extended' = append-only growth of the covered set (e.g. dispatch retry rebuilds the prompt with newly arrived thread messages). */
+      outcome: 'bound' | 'replayed' | 'extended' | 'conflict';
+      record: TurnExecutionRecord;
+    }
   | { outcome: 'not_found'; record: null };
 
 export function assertCoveredMessageIds(messageIds: readonly string[]): void {

@@ -116,6 +116,30 @@ describe('InMemoryTurnExecutionStore', () => {
     assert.equal((await store.createRunning(input)).outcome, 'replayed');
   });
 
+  test('append-only coverage growth re-binds as extended (dispatch retry)', async () => {
+    const store = new InMemoryTurnExecutionStore();
+    await store.createRunning(runningInput());
+
+    assert.equal((await store.bindCoveredMessageIds('child-1', ['msg-1', 'msg-context'])).outcome, 'bound');
+    // Retry rebuilds the prompt with the newly arrived error reply in the
+    // thread context — the covered set legitimately widens.
+    assert.equal(
+      (await store.bindCoveredMessageIds('child-1', ['msg-1', 'msg-context', 'msg-error-reply'])).outcome,
+      'extended',
+    );
+    // Identical (reordered) full set after extension is still a replay.
+    assert.equal(
+      (await store.bindCoveredMessageIds('child-1', ['msg-error-reply', 'msg-context', 'msg-1'])).outcome,
+      'replayed',
+    );
+    // Shrinking back is NOT allowed — fail-closed preserved.
+    assert.equal((await store.bindCoveredMessageIds('child-1', ['msg-1', 'msg-context'])).outcome, 'conflict');
+    assert.deepEqual((await store.get('child-1')).causal, {
+      triggerMessageId: 'msg-1',
+      coveredMessageIds: ['msg-1', 'msg-context', 'msg-error-reply'],
+    });
+  });
+
   test('success-vs-cancel race produces one immutable terminal winner', async () => {
     const store = new InMemoryTurnExecutionStore();
     await store.createRunning(runningInput());
