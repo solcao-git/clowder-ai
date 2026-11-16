@@ -252,6 +252,13 @@ test('api-key mode injects kimi env overrides instead of embedding secrets in ar
   assert.equal(env.KIMI_API_KEY, 'sk-kimi-secret');
   assert.equal(env.KIMI_BASE_URL, 'https://api.moonshot.ai/v1');
   assert.equal(env.KIMI_MODEL_NAME, 'kimi-code/kimi-for-coding');
+  // kimi-code ≥0.37 env model synthesis: KIMI_MODEL_NAME triggers the
+  // __kimi_env__ provider and requires KIMI_MODEL_API_KEY (2026-11-16
+  // columbina roll-call: without it the CLI exits "provider __kimi_env__
+  // has no credential configured" then fast-fails 0xC0000409).
+  assert.equal(env.KIMI_MODEL_API_KEY, 'sk-kimi-secret');
+  assert.equal(env.KIMI_MODEL_PROVIDER_TYPE, 'openai');
+  assert.equal(env.KIMI_MODEL_BASE_URL, 'https://api.moonshot.ai/v1');
 });
 
 test('api-key mode maps selected model into official kimi env overrides', async () => {

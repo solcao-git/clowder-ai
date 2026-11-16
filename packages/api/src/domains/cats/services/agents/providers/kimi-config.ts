@@ -256,9 +256,20 @@ export function buildApiKeyEnv(model: string, callbackEnv?: Record<string, strin
   const baseUrl = normalizeKimiApiBaseUrl(callbackEnv?.CAT_CAFE_KIMI_BASE_URL || DEFAULT_KIMI_BASE_URL);
   const configuredModelName = model.trim();
   return {
+    // kimi-code ≤0.31 reads these; keep for version tolerance.
     KIMI_API_KEY: apiKey,
     KIMI_BASE_URL: baseUrl,
     KIMI_MODEL_NAME: configuredModelName,
+    // kimi-code ≥0.37 env model synthesis (applyEnvModelConfig): setting
+    // KIMI_MODEL_NAME triggers the __kimi_env__ provider and REQUIRES
+    // KIMI_MODEL_API_KEY. Without it the CLI exits "provider __kimi_env__
+    // has no credential configured" and then fast-fails on a libuv win32
+    // cleanup assert (0xC0000409, observed 2026-11-16 columbina roll-call).
+    // Gateway endpoints are OpenAI-compat, so the generic openai client
+    // (KIMI_MODEL_PROVIDER_TYPE=openai) is the safe synthesis.
+    KIMI_MODEL_API_KEY: apiKey,
+    KIMI_MODEL_PROVIDER_TYPE: 'openai',
+    KIMI_MODEL_BASE_URL: baseUrl,
     KIMI_MODEL_MAX_CONTEXT_SIZE: callbackEnv?.KIMI_MODEL_MAX_CONTEXT_SIZE || '262144',
     ...(callbackEnv?.KIMI_MODEL_CAPABILITIES ? { KIMI_MODEL_CAPABILITIES: callbackEnv.KIMI_MODEL_CAPABILITIES } : {}),
   };
