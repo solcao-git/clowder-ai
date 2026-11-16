@@ -78,6 +78,8 @@ cat-config.json
 # Claude Code skills — cat-cafe symlinks are tracked; plugin-generated ones are not
 .claude/skills/pencil-renderer
 .claude/skills/pencil-to-code
+.claude/skills/collective-participation
+.claude/skills/github-operations
 
 # Claude local project memory / backup files
 .claude/projects/
