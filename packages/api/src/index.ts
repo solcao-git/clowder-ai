@@ -2223,6 +2223,39 @@ async function main(): Promise<void> {
                       service = new A2AAgentService({ catId, config: { url: a2aUrl } });
                       break;
                     }
+                    // ── Local fork client paths (qoder/trae/codebuddy/deepseek).
+                    // Restored after the v0.14.1 upstream merge (c0c5554b7) kept
+                    // the schema enums but dropped these factory cases — every
+                    // CLI-served member (mavuika/raiden/furina/tighnari/qiqi/clorinde)
+                    // fell into "Unknown client → not routable".
+                    case 'qoder': {
+                      const { QoderAgentService } = await import(
+                        './domains/cats/services/agents/providers/QoderAgentService.js'
+                      );
+                      service = new QoderAgentService({ catId });
+                      break;
+                    }
+                    case 'trae': {
+                      const { TraeAgentService } = await import(
+                        './domains/cats/services/agents/providers/TraeAgentService.js'
+                      );
+                      service = new TraeAgentService({ catId });
+                      break;
+                    }
+                    case 'codebuddy': {
+                      const { CodeBuddyAgentService } = await import(
+                        './domains/cats/services/agents/providers/CodeBuddyAgentService.js'
+                      );
+                      service = new CodeBuddyAgentService({ catId });
+                      break;
+                    }
+                    case 'deepseek': {
+                      const { DeepSeekAgentService } = await import(
+                        './domains/cats/services/agents/providers/DeepSeekAgentService.js'
+                      );
+                      service = new DeepSeekAgentService({ catId });
+                      break;
+                    }
                     default:
                       app.log.warn(
                         `[api] Unknown client "${config.clientId}" for cat "${id}". It will not be routable.`,
