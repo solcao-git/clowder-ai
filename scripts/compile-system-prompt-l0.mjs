@@ -521,9 +521,9 @@ export async function compileL0(options) {
 
   // Dynamic per-cat substitutions
   return result
-    .replace('{{IDENTITY_BLOCK}}', buildIdentityBlock(config, runtimeModel))
+    .replace('{{IDENTITY_BLOCK}}', buildIdentityBlock(config, runtimeModel, dossierRoot))
     .replace('{{USER_CAPSULE}}', capsuleSection)
-    .replace('{{TEAMMATE_ROSTER}}', buildTeammateRoster(catId))
+    .replace('{{TEAMMATE_ROSTER}}', buildTeammateRoster(catId, dossierRoot))
     .replace('{{GOVERNANCE_L0}}', governanceL0.content)
     .replace('{{WORKFLOW_TRIGGERS}}', buildWorkflowTriggers(config.breedId, catId, config.displayName))
     .replace('{{CVO_REF}}', renderCvoRef())
