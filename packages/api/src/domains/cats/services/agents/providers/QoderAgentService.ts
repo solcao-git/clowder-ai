@@ -227,9 +227,22 @@ export class QoderAgentService implements AgentService {
       };
     }
 
-    // Model selection
-    if (effectiveModel && effectiveModel !== 'Auto') {
-      args.push('--model', effectiveModel);
+    // Model selection: qodercli 1.1.87+ owns the model registry (user /model
+    // persists it in ~/.qoder/settings.json). Passing a display/model name via
+    // --model maps the CLI onto its unstable "auto" slot — in dispatched
+    // invocations that slot fails with 'main model "auto" is unavailable'
+    // (observed 2026-11-17 across five roll-calls: catalog qwen4-max passed
+    // correctly, CLI still reported auto-unavailable, while the identical
+    // argv manual run succeeded). Drop --model entirely and let the CLI use
+    // its persisted model — the same contract TRAE CLI 2.0 settled on. The
+    // catalog defaultModel stays as documentation/label only, and the
+    // CAT_CAFE_QODER_MODEL_OVERRIDE escape hatch is kept for explicit opt-in
+    // (values starting with 'force:' re-enable --model).
+    const forcedModel = effectiveModel?.startsWith('force:')
+      ? effectiveModel.slice('force:'.length)
+      : null;
+    if (forcedModel && forcedModel !== 'Auto') {
+      args.push('--model', forcedModel);
     }
 
     // Working directory
