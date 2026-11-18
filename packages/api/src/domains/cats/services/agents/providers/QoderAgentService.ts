@@ -322,8 +322,25 @@ export class QoderAgentService implements AgentService {
         stdinInput: preparedRequest.message.body,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         ...(options?.callbackEnv || options?.accountEnv
-          ? { env: { ...(options?.callbackEnv ?? {}), ...(options?.accountEnv ?? {}) } }
-          : {}),
+          ? {
+              env: {
+                // Strip ambient Qoder PATs inherited from the API host shell
+                // (buildChildEnv merges parent env). qodercli treats
+                // QODER_PERSONAL_ACCESS_TOKEN as the headless auth switch and
+                // routes every request through that account — an operator's
+                // personal PAT silently overrides the local browser login
+                // (e.g. an enterprise account), and when that PAT's model
+                // service is degraded every invocation dies with
+                // 'main model "…" is unavailable' (2026-11-18 root cause,
+                // reproduced with a single env var). The local login state is
+                // the source of truth the operator manages; pass a PAT only
+                // through an explicit accountEnv override below.
+                QODER_PERSONAL_ACCESS_TOKEN: null,
+                ...(options?.callbackEnv ?? {}),
+                ...(options?.accountEnv ?? {}),
+              },
+            }
+          : { env: { QODER_PERSONAL_ACCESS_TOKEN: null } }),
         ...(options?.signal ? { signal: options.signal } : {}),
         ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
         ...(options?.cliSessionId ? { cliSessionId: options.cliSessionId } : {}),
